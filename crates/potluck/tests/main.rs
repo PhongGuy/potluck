@@ -21,6 +21,7 @@ mod cli_version;
 mod config;
 mod credential;
 mod db;
+mod db_teams;
 mod db_tokens;
 mod db_users;
 mod deploy_files;

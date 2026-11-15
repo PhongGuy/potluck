@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 pub mod accounts;
 mod migrations;
+pub mod teams;
 
 /// A handle to the one connection to `server.db`, owned by a dedicated thread.
 /// Clones share the thread; `close` stops it.

@@ -94,6 +94,11 @@ impl Config {
     pub fn admin_socket(&self) -> PathBuf {
         self.data.join("admin.sock")
     }
+
+    /// `<data>/tmp`: where request bodies are spooled.
+    pub fn tmp_dir(&self) -> PathBuf {
+        self.data.join("tmp")
+    }
 }
 
 /// Why `serve` flags were refused.
@@ -134,6 +139,14 @@ pub enum ConfigError {
         /// The parser's complaint.
         reason: String,
     },
+    /// `--data` could not be made absolute (the working directory is unreadable).
+    #[error("--data {path} cannot be made absolute: {reason}")]
+    DataDir {
+        /// The directory as given.
+        path: PathBuf,
+        /// The io error's text.
+        reason: String,
+    },
 }
 
 impl TryFrom<ServeArgs> for Config {
@@ -147,9 +160,15 @@ impl TryFrom<ServeArgs> for Config {
                 reason: e.to_string(),
             });
         }
+        // Absolute, so git resolves `core.hooksPath` and repository paths the same way
+        // whatever directory it runs in.
+        let data = std::path::absolute(&args.data).map_err(|e| ConfigError::DataDir {
+            path: args.data.clone(),
+            reason: e.to_string(),
+        })?;
         Ok(Self {
             listen: args.listen,
-            data: args.data,
+            data,
             public_url,
             git: args.git,
             max_push_bytes: args.max_push_bytes,

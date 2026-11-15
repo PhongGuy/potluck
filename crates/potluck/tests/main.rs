@@ -18,4 +18,6 @@ mod config;
 mod db;
 mod health_check;
 mod measurements;
+mod repos;
 mod serve;
+mod slug;

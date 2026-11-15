@@ -17,7 +17,11 @@ fn defaults_match_the_spec() {
         config.listen(),
         "127.0.0.1:8080".parse::<SocketAddr>().unwrap()
     );
-    assert_eq!(config.data(), Path::new("./data"));
+    assert_eq!(
+        config.data(),
+        std::path::absolute("./data").unwrap(),
+        "data is stored absolute"
+    );
     assert_eq!(config.git(), Path::new("git"));
     assert_eq!(config.max_push_bytes(), 100 * 1024 * 1024);
     assert_eq!(config.log(), "info");
@@ -212,4 +216,32 @@ fn public_url_is_required() {
         .err()
         .expect("missing --public-url is an error");
     assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+}
+
+#[test]
+fn data_is_made_absolute_and_tmp_lives_under_it() {
+    let config = parse_config(&[
+        "--data",
+        "rel/data",
+        "--public-url",
+        "https://p.example.com",
+    ])
+    .unwrap();
+    assert!(config.data().is_absolute(), "{}", config.data().display());
+    assert!(
+        config.data().ends_with("rel/data"),
+        "{}",
+        config.data().display()
+    );
+    assert_eq!(config.hooks_dir(), config.data().join("hooks"));
+    assert_eq!(config.tmp_dir(), config.data().join("tmp"));
+    assert!(config.hooks_dir().is_absolute());
+    let config = parse_config(&[
+        "--data",
+        "/srv/potluck",
+        "--public-url",
+        "https://p.example.com",
+    ])
+    .unwrap();
+    assert_eq!(config.tmp_dir(), Path::new("/srv/potluck/tmp"));
 }

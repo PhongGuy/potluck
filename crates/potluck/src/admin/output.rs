@@ -53,6 +53,27 @@ pub(crate) fn users(items: &[Value]) -> String {
     )
 }
 
+/// `ID  NAME  PREFIX  CREATED  LAST USED  EXPIRES` rows from Token objects.
+pub(crate) fn tokens(items: &[Value]) -> String {
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|t| {
+            vec![
+                text(&t["id"]),
+                text(&t["name"]),
+                text(&t["prefix"]),
+                text(&t["created_at"]),
+                text(&t["last_used_at"]),
+                text(&t["expires_at"]),
+            ]
+        })
+        .collect();
+    table(
+        &["ID", "NAME", "PREFIX", "CREATED", "LAST USED", "EXPIRES"],
+        &rows,
+    )
+}
+
 /// A cell: strings as sent, null or missing as `-`, anything else in its JSON form.
 fn text(value: &Value) -> String {
     match value {

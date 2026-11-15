@@ -34,6 +34,9 @@ pub enum Noun {
     /// Accounts.
     #[command(subcommand)]
     User(users::UserCmd),
+    /// Personal access tokens.
+    #[command(subcommand)]
+    Token(users::TokenCmd),
 }
 
 /// Why a command failed; `main` prints it after `error: `.
@@ -108,6 +111,7 @@ pub async fn run(
     };
     match args.noun {
         Noun::User(cmd) => users::run(cmd, &mut cx).await,
+        Noun::Token(cmd) => users::run_token(cmd, &mut cx).await,
     }
 }
 

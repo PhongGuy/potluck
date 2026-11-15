@@ -1,27 +1,160 @@
 //! The listeners: TCP for clients and the mode-0600 admin Unix socket for the local CLI.
 
+use std::future::IntoFuture;
 use std::io;
-use std::path::Path;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 
 use axum::{Extension, Router};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
-use crate::api::Actor;
+use crate::api::{Actor, AppState};
+use crate::config::Config;
+use crate::db::{Db, DbError};
+
+/// Why the server could not start.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ServerError {
+    /// A directory under `--data` could not be created.
+    #[error("cannot create {path}: {source}")]
+    DataDir {
+        /// The directory that could not be created.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: io::Error,
+    },
+    /// The TCP listen address could not be bound.
+    #[error("cannot listen on {addr}: {source}")]
+    Listen {
+        /// The address from `--listen`.
+        addr: SocketAddr,
+        /// The underlying failure.
+        #[source]
+        source: io::Error,
+    },
+    /// The admin socket could not be bound, including when another instance holds it.
+    #[error("cannot bind the admin socket {path}: {source}")]
+    AdminSocket {
+        /// The socket path under `--data`.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: io::Error,
+    },
+    /// Opening or migrating `server.db` failed.
+    #[error(transparent)]
+    Db(#[from] DbError),
+}
+
+/// Creates `<data>`, `<data>/repos` and `<data>/hooks`, opens and migrates the database,
+/// binds `config.listen()` and the admin socket, and serves the API on both.
+pub async fn start(config: &Config) -> Result<Running, ServerError> {
+    for path in [
+        config.data().to_path_buf(),
+        config.repos_dir(),
+        config.hooks_dir(),
+    ] {
+        std::fs::create_dir_all(&path).map_err(|source| ServerError::DataDir { path, source })?;
+    }
+    let db = Db::open(&config.db_path())?;
+    db.migrate().await?;
+    let addr = config.listen();
+    let tcp = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| ServerError::Listen { addr, source })?;
+    let http_addr = tcp
+        .local_addr()
+        .map_err(|source| ServerError::Listen { addr, source })?;
+    let admin_socket = config.admin_socket();
+    let unix = bind_admin_socket(&admin_socket).map_err(|source| ServerError::AdminSocket {
+        path: admin_socket.clone(),
+        source,
+    })?;
+
+    // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
+    let router = crate::api::router(AppState::new(db.clone(), config.clone()));
+    let (stop, rx) = watch::channel(false);
+    let http = tokio::spawn(
+        axum::serve(tcp, with_actor(router.clone(), Actor::Anonymous))
+            .with_graceful_shutdown(stopped(rx.clone()))
+            .into_future(),
+    );
+    let admin = tokio::spawn(
+        axum::serve(unix, with_actor(router, Actor::System))
+            .with_graceful_shutdown(stopped(rx))
+            .into_future(),
+    );
+    Ok(Running {
+        http_addr,
+        admin_socket,
+        stop,
+        tasks: [http, admin],
+        db,
+    })
+}
+
+/// Resolves once the stop flag changes or its sender is gone.
+async fn stopped(mut rx: watch::Receiver<bool>) {
+    let _ = rx.changed().await;
+}
+
+/// A started server. Dropping it without `shutdown` leaves the tasks running until the
+/// runtime stops.
+#[non_exhaustive]
+pub struct Running {
+    http_addr: SocketAddr,
+    admin_socket: PathBuf,
+    stop: watch::Sender<bool>,
+    tasks: [JoinHandle<io::Result<()>>; 2],
+    db: Db,
+}
+
+impl std::fmt::Debug for Running {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Running")
+            .field("http_addr", &self.http_addr)
+            .field("admin_socket", &self.admin_socket)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Running {
+    /// The bound TCP address, with the port resolved when `--listen` asked for 0.
+    pub fn http_addr(&self) -> SocketAddr {
+        self.http_addr
+    }
+
+    /// The admin socket path.
+    pub fn admin_socket(&self) -> &Path {
+        &self.admin_socket
+    }
+
+    /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file.
+    pub async fn shutdown(self) {
+        let _ = self.stop.send(true);
+        for task in self.tasks {
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::error!("listener failed: {err}"),
+                Err(err) => tracing::error!("listener task failed: {err}"),
+            }
+        }
+        self.db.close();
+        // The socket may already be gone; only its absence matters.
+        let _ = std::fs::remove_file(&self.admin_socket);
+    }
+}
 
 /// The router with `actor` attached to every request as an `Extension`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by the server start, which follows")
-)]
 pub(crate) fn with_actor(router: Router, actor: Actor) -> Router {
     router.layer(Extension(actor))
 }
 
 /// Binds `path` as a mode-0600 Unix socket, replacing a stale file or dead socket. A socket
 /// that still answers means another potluck serves this data directory: `AddrInUse`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by the server start, which follows")
-)]
 pub(crate) fn bind_admin_socket(path: &Path) -> io::Result<tokio::net::UnixListener> {
     use std::os::unix::fs::PermissionsExt;
     // A socket that still accepts a connection belongs to a live server on this data

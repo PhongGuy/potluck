@@ -1,0 +1,129 @@
+//! `server::start` end to end on a temp data dir: TCP, the admin socket, the data layout,
+//! shutdown, and the `serve` subcommand's refusals through the binary.
+
+use potluck::server::{ServerError, start};
+use serde_json::Value;
+
+use crate::common::{config_for, potluck, unix_get};
+
+#[tokio::test]
+async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(&config_for(dir.path())).await.unwrap();
+    assert_eq!(running.http_addr().ip().to_string(), "127.0.0.1");
+    let body: Value = reqwest::get(format!("http://{}/api/v1/health", running.http_addr()))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["status"], "ok");
+    assert!(dir.path().join("server.db").is_file(), "server.db");
+    assert!(dir.path().join("repos").is_dir(), "repos/");
+    assert!(dir.path().join("hooks").is_dir(), "hooks/");
+    let version: i64 = rusqlite::Connection::open(dir.path().join("server.db"))
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 1, "migrations ran at start");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn start_creates_a_missing_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("nested").join("data");
+    let running = start(&config_for(&data)).await.unwrap();
+    assert!(data.join("server.db").is_file());
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn start_reports_an_unwritable_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let blocker = dir.path().join("file");
+    std::fs::write(&blocker, b"not a directory").unwrap();
+    let err = start(&config_for(&blocker.join("data")))
+        .await
+        .expect_err("a file cannot be a parent");
+    assert!(matches!(err, ServerError::DataDir { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn the_admin_socket_serves_the_api_and_shutdown_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("admin.sock"), b"stale").unwrap();
+    let running = start(&config_for(dir.path())).await.unwrap();
+    let socket = running.admin_socket().to_path_buf();
+    let (status, body) = unix_get(&socket, "/api/v1/health").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["status"],
+        "ok"
+    );
+    let (status, body) = unix_get(&socket, "/api/v1/nope").await;
+    assert_eq!(status, 404);
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["error"]["code"],
+        "not_found"
+    );
+    running.shutdown().await;
+    assert!(!socket.exists(), "shutdown removes the socket file");
+}
+
+#[tokio::test]
+async fn shutdown_closes_the_tcp_listener_and_a_restart_reuses_the_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let running = start(&config_for(dir.path())).await.unwrap();
+    let addr = running.http_addr();
+    running.shutdown().await;
+    assert!(
+        tokio::net::TcpStream::connect(addr).await.is_err(),
+        "the port is closed"
+    );
+    let again = start(&config_for(dir.path())).await.unwrap();
+    let body: Value = reqwest::get(format!("http://{}/api/v1/health", again.http_addr()))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["status"], "ok");
+    again.shutdown().await;
+}
+
+#[test]
+fn serve_without_public_url_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = potluck()
+        .args(["serve", "--data"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--public-url"));
+}
+
+#[test]
+fn serve_refuses_a_non_loopback_http_public_url_from_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = potluck()
+        .env("POTLUCK_PUBLIC_URL", "http://team.example.com")
+        .args(["serve", "--data"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--insecure-http"), "{stderr}");
+    assert!(stderr.contains("team.example.com"), "{stderr}");
+    assert!(
+        !dir.path().join("server.db").exists(),
+        "nothing is created before config passes"
+    );
+}

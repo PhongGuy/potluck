@@ -17,3 +17,4 @@ mod cli_version;
 mod config;
 mod db;
 mod measurements;
+mod serve;

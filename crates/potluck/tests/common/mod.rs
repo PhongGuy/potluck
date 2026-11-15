@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 /// The built `potluck` binary with an empty environment, so no `POTLUCK_*` variable or
 /// real config leaks in. Tests add what they need with `.env(..)`.
 pub fn potluck() -> Command {
@@ -62,4 +64,28 @@ pub async fn migrated_db() -> (tempfile::TempDir, Db) {
     let db = Db::open(&dir.path().join("server.db")).expect("open");
     db.migrate().await.expect("migrate");
     (dir, db)
+}
+
+/// One HTTP/1.1 GET over a Unix socket; returns the status code and the body.
+pub async fn unix_get(socket: &Path, target: &str) -> (u16, String) {
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .expect("connect admin socket");
+    let request = format!("GET {target} HTTP/1.1\r\nHost: potluck\r\nConnection: close\r\n\r\n");
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut raw = String::new();
+    stream
+        .read_to_string(&mut raw)
+        .await
+        .expect("read response");
+    let (head, body) = raw.split_once("\r\n\r\n").expect("header terminator");
+    let status = head
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status code");
+    (status, body.to_string())
 }

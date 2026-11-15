@@ -270,6 +270,7 @@ mod tests {
     use axum::{Extension, Router};
 
     use super::*;
+    use crate::admin::client::{AdminClient, Verb};
 
     fn actor_route() -> Router {
         Router::new().route(
@@ -286,9 +287,22 @@ mod tests {
         let task = tokio::spawn(
             axum::serve(listener, with_actor(actor_route(), Actor::System)).into_future(),
         );
-        let (status, body) = crate::unix_http::get(&socket, "/actor").await.unwrap();
-        assert_eq!(status, 200, "the test route answers over the socket");
-        assert_eq!(body, "System", "socket requests carry Actor::System");
+        let response = AdminClient::connect(&socket)
+            .await
+            .unwrap()
+            .send(Verb::Get, "/actor", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            200,
+            "the test route answers over the socket"
+        );
+        assert_eq!(
+            response.text(),
+            "System",
+            "socket requests carry Actor::System"
+        );
         task.abort();
     }
 
@@ -393,9 +407,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_fails_when_the_socket_is_missing() {
+    async fn connect_fails_when_the_socket_is_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let err = crate::unix_http::get(&dir.path().join("admin.sock"), "/api/v1/health")
+        let err = AdminClient::connect(&dir.path().join("admin.sock"))
             .await
             .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "got {err:?}");

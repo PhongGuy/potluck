@@ -177,13 +177,18 @@ impl IntoResponse for ApiError {
 }
 
 impl From<DbError> for ApiError {
-    // The operator gets the SQLite text in the log; the client gets a fixed message, since
-    // that text can name tables and values.
+    // A conflict is the client's mistake and its text is client-safe, so it passes through
+    // unlogged. For the rest the operator gets the SQLite text in the log and the client a
+    // fixed message, since that text can name tables and values.
     fn from(err: DbError) -> Self {
-        tracing::error!(error = %err, "database error");
         match err {
-            DbError::Closed => ApiError::unavailable("database unavailable"),
-            DbError::Sqlite(_) | DbError::SchemaTooNew { .. } => {
+            DbError::Conflict { what } => ApiError::conflict(what),
+            err @ DbError::Closed => {
+                tracing::error!(error = %err, "database error");
+                ApiError::unavailable("database unavailable")
+            }
+            err @ (DbError::Sqlite(_) | DbError::SchemaTooNew { .. }) => {
+                tracing::error!(error = %err, "database error");
                 ApiError::internal("database error")
             }
         }

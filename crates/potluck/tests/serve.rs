@@ -1,6 +1,9 @@
 //! `server::start` end to end on a temp data dir: TCP, the admin socket, the data layout,
 //! shutdown, and the `serve` subcommand's refusals through the binary.
 
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
 use potluck::server::{ServerError, start};
 use serde_json::Value;
 
@@ -21,6 +24,7 @@ async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
     assert!(dir.path().join("server.db").is_file(), "server.db");
     assert!(dir.path().join("repos").is_dir(), "repos/");
     assert!(dir.path().join("hooks").is_dir(), "hooks/");
+    assert!(dir.path().join("server.lock").is_file(), "server.lock");
     let version: i64 = rusqlite::Connection::open(dir.path().join("server.db"))
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -191,4 +195,98 @@ fn serve_refuses_oidc_flags_from_the_environment() {
         !dir.path().join("server.db").exists(),
         "nothing is created before config passes"
     );
+}
+
+#[tokio::test]
+async fn start_refuses_a_data_dir_another_server_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    let first = start(&config).await.unwrap();
+    let began = Instant::now();
+    let err = start(&config).await.expect_err("the data dir is held");
+    assert!(
+        began.elapsed() < Duration::from_secs(1),
+        "the refusal is immediate, took {:?}",
+        began.elapsed()
+    );
+    match &err {
+        ServerError::DataDirInUse { path } => assert_eq!(path, config.data()),
+        other => panic!("got {other:?}"),
+    }
+    assert!(err.to_string().contains("in use"), "{err}");
+    let body: Value = reqwest::get(format!("http://{}/api/v1/health", first.http_addr()))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["status"], "ok", "the first server keeps serving");
+    let (status, _) = unix_get(first.admin_socket(), "/api/v1/health").await;
+    assert_eq!(status, 200, "the first server's admin socket is untouched");
+    first.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stale_lock_file_does_not_block_a_start_and_shutdown_releases_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("server.lock"), b"left by a crash").unwrap();
+    let config = config_for(dir.path());
+    let running = start(&config).await.unwrap();
+    running.shutdown().await;
+    assert!(
+        dir.path().join("server.lock").is_file(),
+        "shutdown leaves the file; the kernel released the lock"
+    );
+    let again = start(&config).await.unwrap();
+    again.shutdown().await;
+}
+
+#[test]
+fn serve_exits_when_another_process_holds_the_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let held = std::fs::File::create(dir.path().join("server.lock")).unwrap();
+    held.try_lock().unwrap();
+    let mut child = potluck()
+        .args([
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--public-url",
+            "http://127.0.0.1:8080",
+            "--data",
+        ])
+        .arg(dir.path())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // A serve that ignored the lock would run forever; cap the wait so a regression fails
+    // instead of hanging the suite.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !exited {
+        let _ = child.kill();
+    }
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(exited, "serve kept running on a held data dir: {stderr}");
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("in use"), "{stderr}");
+    assert!(stderr.contains(dir.path().to_str().unwrap()), "{stderr}");
+    assert!(
+        !dir.path().join("server.db").exists(),
+        "the database is not opened before the lock"
+    );
+    assert!(
+        !dir.path().join("hooks").join("pre-receive").exists(),
+        "the hook is not written before the lock"
+    );
+    drop(held);
 }

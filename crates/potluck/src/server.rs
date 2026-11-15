@@ -1,5 +1,6 @@
 //! The listeners: TCP for clients and the mode-0600 admin Unix socket for the local CLI.
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::future::IntoFuture;
 use std::io;
 use std::net::SocketAddr;
@@ -17,14 +18,20 @@ use crate::db::{Db, DbError};
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ServerError {
-    /// A directory under `--data` could not be created.
+    /// A directory or the lock file under `--data` could not be created.
     #[error("cannot create {path}")]
     DataDir {
-        /// The directory that could not be created.
+        /// The directory or lock file that could not be created.
         path: PathBuf,
         /// The underlying failure.
         #[source]
         source: io::Error,
+    },
+    /// Another potluck holds `<data>/server.lock`, so it is serving this data directory.
+    #[error("the data directory {path} is in use by another potluck serve; stop it first")]
+    DataDirInUse {
+        /// The data directory from `--data`.
+        path: PathBuf,
     },
     /// The TCP listen address could not be bound.
     #[error("cannot listen on {addr}")]
@@ -58,9 +65,9 @@ pub enum ServerError {
     Db(#[from] DbError),
 }
 
-/// Creates `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, installs the pre-receive
-/// hook, opens and migrates the database, binds `config.listen()` and the admin socket, and
-/// serves the API on both.
+/// Creates `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, locks `<data>/server.lock`
+/// for the life of the server, installs the pre-receive hook, opens and migrates the database,
+/// binds `config.listen()` and the admin socket, and serves the API on both.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
     for path in [
         config.data().to_path_buf(),
@@ -70,6 +77,8 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     ] {
         std::fs::create_dir_all(&path).map_err(|source| ServerError::DataDir { path, source })?;
     }
+    // Lock before anything opens, writes or binds, so a second instance touches nothing.
+    let _lock = lock_data_dir(config)?;
     let hooks_dir = config.hooks_dir();
     std::env::current_exe()
         .and_then(|exe| crate::hooks::install(&hooks_dir, &exe, config.git()))
@@ -116,7 +125,31 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         stop,
         tasks: [http, admin],
         db,
+        _lock,
     })
+}
+
+/// Takes the exclusive advisory lock on `config.lock_path()`. The returned `File` is the lock:
+/// dropping it, or the process ending for any reason, releases it. The file itself stays.
+fn lock_data_dir(config: &Config) -> Result<File, ServerError> {
+    let path = config.lock_path();
+    // Never truncate: the file carries no content and another instance may be mid-open on it.
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|source| ServerError::DataDir {
+            path: path.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(ServerError::DataDirInUse {
+            path: config.data().to_path_buf(),
+        }),
+        Err(TryLockError::Error(source)) => Err(ServerError::DataDir { path, source }),
+    }
 }
 
 /// Resolves once the stop flag changes or its sender is gone.
@@ -133,6 +166,7 @@ pub struct Running {
     stop: watch::Sender<bool>,
     tasks: [JoinHandle<io::Result<()>>; 2],
     db: Db,
+    _lock: File,
 }
 
 impl std::fmt::Debug for Running {
@@ -160,7 +194,8 @@ impl Running {
         &self.db
     }
 
-    /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file.
+    /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file,
+    /// and leaves `server.lock` in place.
     pub async fn shutdown(self) {
         let _ = self.stop.send(true);
         for task in self.tasks {

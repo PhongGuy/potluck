@@ -43,6 +43,7 @@ mod kinds_generic;
 mod measurements;
 mod objects;
 mod password;
+mod push_refs;
 mod rate_limit;
 mod release_notes;
 mod release_workflow;

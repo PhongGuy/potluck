@@ -7,6 +7,8 @@ pub mod users;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
 use self::client::{AdminClient, ApiResponse, Verb};
@@ -77,6 +79,12 @@ pub enum AdminError {
     /// Writing to stdout failed.
     #[error("cannot write the output")]
     Output(#[source] io::Error),
+    /// `--password-stdin` could not read stdin, or it was not UTF-8.
+    #[error("cannot read the password from stdin")]
+    Stdin(#[source] io::Error),
+    /// The OS random number generator failed while generating a password.
+    #[error("cannot generate a password: the OS random number generator failed")]
+    Rng,
 }
 
 fn field_note(field: Option<&str>) -> String {
@@ -91,15 +99,11 @@ pub async fn run(
     stdin: &mut dyn Read,
     stdout: &mut dyn Write,
 ) -> Result<(), AdminError> {
-    // No verb reads stdin yet; `user create --password-stdin` will.
-    let _ = stdin;
-    let path = args.data.join("admin.sock");
-    let client = AdminClient::connect(&path)
-        .await
-        .map_err(|source| AdminError::Unreachable { path, source })?;
     let mut cx = Context {
-        client,
+        path: args.data.join("admin.sock"),
+        client: None,
         json: args.json,
+        stdin,
         out: stdout,
     };
     match args.noun {
@@ -107,10 +111,13 @@ pub async fn run(
     }
 }
 
-/// What every verb needs: the client, the output mode and the writer.
+/// What every verb needs: the socket, the output mode, stdin and the writer. The client
+/// connects on the first request, so a verb reads stdin before a wrong `--data` is reported.
 pub(crate) struct Context<'a> {
-    client: AdminClient,
+    path: PathBuf,
+    client: Option<AdminClient>,
     json: bool,
+    stdin: &'a mut dyn Read,
     out: &'a mut dyn Write,
 }
 
@@ -125,26 +132,114 @@ impl Context<'_> {
         ok: &[u16],
         rows: impl FnOnce(&Value) -> String,
     ) -> Result<(), AdminError> {
-        let response = self
-            .client
-            .send(verb, target, body)
-            .await
-            .map_err(|source| AdminError::Transport { source })?;
-        let Some(value) = expect(response, ok)? else {
+        let Some(value) = self.fetch(verb, target, body, ok).await? else {
             return Ok(());
         };
         let text = if self.json {
-            let mut pretty = serde_json::to_string_pretty(&value)
-                .map_err(|e| AdminError::Output(io::Error::other(e)))?;
-            pretty.push('\n');
-            pretty
+            pretty(&value)?
         } else {
             rows(&value)
         };
+        self.write(&text)
+    }
+
+    /// Sends one request expecting a status in `ok` and returns its JSON body, if any.
+    pub(crate) async fn fetch(
+        &mut self,
+        verb: Verb,
+        target: &str,
+        body: Option<&str>,
+        ok: &[u16],
+    ) -> Result<Option<Value>, AdminError> {
+        let client = match &mut self.client {
+            Some(client) => client,
+            None => {
+                let client = AdminClient::connect(&self.path).await.map_err(|source| {
+                    AdminError::Unreachable {
+                        path: self.path.clone(),
+                        source,
+                    }
+                })?;
+                self.client.insert(client)
+            }
+        };
+        let response = client
+            .send(verb, target, body)
+            .await
+            .map_err(|source| AdminError::Transport { source })?;
+        expect(response, ok)
+    }
+
+    /// The password from stdin when `from_stdin`, else a generated one.
+    pub(crate) fn new_password(&mut self, from_stdin: bool) -> Result<NewPassword, AdminError> {
+        NewPassword::obtain(from_stdin, self.stdin)
+    }
+
+    /// Whether `--json` was given.
+    pub(crate) fn json(&self) -> bool {
+        self.json
+    }
+
+    /// Writes `text` to stdout.
+    pub(crate) fn write(&mut self, text: &str) -> Result<(), AdminError> {
         self.out
             .write_all(text.as_bytes())
             .map_err(AdminError::Output)
     }
+}
+
+/// `value` as pretty JSON with a final newline.
+pub(crate) fn pretty(value: &Value) -> Result<String, AdminError> {
+    let mut text =
+        serde_json::to_string_pretty(value).map_err(|e| AdminError::Output(io::Error::other(e)))?;
+    text.push('\n');
+    Ok(text)
+}
+
+/// A password for a new or reset account, and whether this command made it up.
+pub(crate) struct NewPassword {
+    pub(crate) text: String,
+    pub(crate) generated: bool,
+}
+
+impl NewPassword {
+    /// The password from stdin when `from_stdin`, else a generated one.
+    pub(crate) fn obtain(from_stdin: bool, stdin: &mut dyn Read) -> Result<Self, AdminError> {
+        Ok(if from_stdin {
+            NewPassword {
+                text: password_from_stdin(stdin)?,
+                generated: false,
+            }
+        } else {
+            NewPassword {
+                text: generate_password()?,
+                generated: true,
+            }
+        })
+    }
+}
+
+/// 24 bytes from `getrandom::fill`, base64url without padding: 32 characters.
+pub(crate) fn generate_password() -> Result<String, AdminError> {
+    let mut bytes = [0u8; 24];
+    getrandom::fill(&mut bytes).map_err(|_| AdminError::Rng)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// All of stdin as UTF-8 (else `Stdin` with `InvalidData`), minus one trailing `\n` and a `\r`
+/// before it; nothing else is trimmed.
+pub(crate) fn password_from_stdin(stdin: &mut dyn Read) -> Result<String, AdminError> {
+    let mut bytes = Vec::new();
+    stdin.read_to_end(&mut bytes).map_err(AdminError::Stdin)?;
+    let mut text = String::from_utf8(bytes)
+        .map_err(|_| AdminError::Stdin(io::Error::from(io::ErrorKind::InvalidData)))?;
+    if text.ends_with('\n') {
+        text.pop();
+        if text.ends_with('\r') {
+            text.pop();
+        }
+    }
+    Ok(text)
 }
 
 /// `Ok(body)` when `response.status()` is in `ok`; a non-2xx whose body is the error model is

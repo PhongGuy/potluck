@@ -726,3 +726,19 @@ pub fn ref_event(block: &[String]) -> (String, String) {
         v["sha"].as_str().unwrap().to_owned(),
     )
 }
+
+/// `POST /session` over TCP: `Ok(token id)` on 201, else `Err(status)`.
+pub async fn session(addr: SocketAddr, username: &str, password: &str) -> Result<i64, u16> {
+    let r = client()
+        .post(format!("http://{addr}/api/v1/session"))
+        .json(&serde_json::json!({"username": username, "password": password, "token_name": "cli-test"}))
+        .send()
+        .await
+        .expect("session request");
+    let status = r.status().as_u16();
+    if status != 201 {
+        return Err(status);
+    }
+    let body: serde_json::Value = r.json().await.expect("json");
+    Ok(body["token_meta"]["id"].as_i64().expect("token id"))
+}

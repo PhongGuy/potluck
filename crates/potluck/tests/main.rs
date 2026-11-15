@@ -13,3 +13,4 @@ mod common;
 
 mod cli_version;
 mod config;
+mod db;

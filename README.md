@@ -173,7 +173,13 @@ podman volume export potluck-data > potluck-data.tar
 systemctl --user start potluck
 ```
 
-To restore with podman, stop the server and run `podman volume import potluck-data potluck-data.tar`.
+To restore with podman, stop the server and run `podman volume import potluck-data potluck-data.tar`. With docker, stop it and unpack the archive into the volume through a throwaway container:
+
+```sh
+docker stop potluck
+docker run --rm -v potluck-data:/data -v "$PWD":/backup debian:trixie-slim tar -C /data -xf /backup/potluck-data.tar
+docker start potluck
+```
 
 ## Verifying the image
 

@@ -127,3 +127,35 @@ fn draft_marks_a_pre_release_tag_as_a_prerelease() {
         assert!(draft.contains(needle), "draft lacks {needle:?}");
     }
 }
+
+#[test]
+fn build_refuses_a_bad_tag_before_it_logs_in_or_pushes() {
+    let jobs = release();
+    let build = job(&jobs, "build");
+    let check =
+        "if [[ $PUBLISH == true ]]; then scripts/release.sh version \"$REF_NAME\" > /dev/null; fi";
+    let at = build
+        .find(check)
+        .unwrap_or_else(|| panic!("build lacks {check:?}"));
+    for later in ["docker/login-action", "push-by-digest=true"] {
+        assert!(
+            at < build.find(later).unwrap(),
+            "the tag check comes after {later}"
+        );
+    }
+}
+
+#[test]
+fn attest_reads_contents_and_buildx_downloads_no_cached_binary() {
+    let jobs = release();
+    assert!(
+        job(&jobs, "attest").contains("contents: read"),
+        "attest lacks contents: read"
+    );
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml")).unwrap();
+    assert_eq!(
+        text.matches("docker/setup-buildx-action@").count(),
+        text.matches("cache-binary: false").count(),
+        "every setup-buildx sets cache-binary: false"
+    );
+}

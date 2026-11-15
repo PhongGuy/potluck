@@ -15,6 +15,8 @@ Environment=POTLUCK_PUBLIC_URL=https://potluck.example.com
 HealthCmd=potluck health-check
 HealthInterval=30s
 HealthStartPeriod=5s
+HealthTimeout=5s
+HealthRetries=3
 HealthOnFailure=kill
 Notify=healthy
 ReadOnly=true

@@ -1,8 +1,10 @@
 //! compose.yaml and deploy/potluck.container: the invariants both share, a compose
 //! validation when a compose tool is installed, and a Quadlet dry run when podman's
-//! generator is installed. Nothing here starts a container or touches user config.
+//! generator is installed, and the smoke script against a stub engine. Nothing here starts a
+//! container or touches user config.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -75,6 +77,9 @@ fn quadlet_hardens_the_container_and_restarts_on_failure() {
         "Tmpfs=/tmp",
         "HealthCmd=potluck health-check",
         "HealthOnFailure=kill",
+        // The same timeout and retries as the image's HEALTHCHECK and compose.yaml.
+        "HealthTimeout=5s",
+        "HealthRetries=3",
         "AutoUpdate=registry",
         "Restart=always",
         "WantedBy=default.target",
@@ -191,6 +196,7 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
         "THIRD_PARTY_NOTICES.md",
         "login ghcr.io",
         "POTLUCK_TRUSTED_PROXIES",
+        "debian:trixie-slim tar -C /data -xf /backup/potluck-data.tar",
     ] {
         assert!(readme.contains(needle), "README lacks {needle:?}");
     }
@@ -201,7 +207,73 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
         "apt-get source git",
         "dpkg-query",
         "MIT OR Apache-2.0",
+        "git and its dependencies",
+        "https://snapshot.debian.org/package/git/",
     ] {
         assert!(notices.contains(needle), "notices lack {needle:?}");
     }
+}
+
+/// An engine stub that logs each call's arguments and claims the image has a HEALTHCHECK.
+fn stub_engine(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("engine");
+    fs::write(
+        &path,
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\n\
+         if [[ $1 == image ]]; then echo '[CMD potluck health-check]'; fi\n",
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn smoke_script(dir: &Path, mode: &str, image: &str) -> (std::process::Output, String) {
+    let out = Command::new(repo_root().join("scripts/container-smoke.sh"))
+        .arg(mode)
+        .env("ENGINE", stub_engine(dir))
+        .env("IMAGE", image)
+        .output()
+        .unwrap();
+    let calls = fs::read_to_string(dir.join("calls")).unwrap_or_default();
+    (out, calls)
+}
+
+/// The stub answers no port, so the script stops after starting the container.
+#[test]
+fn the_smoke_run_is_hardened_like_the_deploy_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, calls) = smoke_script(dir.path(), "smoke", "localhost/potluck:stub");
+    let run = calls
+        .lines()
+        .find(|l| l.starts_with("run -d"))
+        .unwrap_or_else(|| panic!("no run call: {calls}"));
+    for needle in [
+        "--read-only",
+        "--tmpfs /tmp",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges",
+    ] {
+        assert!(run.contains(needle), "smoke run lacks {needle:?}: {run}");
+    }
+}
+
+#[test]
+fn build_mode_tags_the_given_image_and_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (out, calls) = smoke_script(dir.path(), "build", "localhost/potluck:stub-build");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|l| l.starts_with("build ") && l.contains("-t localhost/potluck:stub-build")),
+        "{calls}"
+    );
+    assert!(
+        !calls.contains("rmi"),
+        "build mode removed its image: {calls}"
+    );
 }

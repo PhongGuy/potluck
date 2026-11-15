@@ -2,7 +2,8 @@
 # Builds the Potluck image and runs the spec's smoke test on 127.0.0.1: health over TCP,
 # `potluck health-check` inside the container, the non-root uid, git present, and the
 # HEALTHCHECK stored in the image. Usage: scripts/container-smoke.sh [build|smoke|all]
-# with ENGINE=podman|docker (auto-detected) and IMAGE (required for smoke).
+# with ENGINE=podman|docker (auto-detected) and IMAGE (required for smoke; for build, the
+# tag to build, which is kept). Only `all` without IMAGE removes the image it built.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -20,6 +21,7 @@ fi
 run() { timeout 300 "$engine" "$@"; }
 
 stamp=$$-$RANDOM
+# The image the EXIT trap removes: set only when `all` builds under a throwaway tag of its own.
 built=""
 name=potluck-smoke-$stamp
 volume=$name-data
@@ -34,12 +36,13 @@ build() {
   local format=()
   # Podman's default OCI format drops HEALTHCHECK; docker has no such flag.
   [[ $engine != podman ]] || format=(--format docker)
-  built=localhost/potluck:smoke-$stamp
+  local tag=${IMAGE:-localhost/potluck:smoke-$stamp}
+  [[ $mode != all || -n ${IMAGE:-} ]] || built=$tag
   # No --pull flag: both engines pull a missing base by default, and docker's --pull is a bare boolean.
   # A release build of the crate and its dependencies takes minutes; the 300 s step budget is for runtime calls.
   timeout 1800 "$engine" build "${format[@]}" -f "$root/Containerfile" \
-    --build-arg VERSION=smoke --build-arg REVISION=local -t "$built" "$root"
-  IMAGE=$built
+    --build-arg VERSION=smoke --build-arg REVISION=local -t "$tag" "$root"
+  IMAGE=$tag
 }
 
 fail() { echo "smoke: $*" >&2; exit 1; }
@@ -50,7 +53,9 @@ smoke() {
   stored=$(run image inspect --format '{{.Config.Healthcheck.Test}}' "$IMAGE")
   [[ $stored == *health-check* ]] || fail "HEALTHCHECK missing from the image: $stored"
 
+  # Hardened as compose.yaml and the Quadlet unit run it.
   run run -d --rm --pull=never --name "$name" -v "$volume:/data" -p 127.0.0.1::8080 \
+    --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
     -e POTLUCK_PUBLIC_URL=http://127.0.0.1:8080 "$IMAGE" > /dev/null
   local addr port
   addr=$(run port "$name" 8080/tcp | head -n1 | sed 's/.*-> *//')

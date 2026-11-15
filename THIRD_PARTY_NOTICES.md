@@ -2,11 +2,11 @@
 
 Potluck itself is licensed under MIT OR Apache-2.0 and links no GPL code.
 
-The container image `ghcr.io/phongguy/potluck` is built on `debian:trixie-slim` and adds these Debian packages, unmodified, from Debian trixie:
+The container image `ghcr.io/phongguy/potluck` is built on `debian:trixie-slim` and adds these Debian packages, unmodified, from Debian trixie, together with the packages they depend on:
 
-## git
+## git and its dependencies
 
-Licensed under GPL-2.0-only. Potluck runs the `git` binary as a separate process and does not link it.
+git is licensed under GPL-2.0-only; each library it pulls in carries the licence recorded in its `/usr/share/doc/<package>/copyright` file inside the image. Potluck runs the `git` binary as a separate process and does not link it.
 
 The corresponding source is available from Debian:
 
@@ -18,6 +18,8 @@ To read the exact version shipped in an image, with podman (docker takes the sam
 ```sh
 podman run --rm --entrypoint dpkg-query ghcr.io/phongguy/potluck:latest -W git
 ```
+
+The pool keeps only current versions; the source of that exact version stays available at `https://snapshot.debian.org/package/git/<version>/`.
 
 ## ca-certificates
 

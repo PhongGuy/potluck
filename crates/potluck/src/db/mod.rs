@@ -10,7 +10,10 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub mod accounts;
+pub mod grants;
 mod migrations;
+pub mod teams;
+pub mod workspaces;
 
 /// A handle to the one connection to `server.db`, owned by a dedicated thread.
 /// Clones share the thread; `close` stops it.

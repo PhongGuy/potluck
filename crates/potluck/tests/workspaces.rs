@@ -171,6 +171,10 @@ async fn an_orphan_directory_is_a_conflict() {
     let (status, err) = create(&app, &root, "core", good()).await;
     assert_eq!(status, 409, "{err}");
     assert!(
+        repo_path(app._dir.path(), "core", "api").exists(),
+        "the orphan is the operator's and stays"
+    );
+    assert!(
         err["error"]["message"]
             .as_str()
             .unwrap()
@@ -182,4 +186,21 @@ async fn an_orphan_directory_is_a_conflict() {
         None,
         "no row for a workspace that could not be made"
     );
+}
+
+#[tokio::test]
+async fn a_failure_after_the_claim_removes_the_directory() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_team(&app.url(""), &root, "core").await;
+    let (status, body) = create(&app, &root, "core", good()).await;
+    assert_eq!(status, 201, "{body}");
+    // With the repository gone and the row kept, the next create claims the directory and
+    // then loses on the row.
+    let repo = repo_path(app._dir.path(), "core", "api");
+    std::fs::remove_dir_all(&repo).unwrap();
+    let (status, err) = create(&app, &root, "core", good()).await;
+    assert_eq!(status, 409, "{err}");
+    assert_eq!(err["error"]["code"], "conflict");
+    assert!(!repo.exists(), "the claimed directory was removed again");
 }

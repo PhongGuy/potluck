@@ -183,13 +183,9 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
 pub(crate) async fn run_token(cmd: TokenCmd, cx: &mut Context<'_>) -> Result<(), AdminError> {
     match cmd {
         TokenCmd::Revoke { id } => {
-            cx.fetch(Verb::Delete, &format!("/api/v1/tokens/{id}"), None, &[204])
-                .await?;
-            // A 204 has no body to print: JSON mode stays silent, a person gets one line.
-            if cx.json() {
-                return Ok(());
-            }
-            cx.write(&format!("revoked token {id}\n"))
+            let target = format!("/api/v1/tokens/{id}");
+            cx.confirm(Verb::Delete, &target, &format!("revoked token {id}\n"))
+                .await
         }
     }
 }

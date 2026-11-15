@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod output;
+pub mod teams;
 pub mod users;
 
 use std::io::{self, Read, Write};
@@ -38,6 +39,12 @@ pub enum Noun {
     /// Personal access tokens.
     #[command(subcommand)]
     Token(users::TokenCmd),
+    /// Teams and their members.
+    #[command(subcommand)]
+    Team(teams::TeamCmd),
+    /// Workspaces.
+    #[command(subcommand)]
+    Workspace(teams::WorkspaceCmd),
 }
 
 /// Why a command failed; `main` prints it after `error: `.
@@ -124,6 +131,8 @@ pub async fn run(
     match args.noun {
         Noun::User(cmd) => users::run(cmd, &mut cx).await,
         Noun::Token(cmd) => users::run_token(cmd, &mut cx).await,
+        Noun::Team(cmd) => teams::run_team(cmd, &mut cx).await,
+        Noun::Workspace(cmd) => teams::run_workspace(cmd, &mut cx).await,
     }
 }
 
@@ -184,6 +193,20 @@ impl Context<'_> {
             .await
             .map_err(|source| AdminError::Transport { source })?;
         expect(response, ok)
+    }
+
+    /// Sends one bodiless request expecting 204: a person gets `line`, JSON mode stays silent.
+    pub(crate) async fn confirm(
+        &mut self,
+        verb: Verb,
+        target: &str,
+        line: &str,
+    ) -> Result<(), AdminError> {
+        self.fetch(verb, target, None, &[204]).await?;
+        if self.json {
+            return Ok(());
+        }
+        self.write(line)
     }
 
     /// The password from stdin when `from_stdin`, else a generated one.

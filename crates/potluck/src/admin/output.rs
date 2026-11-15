@@ -90,3 +90,48 @@ fn flag(value: &Value) -> String {
         other => text(other),
     }
 }
+
+/// `SLUG  NAME  MEMBERS` rows from Team objects, members comma-joined, `-` when none.
+pub(crate) fn teams(items: &[Value]) -> String {
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|t| {
+            let members: Vec<String> = t["members"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(text)
+                .collect();
+            let members = if members.is_empty() {
+                "-".to_owned()
+            } else {
+                members.join(",")
+            };
+            vec![text(&t["slug"]), text(&t["name"]), members]
+        })
+        .collect();
+    table(&["SLUG", "NAME", "MEMBERS"], &rows)
+}
+
+/// `WORKSPACE  NAME  KIND  BRANCH  ROLE  GIT URL` rows from Workspace objects, the first
+/// column as `{team}/{slug}`.
+pub(crate) fn workspaces(items: &[Value]) -> String {
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|w| {
+            vec![
+                format!("{}/{}", text(&w["team"]), text(&w["slug"])),
+                text(&w["name"]),
+                text(&w["kind"]),
+                text(&w["default_branch"]),
+                text(&w["role"]),
+                text(&w["git_url"]),
+            ]
+        })
+        .collect();
+    table(
+        &["WORKSPACE", "NAME", "KIND", "BRANCH", "ROLE", "GIT URL"],
+        &rows,
+    )
+}

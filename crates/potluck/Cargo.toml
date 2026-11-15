@@ -30,6 +30,7 @@ clap.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 globset.workspace = true
+ipnet.workspace = true
 jiff.workspace = true
 regex.workspace = true
 rusqlite.workspace = true

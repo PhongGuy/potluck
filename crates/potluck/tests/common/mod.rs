@@ -351,6 +351,46 @@ pub fn work_tree(home: &Path, name: &str) -> std::path::PathBuf {
     work
 }
 
+/// A served API over a migrated database with fast hashing; the dir and the task live as long as it.
+pub struct TestApp {
+    pub _dir: tempfile::TempDir,
+    pub db: Db,
+    pub addr: SocketAddr,
+    pub _task: tokio::task::JoinHandle<()>,
+}
+
+impl TestApp {
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}/api/v1{path}", self.addr)
+    }
+}
+
+pub async fn test_app() -> TestApp {
+    let (dir, db, state) = test_state().await;
+    let (addr, task) = serve(potluck::api::router(state)).await;
+    TestApp {
+        _dir: dir,
+        db,
+        addr,
+        _task: task,
+    }
+}
+
+/// `POST /session` for an existing user; returns the minted token (named `test`).
+pub async fn login(app: &TestApp, username: &str, password: &str) -> String {
+    let r = client()
+        .post(app.url("/session"))
+        .json(
+            &serde_json::json!({"username": username, "password": password, "token_name": "test"}),
+        )
+        .send()
+        .await
+        .expect("session request");
+    assert_eq!(r.status().as_u16(), 201, "login as {username}");
+    let body: serde_json::Value = r.json().await.expect("json");
+    body["token"].as_str().expect("token").to_owned()
+}
+
 /// The repository root, two levels above this crate's manifest.
 pub fn repo_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")

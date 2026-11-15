@@ -36,5 +36,6 @@ mod password;
 mod rate_limit;
 mod repos;
 mod serve;
+mod session;
 mod slug;
 mod token;

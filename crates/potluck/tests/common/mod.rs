@@ -375,3 +375,18 @@ pub async fn test_app() -> TestApp {
         _task: task,
     }
 }
+
+/// `POST /session` for an existing user; returns the minted token (named `test`).
+pub async fn login(app: &TestApp, username: &str, password: &str) -> String {
+    let r = client()
+        .post(app.url("/session"))
+        .json(
+            &serde_json::json!({"username": username, "password": password, "token_name": "test"}),
+        )
+        .send()
+        .await
+        .expect("session request");
+    assert_eq!(r.status().as_u16(), 201, "login as {username}");
+    let body: serde_json::Value = r.json().await.expect("json");
+    body["token"].as_str().expect("token").to_owned()
+}

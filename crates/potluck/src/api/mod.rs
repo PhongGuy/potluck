@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use crate::auth::password::Passwords;
 use crate::auth::rate_limit::SessionLimits;
@@ -19,6 +19,7 @@ pub mod credential;
 pub mod error;
 pub mod json;
 pub mod objects;
+mod session;
 mod system;
 
 pub use actor::{Actor, AuthUser};
@@ -121,7 +122,8 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
 pub fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/health", get(system::health))
-        .route("/server", get(system::server));
+        .route("/server", get(system::server))
+        .route("/session", post(session::create));
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.
     Router::new()

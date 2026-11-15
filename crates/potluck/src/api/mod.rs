@@ -8,9 +8,11 @@ use axum::routing::get;
 use crate::config::Config;
 use crate::db::Db;
 
+mod actor;
 pub mod error;
 mod system;
 
+pub use actor::Actor;
 use error::ApiError;
 
 /// What every handler can reach: the database handle and the validated config (later

@@ -554,3 +554,24 @@ fn an_environment_file_over_the_cap_is_refused_as_unparsable_and_other_big_files
         "import mode scans the tip tree and finds it too"
     );
 }
+
+#[test]
+fn an_old_blob_over_the_cap_moved_under_environments_is_refused_as_unparsable() {
+    let s = Scratch::new();
+    let big = vec![b'a'; 1024 * 1024 + 1];
+    s.write("notes/big.bin", &big);
+    let first = s.stage_commit("big note");
+    assert!(
+        scan_main(&s, &env(Some("apinata")), &first).is_empty(),
+        "under notes/ an over-cap blob is skipped"
+    );
+    s.publish("main");
+    s.remove("notes/big.bin");
+    s.write("environments/big.yml", &big);
+    let tip = s.stage_commit("move");
+    assert_eq!(
+        scan_main(&s, &env(Some("apinata")), &tip),
+        ["refs/heads/main environments/big.yml secret_value env_unparsable"],
+        "the blob the server already holds is refused at the kind's path"
+    );
+}

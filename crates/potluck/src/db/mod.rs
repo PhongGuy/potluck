@@ -1,5 +1,5 @@
 //! The one connection to `server.db`, owned by a dedicated thread and reached through an
-//! async request/reply [`Db::call`].
+//! async request/reply `Db::call`.
 
 use std::path::Path;
 use std::sync::mpsc::Sender;

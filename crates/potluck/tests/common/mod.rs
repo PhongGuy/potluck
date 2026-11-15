@@ -4,6 +4,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 
+use clap::Parser;
+use potluck::config::{Config, ConfigError, ServeArgs};
+use potluck::db::Db;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The built `potluck` binary with an empty environment, so no `POTLUCK_*` variable or
@@ -13,10 +16,6 @@ pub fn potluck() -> Command {
     cmd.env_clear();
     cmd
 }
-
-use clap::Parser;
-use potluck::config::{Config, ConfigError, ServeArgs};
-use potluck::db::Db;
 
 #[derive(Parser)]
 struct ServeWrap {

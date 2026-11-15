@@ -390,3 +390,47 @@ pub async fn login(app: &TestApp, username: &str, password: &str) -> String {
     let body: serde_json::Value = r.json().await.expect("json");
     body["token"].as_str().expect("token").to_owned()
 }
+
+/// The repository root, two levels above this crate's manifest.
+pub fn repo_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// The jobs of a workflow as `(name, text)` pairs: a job is a key indented two spaces under
+/// the column-0 `jobs:` key, and its text runs to the next such key or the next column-0 key.
+/// A blank line or a column-0 comment inside a job does not end it.
+pub fn jobs(workflow: &str) -> Vec<(String, String)> {
+    // A line-shaped walk rather than a YAML parse: the workflows are ours and every invariant
+    // the tests check is line-shaped, so a YAML crate would exist only for this.
+    let mut jobs: Vec<(String, String)> = Vec::new();
+    let mut in_jobs = false;
+    for line in workflow.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let column0_key = !line.is_empty() && !line.starts_with(' ') && !line.starts_with('#');
+        if column0_key {
+            break;
+        }
+        let job_key = line.strip_prefix("  ").and_then(|rest| {
+            let name = rest.strip_suffix(':')?;
+            let ident = !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+            ident.then_some(name)
+        });
+        if let Some(name) = job_key {
+            jobs.push((name.to_owned(), String::new()));
+        }
+        if let Some((_, text)) = jobs.last_mut() {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    jobs
+}

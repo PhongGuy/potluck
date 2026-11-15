@@ -1,0 +1,219 @@
+# Builds the container image natively on amd64 and arm64 from a v* tag, merges the two into
+# one manifest list on GHCR, attests its digest and drafts a release a human publishes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and smoke-test only; push, attest and draft nothing
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# A release stopped halfway could leave a manifest list without its attestation.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/phongguy/potluck
+  # Only a v tag publishes: a dispatch on any other tag builds and smoke-tests only.
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-26.04 }
+          - { arch: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write # push this architecture's image by digest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cache-binary: false
+      # A publishing run refuses a malformed tag here, before it logs in or pushes anything.
+      - id: meta
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ $PUBLISH == true ]]; then scripts/release.sh version "$REF_NAME" > /dev/null; fi
+          echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
+      # Loaded into the local daemon for the smoke test; attestations need the registry exporter.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          load: true
+          provenance: false
+          sbom: false
+          tags: localhost/potluck:smoke
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.meta.outputs.created }}
+      - name: Smoke test
+        run: ENGINE=docker IMAGE=localhost/potluck:smoke scripts/container-smoke.sh smoke
+      - if: env.PUBLISH == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # The same layers as the smoke build, exported with SBOM and provenance, pushed by digest only.
+      - if: env.PUBLISH == 'true'
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/${{ matrix.arch }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.meta.outputs.created }}
+      # Checks the pushed image before any tag can point at it: health check, user and platform.
+      - if: env.PUBLISH == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker pull --platform "linux/$ARCH" "$IMAGE@$DIGEST"
+          docker image inspect "$IMAGE@$DIGEST" | jq -e --arg arch "$ARCH" '.[0]
+            | (.Config.Healthcheck.Test | index("health-check")) != null
+              and .Config.User == "65532:65532"
+              and .Os == "linux" and .Architecture == $arch'
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push the manifest list and its tags
+    outputs:
+      digest: ${{ steps.index.outputs.digest }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          cache-binary: false
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create the manifest list
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          sources=()
+          for d in *; do
+            [[ $d =~ ^[0-9a-f]{64}$ ]] || { echo "::error::not a digest: $d"; exit 1; }
+            sources+=("$IMAGE@sha256:$d")
+          done
+          [ "${#sources[@]}" -eq 2 ] || { echo "::error::expected 2 digests, got ${#sources[@]}"; exit 1; }
+          tags=(-t "$IMAGE:$REF_NAME")
+          # latest never moves on a pre-release such as v1.0.0-rc.1.
+          if [[ $REF_NAME =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then tags+=(-t "$IMAGE:latest"); fi
+          docker buildx imagetools create "${tags[@]}" \
+            --annotation "index:org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --annotation "index:org.opencontainers.image.version=$REF_NAME" \
+            --annotation "index:org.opencontainers.image.revision=$GITHUB_SHA" \
+            --annotation "index:org.opencontainers.image.licenses=MIT OR Apache-2.0" \
+            "${sources[@]}"
+      - id: index
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        # Fails closed: a failed inspect or a malformed digest stops here, not in attest or draft.
+        run: |
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$IMAGE:$REF_NAME" --format '{{json .Manifest}}' |
+            jq -re '.digest | select(test("^sha256:[0-9a-f]{64}$"))')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  # The only job bound to the release environment: it builds nothing and checks nothing out.
+  attest:
+    needs: merge
+    # actions/attest needs a public repository; a private one skips here and drafts without it.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && !github.event.repository.private }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # the attestation's signing certificate
+      attestations: write # store the attestation
+      artifact-metadata: write # link it to the image
+      packages: write # push the attestation beside the image
+    steps:
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.merge.outputs.digest }}
+          push-to-registry: true
+
+  draft:
+    needs: [merge, attest]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && needs.merge.result == 'success' && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+          ATTESTED: ${{ needs.attest.result == 'success' }}
+        run: |
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no index digest from merge: '$DIGEST'"; exit 1; }
+          version=$(scripts/release.sh version "$REF_NAME")
+          scripts/release.sh notes "$REF_NAME" "$GITHUB_REPOSITORY" "$DIGEST" release-notes.md
+          # A pre-release tag such as v1.0.0-rc.1 must never become the repository's Latest release.
+          flags=(--draft --verify-tag)
+          if [[ $REF_NAME == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" "${flags[@]}" \
+            --title "Potluck $version" --notes-file release-notes.md

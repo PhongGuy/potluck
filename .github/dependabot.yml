@@ -19,3 +19,13 @@ updates:
       actions:
         patterns:
           - "*"
+
+  # The Containerfile's base images, monthly, as one grouped PR.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      docker:
+        patterns:
+          - "*"

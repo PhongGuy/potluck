@@ -1,0 +1,32 @@
+# Potluck as a systemd service under rootless podman: copy to ~/.config/containers/systemd/,
+# set the public URL below, then `systemctl --user daemon-reload && systemctl --user start potluck`.
+[Unit]
+Description=Potluck team server
+
+[Container]
+Image=ghcr.io/phongguy/potluck:latest
+ContainerName=potluck
+AutoUpdate=registry
+Pull=newer
+PublishPort=127.0.0.1:8080:8080
+Volume=potluck-data:/data
+# The URL users reach the server at; to keep it in a file instead, use EnvironmentFile=.
+Environment=POTLUCK_PUBLIC_URL=https://potluck.example.com
+HealthCmd=potluck health-check
+HealthInterval=30s
+HealthStartPeriod=5s
+HealthTimeout=5s
+HealthRetries=3
+HealthOnFailure=kill
+Notify=healthy
+ReadOnly=true
+Tmpfs=/tmp
+NoNewPrivileges=true
+DropCapability=ALL
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

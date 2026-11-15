@@ -17,8 +17,9 @@ use potluck::auth::token::MintedToken;
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
 use potluck::db::accounts::{NewToken, NewUser, UserRecord};
-use potluck::git::access::{Access, BoxFuture, GitAccess};
+use potluck::git::access::{Access, BoxFuture, GitAccess, PushContext};
 use potluck::git::{GitLimits, Repos};
+use potluck::notices::Notices;
 use potluck::role::Role;
 use potluck::server::{Running, start};
 use potluck::slug::Slug;
@@ -239,6 +240,7 @@ pub struct TestAccess {
     workspaces: HashSet<(String, String)>,
     grants: HashMap<(String, String, String), Role>,
     hook_env: Vec<(String, String)>,
+    push: Option<PushContext>,
 }
 
 impl TestAccess {
@@ -258,6 +260,11 @@ impl TestAccess {
     /// Every granted `Access` carries `key=value` for the hook.
     pub fn hook_env(mut self, key: &str, value: &str) -> Self {
         self.hook_env.push((key.into(), value.into()));
+        self
+    }
+    /// Every granted `Access` carries `push` (so pushes are recorded against it).
+    pub fn push_context(mut self, push: PushContext) -> Self {
+        self.push = Some(push);
         self
     }
 }
@@ -288,10 +295,14 @@ impl GitAccess for TestAccess {
                     ws.to_string(),
                 ))
                 .ok_or_else(|| ApiError::not_found("no such workspace"))?;
-            Ok(self
+            let access = self
                 .hook_env
                 .iter()
-                .fold(Access::new(*role), |a, (k, v)| a.with_hook_env(k, v)))
+                .fold(Access::new(*role), |a, (k, v)| a.with_hook_env(k, v));
+            Ok(match &self.push {
+                Some(ctx) => access.with_push(ctx.clone()),
+                None => access,
+            })
         })
     }
 }
@@ -303,6 +314,8 @@ pub struct GitServer {
     pub dir: tempfile::TempDir,
     pub base: String,
     pub repos: Repos,
+    pub db: Db,
+    pub notices: Notices,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -356,15 +369,54 @@ pub async fn git_server_at(
     let db = Db::open(&config.db_path()).expect("open");
     db.migrate().await.expect("migrate");
     let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
-    let mut state = AppState::new(db, config).with_git_access(Arc::new(access));
+    let mut state = AppState::new(db.clone(), config).with_git_access(Arc::new(access));
     if let Some(limits) = limits {
         state = state.with_git_limits(limits);
     }
+    let notices = state.notices().clone();
     let (addr, task) = serve(router(state)).await;
     GitServer {
         dir,
         base: format!("http://{addr}"),
         repos,
+        db,
+        notices,
+        _task: task,
+    }
+}
+
+/// `server` served again on a new port with `access` as its resolver; the data dir, database
+/// and repositories are the same. The old listener task is aborted first, so no stray server
+/// outlives the test.
+pub async fn git_server_with(server: GitServer, access: TestAccess) -> GitServer {
+    let GitServer {
+        dir,
+        repos,
+        db,
+        _task: old,
+        ..
+    } = server;
+    old.abort();
+    // The hook is installed and the database migrated already; only the router is new.
+    let data = dir.path().to_str().expect("utf-8 temp path").to_owned();
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        &data,
+        "--public-url",
+        "http://127.0.0.1:8080",
+    ])
+    .expect("test config");
+    let state = AppState::new(db.clone(), config).with_git_access(Arc::new(access));
+    let notices = state.notices().clone();
+    let (addr, task) = serve(router(state)).await;
+    GitServer {
+        dir,
+        base: format!("http://{addr}"),
+        repos,
+        db,
+        notices,
         _task: task,
     }
 }
@@ -573,3 +625,69 @@ pub fn jobs(workflow: &str) -> Vec<(String, String)> {
 /// The apinata seed commit (`Repos::seed_commit`, the Potluck identity, message
 /// `Seed apinata workspace`) on a server whose public host is `127.0.0.1`.
 pub const SEED_COMMIT: &str = "1f7fbc63392e202f4f1eae88ba7e2509cd732d33";
+
+/// A reader over an open SSE response, block by block, through `Response::chunk`.
+pub struct SseReader {
+    response: reqwest::Response,
+    buf: Vec<u8>,
+}
+
+impl SseReader {
+    /// `GET url` with `token`; the reader on 200, else the status.
+    pub async fn open(url: &str, token: &str) -> Result<SseReader, u16> {
+        let r = client()
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("request");
+        if r.status().as_u16() != 200 {
+            return Err(r.status().as_u16());
+        }
+        assert!(
+            r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        Ok(SseReader {
+            response: r,
+            buf: Vec::new(),
+        })
+    }
+
+    /// The lines of the next block that is not a comment-only keep-alive; `None` once the
+    /// server closed the stream.
+    pub async fn next_block(&mut self) -> Option<Vec<String>> {
+        loop {
+            if let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
+                let block: Vec<u8> = self.buf.drain(..end + 2).collect();
+                let lines: Vec<String> = String::from_utf8(block)
+                    .expect("utf-8")
+                    .lines()
+                    .filter(|l| !l.is_empty() && !l.starts_with(':'))
+                    .map(str::to_owned)
+                    .collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                return Some(lines);
+            }
+            match self.response.chunk().await.expect("read") {
+                Some(bytes) => self.buf.extend_from_slice(&bytes),
+                None => return None,
+            }
+        }
+    }
+}
+
+/// `(ref, sha)` of a `ref` event block.
+pub fn ref_event(block: &[String]) -> (String, String) {
+    assert_eq!(block[0], "event: ref", "{block:?}");
+    let data = block[1].strip_prefix("data: ").expect("data line");
+    let v: serde_json::Value = serde_json::from_str(data).expect("json");
+    (
+        v["ref"].as_str().unwrap().to_owned(),
+        v["sha"].as_str().unwrap().to_owned(),
+    )
+}

@@ -11,15 +11,19 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
+use crate::notices::Notices;
 
 mod actor;
 pub mod auth;
 pub mod client_ip;
 pub mod credential;
 pub mod error;
+mod events;
 mod grants;
 pub mod json;
 pub mod objects;
+mod overrides;
+pub(crate) mod pushes;
 mod session;
 mod system;
 mod teams;
@@ -41,6 +45,7 @@ pub struct AppState {
     git: Arc<GitEngine>,
     passwords: Passwords,
     session_limits: Arc<SessionLimits>,
+    notices: Notices,
 }
 
 impl AppState {
@@ -57,6 +62,7 @@ impl AppState {
             git,
             passwords: Passwords::new(),
             session_limits: Arc::new(SessionLimits::default()),
+            notices: Notices::new(),
         }
     }
 
@@ -106,6 +112,11 @@ impl AppState {
         &self.db
     }
 
+    /// The ref notice registry, shared by every clone of the state.
+    pub fn notices(&self) -> &Notices {
+        &self.notices
+    }
+
     /// The validated server configuration.
     pub fn config(&self) -> &Config {
         &self.config
@@ -147,10 +158,19 @@ pub fn router(state: AppState) -> Router {
             "/workspaces/{team}/{ws}",
             get(workspaces::get).delete(workspaces::delete),
         )
+        .route("/workspaces/{team}/{ws}/events", get(events::stream))
         .route("/workspaces/{team}/{ws}/grants", get(grants::list))
         .route(
             "/workspaces/{team}/{ws}/grants/{kind}/{name}",
             put(grants::put).delete(grants::delete),
+        )
+        .route(
+            "/workspaces/{team}/{ws}/overrides",
+            get(overrides::list).post(overrides::arm),
+        )
+        .route(
+            "/workspaces/{team}/{ws}/overrides/{id}",
+            delete(overrides::disarm),
         );
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.

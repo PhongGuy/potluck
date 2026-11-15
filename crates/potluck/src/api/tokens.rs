@@ -129,6 +129,7 @@ pub(super) async fn revoke(
         return Err(missing());
     }
     if state.db().delete_token(id).await? {
+        state.notices().close_token(id);
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(missing())

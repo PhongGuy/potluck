@@ -112,6 +112,37 @@ fn a_malformed_line_and_a_missing_git_fail_closed() {
 }
 
 #[test]
+fn a_git_failure_reason_carries_no_git_output_paths_or_control_bytes() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("clean");
+    let marker = "/srv/potluck-marker/creds.txt";
+    let fake = s.script(
+        "failing-git",
+        &format!("printf 'fatal: {marker} \\033[31m\\a\\n' >&2\nexit 128\n"),
+    );
+    let out = run_hook(&s, &[("POTLUCK_GIT", fake.to_str().unwrap())], &line(&tip));
+    assert_eq!(out.status.code(), Some(1));
+    let errors: Vec<&[u8]> = out
+        .stderr
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|l| l.starts_with(b"potluck-error "))
+        .collect();
+    assert_eq!(errors.len(), 1, "{}", stderr(&out));
+    let body = errors[0].strip_suffix(b"\n").expect("ends in a newline");
+    assert!(
+        !String::from_utf8_lossy(body).contains("potluck-marker"),
+        "no git output: {}",
+        stderr(&out)
+    );
+    assert!(
+        body.iter().all(|&b| b >= 0x20),
+        "no control bytes: {:?}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn an_override_accepts_without_touching_git() {
     let s = Scratch::new();
     s.write(".env", b"x\n");

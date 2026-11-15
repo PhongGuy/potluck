@@ -6,8 +6,8 @@ pub mod scan;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
-use crate::secret_check::git::{Git, RefUpdate};
-use crate::secret_check::scan::{HookEnv, report, scan};
+use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
+use crate::secret_check::scan::{HookEnv, ScanError, report, scan};
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
 /// `Git::from_env()`, writes the report to stderr. Exit 0 accepts; exit 1 refuses. A set but
@@ -31,25 +31,28 @@ pub fn run_pre_receive() -> ExitCode {
             ExitCode::FAILURE
         }
         Err(reason) => {
-            // One line whatever the reason says, so the client's line parser stays in step.
-            let _ = writeln!(err, "potluck-error {}", reason.replace(['\n', '\r'], " "));
+            let _ = writeln!(err, "potluck-error {reason}");
             ExitCode::FAILURE
         }
     }
 }
 
-/// Parses stdin and scans it; the error is the reason for the `potluck-error` line, built
-/// from `ParseError` or `ScanError`, neither of which carries blob content.
+/// Parses stdin and scans it; the error is the reason for the `potluck-error` line, a fixed
+/// ASCII phrase per failure that never carries git's output, a path or a ref name.
 fn check(env: &HookEnv) -> Result<Vec<scan::Rejection>, String> {
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)
-        .map_err(|e| format!("cannot read stdin: {e}"))?;
+        .map_err(|_| "unreadable stdin".to_owned())?;
     let updates = input
         .lines()
         .filter(|l| !l.is_empty())
         .map(RefUpdate::parse_line)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    scan(env, &updates, &Git::from_env()).map_err(|e| e.to_string())
+        .map_err(|_| "malformed ref line".to_owned())?;
+    scan(env, &updates, &Git::from_env()).map_err(|ScanError::Git(e)| match e {
+        GitCmdError::Spawn { subcommand, .. } => format!("cannot run git {subcommand}"),
+        GitCmdError::Failed { subcommand, .. } => format!("git {subcommand} failed"),
+        GitCmdError::Output { subcommand, .. } => format!("unexpected git {subcommand} output"),
+    })
 }

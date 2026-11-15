@@ -101,9 +101,9 @@ impl Repos {
 
     /// One root commit on `refs/heads/<branch>` of the bare repository at `repo`, holding
     /// exactly `files` (root-level `(name, bytes)` pairs, mode 100644) as `author <email>`,
-    /// dated `SEED_DATE`, with `message`. Refuses a name that is empty, `.` or `..`, or
-    /// carries `/`, `\n` or `\t` (`SeedPath`) before spawning anything, and a branch that
-    /// already exists (`Seed` at step `update-ref`). Returns the commit sha.
+    /// dated `SEED_DATE`, with `message`. Refuses a name that is empty, `.` or `..`, carries
+    /// `/`, `\n` or `\t`, or repeats an earlier one (`SeedPath`) before spawning anything, and
+    /// a branch that already exists (`Seed` at step `update-ref`). Returns the commit sha.
     pub async fn seed_commit(
         &self,
         repo: &Path,
@@ -113,10 +113,15 @@ impl Repos {
         email: &str,
         message: &str,
     ) -> Result<String, RepoError> {
-        // `mktree` input is tab- and line-delimited and takes no nesting, so a bad name is
-        // refused up front rather than half-way through the plumbing.
+        // `mktree` input is tab- and line-delimited, takes no nesting and writes a repeated name
+        // as a tree fsck rejects, so a bad name is refused before any plumbing runs.
+        let mut seen = std::collections::HashSet::new();
         if let Some((name, _)) = files.iter().find(|(name, _)| {
-            name.is_empty() || *name == "." || *name == ".." || name.contains(['/', '\n', '\t'])
+            name.is_empty()
+                || *name == "."
+                || *name == ".."
+                || name.contains(['/', '\n', '\t'])
+                || !seen.insert(*name)
         }) {
             return Err(RepoError::SeedPath {
                 name: (*name).to_owned(),
@@ -264,7 +269,7 @@ pub enum RepoError {
         /// git's stderr, trimmed.
         stderr: String,
     },
-    /// A seed file name is empty, `.`, `..`, or carries `/`, a newline or a tab.
+    /// A seed file name is empty, `.`, `..`, carries `/`, a newline or a tab, or is repeated.
     #[error("seed file name {name:?} must be a plain root-level file name")]
     SeedPath {
         /// The offending name.

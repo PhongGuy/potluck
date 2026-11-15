@@ -395,7 +395,6 @@ pub fn jobs(workflow: &str) -> Vec<(String, String)> {
     jobs
 }
 
-/// The sha of the apinata seed commit on a server whose public host is `127.0.0.1`
-/// (`Repos::seed_commit` with the two seed files, the Potluck identity, `SEED_DATE` and the
-/// message `Seed apinata workspace`). Measured on git 2.56.1; the API tests pin it too.
+/// The apinata seed commit (`Repos::seed_commit`, the Potluck identity, message
+/// `Seed apinata workspace`) on a server whose public host is `127.0.0.1`.
 pub const SEED_COMMIT: &str = "1f7fbc63392e202f4f1eae88ba7e2509cd732d33";

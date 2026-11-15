@@ -297,3 +297,25 @@ async fn seed_commit_refuses_nested_paths_and_an_existing_branch() {
         "a missing repository fails at the first step: {err:?}"
     );
 }
+
+#[tokio::test]
+async fn seed_commit_refuses_bad_and_duplicate_names_before_spawning_git() {
+    let dir = tempfile::tempdir().unwrap();
+    // No git binary at all: only a refusal ahead of every spawn can produce `SeedPath`.
+    let r = Repos::new(dir.path().to_path_buf(), dir.path().join("no-such-git"));
+    let repo = dir.path().join("core").join("api.git");
+    let cases: [&[(&str, &[u8])]; 2] = [
+        &[("ok", b"1"), ("sub/x", b"2")],
+        &[("same", b"1"), ("same", b"2")],
+    ];
+    for files in cases {
+        let err = r
+            .seed_commit(&repo, "main", files, "P", "p@h", "m")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RepoError::SeedPath { .. }),
+            "{files:?}: got {err:?}"
+        );
+    }
+}

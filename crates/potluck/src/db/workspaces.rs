@@ -123,7 +123,7 @@ pub(super) fn workspace_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceRec
 }
 
 impl Db {
-    /// Inserts with `created_at = now`; `Conflict` ("workspace {slug} exists in team {team_id}")
+    /// Inserts with `created_at = now`; `Conflict` ("workspace {slug} exists in this team")
     /// on the `(team_id, slug)` key. The kind must pass the schema's CHECK.
     pub async fn create_workspace(&self, ws: NewWorkspace) -> Result<WorkspaceRecord, DbError> {
         // The check and the insert share one job, so no other insert can slip between them;
@@ -136,7 +136,7 @@ impl Db {
             )?;
             if taken {
                 return Err(DbError::Conflict {
-                    what: format!("workspace {} exists in team {}", ws.slug, ws.team_id),
+                    what: format!("workspace {} exists in this team", ws.slug),
                 });
             }
             conn.execute(

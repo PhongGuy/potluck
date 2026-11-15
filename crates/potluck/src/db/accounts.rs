@@ -4,7 +4,7 @@
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 
-use super::{Db, DbError};
+use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 
 /// Prints `<redacted>` in place of a secret, so a `Debug` derive-alike can show the field exists.
@@ -407,19 +407,9 @@ fn select_user(conn: &rusqlite::Connection, username: &str) -> Result<Option<Use
 impl Db {
     /// Inserts with `created_at = clock::now_rfc3339()`; `Conflict` when the username exists.
     pub async fn create_user(&self, user: NewUser) -> Result<UserRecord, DbError> {
-        // The check and the insert share one job, and the database thread runs one job at a
-        // time, so no other insert can slip between them.
+        // The UNIQUE constraint is the duplicate check, so a writer on another connection is
+        // caught too.
         self.call(move |conn| {
-            let taken: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM users WHERE username = ?1)",
-                [&user.username],
-                |row| row.get(0),
-            )?;
-            if taken {
-                return Err(DbError::Conflict {
-                    what: format!("username {} is taken", user.username),
-                });
-            }
             conn.execute(
                 "INSERT INTO users \
                  (username, display_name, email, password_hash, server_admin, created_at) \
@@ -432,7 +422,10 @@ impl Db {
                     user.server_admin,
                     clock::now_rfc3339(),
                 ],
-            )?;
+            )
+            .map_err(|e| {
+                conflict_on_unique(e, || format!("username {} is taken", user.username))
+            })?;
             let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
             Ok(conn.query_row(&sql, [conn.last_insert_rowid()], user_from_row)?)
         })

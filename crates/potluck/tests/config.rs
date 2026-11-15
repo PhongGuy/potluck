@@ -41,6 +41,7 @@ fn derived_paths_live_under_data() {
     assert_eq!(config.repos_dir(), Path::new("/srv/potluck/repos"));
     assert_eq!(config.hooks_dir(), Path::new("/srv/potluck/hooks"));
     assert_eq!(config.admin_socket(), Path::new("/srv/potluck/admin.sock"));
+    assert_eq!(config.lock_path(), Path::new("/srv/potluck/server.lock"));
 }
 
 #[test]

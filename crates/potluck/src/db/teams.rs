@@ -2,7 +2,7 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use super::{Db, DbError};
+use super::{Db, DbError, conflict_on_unique};
 use crate::slug::Slug;
 
 /// A `teams` row.
@@ -44,22 +44,14 @@ impl Db {
     pub async fn create_team(&self, slug: &Slug, name: &str) -> Result<TeamRecord, DbError> {
         let slug = slug.as_str().to_owned();
         let name = name.to_owned();
-        // The check and the insert share one job, so no other insert can slip between them.
+        // The UNIQUE constraint is the duplicate check, so a writer on another connection is
+        // caught too.
         self.call(move |conn| {
-            let taken: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM teams WHERE slug = ?1)",
-                [&slug],
-                |row| row.get(0),
-            )?;
-            if taken {
-                return Err(DbError::Conflict {
-                    what: format!("team slug {slug} is taken"),
-                });
-            }
             conn.execute(
                 "INSERT INTO teams (slug, name) VALUES (?1, ?2)",
                 params![slug, name],
-            )?;
+            )
+            .map_err(|e| conflict_on_unique(e, || format!("team slug {slug} is taken")))?;
             Ok(TeamRecord {
                 id: conn.last_insert_rowid(),
                 slug,

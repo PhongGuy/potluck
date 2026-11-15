@@ -59,6 +59,19 @@ impl From<rusqlite::Error> for DbError {
     }
 }
 
+/// Maps a failed write: a UNIQUE or PRIMARY KEY violation becomes `Conflict` with `what()`,
+/// any other failure `Sqlite`, as `From<rusqlite::Error>` gives.
+pub(crate) fn conflict_on_unique(err: rusqlite::Error, what: impl FnOnce() -> String) -> DbError {
+    // Match the extended codes, not ConstraintViolation: CHECK, NOT NULL and foreign-key
+    // failures share that primary code and are server faults, not duplicates.
+    match err.sqlite_extended_error_code() {
+        Some(
+            rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE | rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY,
+        ) => DbError::Conflict { what: what() },
+        _ => DbError::from(err),
+    }
+}
+
 type Job = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
 
 struct Inner {
@@ -283,5 +296,60 @@ mod tests {
         let clone = db.clone();
         drop(db);
         clone.ping().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unique_and_primary_key_violations_become_the_given_conflict() {
+        let (_dir, db) = temp_db();
+        db.call(|c| {
+            Ok(c.execute_batch(
+                "CREATE TABLE u (k TEXT UNIQUE); INSERT INTO u VALUES ('a');
+                 CREATE TABLE p (a INTEGER, b INTEGER, PRIMARY KEY (a, b)); INSERT INTO p VALUES (1, 1);
+                 CREATE TABLE r (id INTEGER PRIMARY KEY); INSERT INTO r VALUES (1);",
+            )?)
+        })
+        .await
+        .unwrap();
+        for sql in [
+            "INSERT INTO u VALUES ('a')",
+            "INSERT INTO p VALUES (1, 1)",
+            "INSERT INTO r VALUES (1)",
+        ] {
+            let err = db
+                .call(move |c| {
+                    c.execute(sql, [])
+                        .map_err(|e| conflict_on_unique(e, || format!("{sql} clashed")))?;
+                    Ok(())
+                })
+                .await
+                .unwrap_err();
+            match err {
+                DbError::Conflict { what } => assert_eq!(what, format!("{sql} clashed")),
+                other => panic!("{sql}: expected Conflict, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn other_failures_stay_sqlite() {
+        let (_dir, db) = temp_db();
+        db.call(|c| Ok(c.execute_batch("CREATE TABLE c (n INTEGER NOT NULL CHECK (n > 0))")?))
+            .await
+            .unwrap();
+        for sql in [
+            "INSERT INTO c VALUES (0)",
+            "INSERT INTO c VALUES (NULL)",
+            "INSERT INTO missing VALUES (1)",
+        ] {
+            let err = db
+                .call(move |c| {
+                    c.execute(sql, [])
+                        .map_err(|e| conflict_on_unique(e, || "not a duplicate".to_owned()))?;
+                    Ok(())
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(err, DbError::Sqlite(_)), "{sql}: got {err:?}");
+        }
     }
 }

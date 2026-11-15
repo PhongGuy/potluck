@@ -213,7 +213,7 @@ impl GitEngine {
         if v2 {
             cmd.env("GIT_PROTOCOL", "version=2");
         }
-        // What the resolver wants the hook to see (pusher, kind, override id, from sub-plan 5 on).
+        // What the resolver wants the hook to see, such as the pusher, kind and override id.
         cmd.envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         cmd.kill_on_drop(true);
         cmd

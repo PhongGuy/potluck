@@ -1,6 +1,6 @@
 //! The apinata kind: environment files, the YAML walk and the seed.
 
-use potluck::kinds::apinata::{Apinata, is_environment_file, seed};
+use potluck::kinds::apinata::{Apinata, ENV_UNPARSABLE, SECRET_VALUE, is_environment_file, seed};
 use potluck::kinds::generic;
 use potluck::kinds::{Code, Finding, Kind, by_name};
 
@@ -57,7 +57,18 @@ macro_rules! fixture {
 }
 
 fn hit() -> Option<Finding> {
-    Some(Finding::new(Code::SecretValue, "secret_value"))
+    Some(Finding::new(Code::SecretValue, SECRET_VALUE))
+}
+
+fn unparsable() -> Option<Finding> {
+    Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE))
+}
+
+#[test]
+fn rule_names_are_the_contract_names() {
+    assert_eq!(SECRET_VALUE, "secret_value");
+    assert_eq!(ENV_UNPARSABLE, "env_unparsable");
+    assert_eq!(unparsable().map(|f| f.code()), Some(Code::SecretValue));
 }
 
 #[test]
@@ -114,7 +125,7 @@ fn an_empty_string_value_is_still_a_value() {
 }
 
 #[test]
-fn unvalued_false_null_and_unparsable_pass() {
+fn unvalued_false_and_null_pass() {
     for (name, bytes) in [
         (
             "env-secret-unvalued.yml",
@@ -128,7 +139,6 @@ fn unvalued_false_null_and_unparsable_pass() {
             "env-secret-null-value.yml",
             fixture!("good", "env-secret-null-value.yml"),
         ),
-        ("env-not-yaml.yml", fixture!("good", "env-not-yaml.yml")),
     ] {
         assert_eq!(
             Apinata.content_rule("environments/x.yml", bytes),
@@ -136,24 +146,52 @@ fn unvalued_false_null_and_unparsable_pass() {
             "{name}"
         );
     }
-    assert_eq!(Apinata.content_rule("environments/x.yml", b""), None);
-    assert_eq!(
-        Apinata.content_rule("environments/x.yml", &[0xff, 0xfe, b':']),
-        None,
-        "invalid UTF-8 is not an environment file"
-    );
 }
 
 #[test]
-fn a_multi_document_file_passes_unscanned() {
-    // Pinned, not desired: yaml_serde reads one document, so a second one is invisible.
-    assert_eq!(
-        Apinata.content_rule(
-            "environments/x.yml",
-            fixture!("good", "env-two-documents.yml")
+fn an_empty_file_is_one_null_document_and_passes() {
+    assert_eq!(Apinata.content_rule("environments/x.yml", b""), None);
+    assert_eq!(Apinata.content_rule("environments/x.yml", b"\n  \n"), None);
+}
+
+#[test]
+fn files_apinata_cannot_read_are_refused() {
+    for (name, bytes) in [
+        (
+            "env-two-documents.yml",
+            fixture!("bad", "env-two-documents.yml"),
         ),
-        None
-    );
+        ("env-not-yaml.yml", fixture!("bad", "env-not-yaml.yml")),
+        (
+            "env-duplicate-key-top.yml",
+            fixture!("bad", "env-duplicate-key-top.yml"),
+        ),
+        (
+            "env-duplicate-key-variable.yml",
+            fixture!("bad", "env-duplicate-key-variable.yml"),
+        ),
+        (
+            "env-deep-nesting.yml",
+            fixture!("bad", "env-deep-nesting.yml"),
+        ),
+        ("env-alias-bomb.yml", fixture!("bad", "env-alias-bomb.yml")),
+        ("unterminated flow sequence", b"variables: [1, 2" as &[u8]),
+        ("invalid utf-8", b"name: \xff\xfe\n" as &[u8]),
+        ("unknown alias", b"name: *nowhere\n" as &[u8]),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            unparsable(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn unparsable_is_only_for_environment_files() {
+    let bytes = fixture!("bad", "env-not-yaml.yml");
+    assert_eq!(Apinata.content_rule("notes/x.yml", bytes), None);
+    assert_eq!(Apinata.content_rule("environments/x.yaml", bytes), None);
 }
 
 #[test]

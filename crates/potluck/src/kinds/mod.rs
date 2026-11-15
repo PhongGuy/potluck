@@ -10,7 +10,8 @@ pub mod generic;
 pub enum Code {
     /// A file named `.env`: `secret_env_file`.
     EnvFile,
-    /// A `secret: true` variable carrying a value: `secret_value`.
+    /// A `secret: true` variable carrying a value, or an environment file Apinata could not
+    /// read: `secret_value`.
     SecretValue,
     /// Bytes shaped like a key or token: `secret_pattern`.
     SecretPattern,
@@ -45,7 +46,7 @@ impl Finding {
         self.code
     }
 
-    /// The rule name, such as `env_file` or `aws`.
+    /// The rule name, such as `env_file`, `aws` or `env_unparsable`.
     pub fn rule(&self) -> &'static str {
         self.rule
     }

@@ -8,6 +8,11 @@ use yaml_serde::Value;
 
 use super::{Code, Finding, Kind, SeedFile};
 
+/// The rule name of a `secret: true` variable carrying a value.
+pub const SECRET_VALUE: &str = "secret_value";
+/// The rule name of an `environments/*.yml` file Apinata's reader would refuse.
+pub const ENV_UNPARSABLE: &str = "env_unparsable";
+
 /// The one kind of v1.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Apinata;
@@ -22,15 +27,20 @@ impl Kind for Apinata {
         None
     }
 
-    /// `secret_value` when `path` is an environment file whose single YAML document holds,
-    /// at any depth, a mapping with `secret: true` (the boolean) and a non-null `value`.
+    /// For an environment file only: `env_unparsable` when the blob is not exactly one YAML
+    /// document yaml_serde accepts, `secret_value` when that document holds, at any depth, a
+    /// mapping with `secret: true` (the boolean) and a non-null `value`.
     fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding> {
         if !is_environment_file(path) {
             return None;
         }
-        // A blob that is not one YAML document is not something Apinata would read; it passes.
-        let doc = yaml_serde::from_slice::<Value>(blob).ok()?;
-        has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, "secret_value"))
+        // Fail closed: Apinata reads with the same parser, so a file it refuses is one no
+        // honest user relies on, and passing it would hide whatever it holds from the walk.
+        let doc = match yaml_serde::from_slice::<Value>(blob) {
+            Ok(doc) => doc,
+            Err(_) => return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
+        };
+        has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE))
     }
 
     fn seed(&self) -> Vec<SeedFile> {

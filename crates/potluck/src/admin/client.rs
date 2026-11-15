@@ -8,8 +8,8 @@ use reqwest::header::CONTENT_TYPE;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-/// Longest body `send` and `get_once` accept; every admin answer is far smaller, and an endless stream must
-/// end in an error, not in memory.
+/// Longest body `send` and `get_once` accept; every admin answer is far smaller, and an endless
+/// stream must end in an error, not in memory.
 pub(crate) const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
 /// The methods the admin API uses.

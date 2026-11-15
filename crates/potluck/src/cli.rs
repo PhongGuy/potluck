@@ -34,7 +34,7 @@ pub enum Command {
     Serve(Box<ServeArgs>),
     /// Exit 0 if the server on this data directory answers its health check within 3 s.
     HealthCheck(HealthArgs),
-    /// Manage users, tokens, teams, workspaces, grants and overrides on the running server, over its admin socket.
+    /// Manage users, tokens, teams, workspaces, grants and overrides over the admin socket.
     Admin(Box<AdminArgs>),
     /// Run by git from `<data>/hooks/pre-receive`; not for people.
     #[command(hide = true)]

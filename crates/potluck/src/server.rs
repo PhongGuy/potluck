@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_fails_when_the_socket_is_missing() {
+    async fn connect_fails_when_the_socket_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let err = AdminClient::connect(&dir.path().join("admin.sock"))
             .await

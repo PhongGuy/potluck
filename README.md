@@ -92,7 +92,7 @@ With docker: `docker exec potluck potluck admin user create alice --server-admin
 podman exec -i potluck potluck admin user create alice --server-admin --password-stdin < alice-password.txt
 ```
 
-The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants and overrides; `--json` prints the server's answer as it is.
+The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants and overrides; `--json` prints the answer as JSON instead of a table.
 
 ## Reverse proxy and TLS
 

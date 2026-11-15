@@ -24,7 +24,7 @@ pub enum UserCmd {
         /// Make the account a server admin.
         #[arg(long)]
         server_admin: bool,
-        /// Read the password from stdin (one line, up to EOF) instead of generating one.
+        /// Read the password from stdin to EOF, minus one trailing newline; else generate one.
         #[arg(long)]
         password_stdin: bool,
     },
@@ -52,7 +52,7 @@ pub enum UserCmd {
     ResetPassword {
         /// The account to change.
         username: String,
-        /// Read the password from stdin (one line, up to EOF) instead of generating one.
+        /// Read the password from stdin to EOF, minus one trailing newline; else generate one.
         #[arg(long)]
         password_stdin: bool,
     },

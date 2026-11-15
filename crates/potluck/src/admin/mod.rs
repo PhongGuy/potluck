@@ -23,7 +23,7 @@ pub struct AdminArgs {
     /// The running server's data directory, where `admin.sock` lives.
     #[arg(long, global = true, env = "POTLUCK_DATA", default_value = "./data")]
     data: PathBuf,
-    /// Print the server's JSON answer instead of a table.
+    /// Print the answer as JSON instead of a table.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]

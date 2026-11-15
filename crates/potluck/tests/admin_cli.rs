@@ -18,7 +18,7 @@ impl Drop for Server {
     }
 }
 
-/// `potluck serve --log trace` with its stderr in `<data>/server.log`; returns once the socket exists.
+/// `potluck serve --log trace`, stderr to `<data>/server.log`; returns once the socket exists.
 fn spawn_server(data: &Path) -> Server {
     let log = File::create(data.join("server.log")).unwrap();
     let child = potluck()

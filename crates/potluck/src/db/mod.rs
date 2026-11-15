@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
+pub mod accounts;
 mod migrations;
 
 /// A handle to the one connection to `server.db`, owned by a dedicated thread.
@@ -38,6 +39,13 @@ pub enum DbError {
         found: u32,
         /// The newest schema version this build knows.
         supported: u32,
+    },
+    /// A row that must be unique already exists; `what` is client-safe text such as
+    /// `username bob is taken`.
+    #[error("conflict: {what}")]
+    Conflict {
+        /// What clashed, fit to show the client.
+        what: String,
     },
 }
 

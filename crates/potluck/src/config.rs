@@ -179,32 +179,26 @@ fn validate_public_url(raw: &str, insecure_http: bool) -> Result<String, ConfigE
         "http" if insecure_http || is_loopback(url.host()) => {}
         "http" => {
             return Err(ConfigError::InsecurePublicUrl {
-                url: raw.to_owned(),
+                url: redact_userinfo(raw),
             });
         }
         _ => {
             return Err(ConfigError::UnsupportedScheme {
-                url: raw.to_owned(),
+                url: redact_userinfo(raw),
             });
         }
     }
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
-/// The input with any userinfo in its authority replaced by `***`, for error text about
-/// a URL that may not parse.
+/// The input with everything from after its first `://` (or its start) up to its last
+/// `@` replaced by `***`, so error text never carries credentials, parsed or not.
 fn redact_userinfo(raw: &str) -> String {
-    let Some(scheme_end) = raw.find("://") else {
+    let Some(at) = raw.rfind('@') else {
         return raw.to_owned();
     };
-    let start = scheme_end + 3;
-    let authority_len = raw[start..]
-        .find(['/', '?', '#'])
-        .unwrap_or(raw.len() - start);
-    match raw[start..start + authority_len].rfind('@') {
-        Some(at) => format!("{}***{}", &raw[..start], &raw[start + at..]),
-        None => raw.to_owned(),
-    }
+    let start = raw[..at].find("://").map_or(0, |i| i + 3);
+    format!("{}***{}", &raw[..start], &raw[at..])
 }
 
 fn is_loopback(host: Option<Host<&str>>) -> bool {

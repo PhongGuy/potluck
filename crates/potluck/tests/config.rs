@@ -158,6 +158,29 @@ fn credentials_in_an_unparsable_public_url_are_not_echoed() {
 }
 
 #[test]
+fn credentials_are_not_echoed_whichever_check_refuses_the_url() {
+    for (url, password) in [
+        ("https://alice:p/w@host", "p/w"),
+        ("https://alice:p?w@host", "p?w"),
+        ("https://alice:p#w@host", "p#w"),
+        ("//alice:pw@host", "pw"),
+        ("alice:pw@host", "pw"),
+        ("alice:pw@x://host", "pw"),
+    ] {
+        let err = parse_config(&["--public-url", url]).unwrap_err();
+        let text = format!("{err} {err:?}");
+        assert!(
+            !text.contains("alice"),
+            "{url}: the username leaked: {text}"
+        );
+        assert!(
+            !text.contains(password),
+            "{url}: the password leaked: {text}"
+        );
+    }
+}
+
+#[test]
 fn a_username_alone_in_the_public_url_is_refused() {
     let err = parse_config(&["--public-url", "http://alice@team.example.com"]).unwrap_err();
     assert!(

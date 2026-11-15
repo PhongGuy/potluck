@@ -80,7 +80,19 @@ loginctl enable-linger "$USER"
 
 ## First admin
 
-The admin command line arrives with the server's admin features and is not in the image yet. It will run inside the container and talk to the server over a socket in `/data`, so the first admin account is created from the host's shell, never over the network. With podman it will look like `podman exec potluck potluck admin ...`, and with docker `docker exec potluck potluck admin ...`.
+Accounts are created from the host's shell, never over the network: `potluck admin` runs inside the container and talks to the server over the socket in `/data`. Create the first server admin and let Potluck choose the password:
+
+```sh
+podman exec potluck potluck admin user create alice --server-admin
+```
+
+With docker: `docker exec potluck potluck admin user create alice --server-admin`. The command prints the account and, once, its password; nothing shows it again. To pick the password yourself, pipe it in as one line:
+
+```sh
+podman exec -i potluck potluck admin user create alice --server-admin --password-stdin < alice-password.txt
+```
+
+The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants and overrides; `--json` prints the server's answer as it is.
 
 ## Reverse proxy and TLS
 

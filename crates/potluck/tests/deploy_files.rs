@@ -197,6 +197,9 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
         "login ghcr.io",
         "POTLUCK_TRUSTED_PROXIES",
         "debian:trixie-slim tar -C /data -xf /backup/potluck-data.tar",
+        "podman exec potluck potluck admin user create alice --server-admin",
+        "docker exec potluck potluck admin user create alice --server-admin",
+        "--password-stdin",
     ] {
         assert!(readme.contains(needle), "README lacks {needle:?}");
     }

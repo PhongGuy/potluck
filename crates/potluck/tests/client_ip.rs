@@ -78,6 +78,11 @@ fn header_lines_are_joined_in_order() {
         resolve(proxy, &["1.1.1.1, 2.2.2.2", "198.51.100.7, 10.0.0.1"], &t),
         ClientIp::Peer(ip("198.51.100.7"))
     );
+    // A line holding only a trusted hop must not hide the client named on an earlier line.
+    assert_eq!(
+        resolve(proxy, &["198.51.100.7", "10.0.0.1"], &t),
+        ClientIp::Peer(ip("198.51.100.7"))
+    );
     assert_eq!(resolve(proxy, &[], &t), ClientIp::Peer(ip("10.0.0.1")));
 }
 

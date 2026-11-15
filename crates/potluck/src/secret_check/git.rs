@@ -1,9 +1,9 @@
 //! The git plumbing the hook runs inside the push's quarantine.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::thread::JoinHandle;
@@ -127,6 +127,37 @@ pub enum ObjectType {
     Blob,
 }
 
+/// A blob at a path, as a new commit adds or changes it, or as a tree holds it. The path is
+/// bytes: git paths need not be UTF-8, and two distinct paths must never merge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Entry {
+    path: Vec<u8>,
+    sha: Sha,
+}
+
+impl Entry {
+    /// The blob `sha` at `path`.
+    pub fn new(path: Vec<u8>, sha: Sha) -> Entry {
+        Entry { path, sha }
+    }
+
+    /// The path's raw bytes.
+    pub fn path(&self) -> &[u8] {
+        &self.path
+    }
+
+    /// The path for rules and display: `String::from_utf8_lossy`.
+    pub fn path_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.path).into_owned()
+    }
+
+    /// The blob's name.
+    pub fn sha(&self) -> &Sha {
+        &self.sha
+    }
+}
+
 /// Runs git against one repository. The child inherits this process's environment, so git's
 /// quarantine variables reach it; `git_dir`, when set, is passed as `GIT_DIR`.
 #[derive(Debug, Clone)]
@@ -191,6 +222,160 @@ impl Git {
             .rev_list(&["--objects"], tip, exclude)?
             .into_iter()
             .collect())
+    }
+
+    /// `diff-tree -r -m --root -z --stdin` over `commits`: each path a commit adds or changes
+    /// against each of its parents (a root commit's whole tree), statuses `A`, `M`, `T`;
+    /// deletions and mode-160000 entries left out; deduplicated by (path, sha) in first-seen
+    /// order. Empty input yields empty output without running git. Any number of commits.
+    pub fn changed_entries(&self, commits: &[Sha]) -> Result<Vec<Entry>, GitCmdError> {
+        const SUB: &str = "diff-tree";
+        if commits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let args = ["-r", "-m", "--root", "-z", "--stdin"].map(OsStr::new);
+        let out = self.run(SUB, &args, Some(name_lines(commits)))?;
+        let unexpected = |record: &[u8]| GitCmdError::Output {
+            subcommand: SUB,
+            detail: format!("{:?}", String::from_utf8_lossy(record)),
+        };
+        // Records alternate: a commit name on its own, or an entry header followed by its
+        // path. Without rename detection every header carries exactly one path.
+        let mut seen = HashSet::new();
+        let mut entries = Vec::new();
+        let mut records = out.split(|&b| b == 0).filter(|r| !r.is_empty());
+        while let Some(record) = records.next() {
+            let Some(header) = record.strip_prefix(b":") else {
+                parse_sha(record).ok_or_else(|| unexpected(record))?;
+                continue;
+            };
+            let path = records.next().ok_or_else(|| unexpected(record))?;
+            let fields: Vec<&[u8]> = header.split(|&b| b == b' ').collect();
+            let [_old_mode, new_mode, _old_sha, new_sha, status] = fields[..] else {
+                return Err(unexpected(record));
+            };
+            if !matches!(status, b"A" | b"M" | b"T") || new_mode == b"160000" {
+                continue;
+            }
+            let entry = Entry::new(
+                path.to_vec(),
+                parse_sha(new_sha).ok_or_else(|| unexpected(record))?,
+            );
+            if seen.insert(entry.clone()) {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// `ls-tree -r -z <rev>`: every blob in the tree (mode 160000 left out); `rev` may be a
+    /// commit, a tree or a tag of either.
+    pub fn tree_entries(&self, rev: &Sha) -> Result<Vec<Entry>, GitCmdError> {
+        const SUB: &str = "ls-tree";
+        let args = [OsStr::new("-r"), OsStr::new("-z"), OsStr::new(rev.as_str())];
+        let out = self.run(SUB, &args, None)?;
+        let mut entries = Vec::new();
+        for record in out.split(|&b| b == 0).filter(|r| !r.is_empty()) {
+            let unexpected = || GitCmdError::Output {
+                subcommand: SUB,
+                detail: format!("{:?}", String::from_utf8_lossy(record)),
+            };
+            // `<mode> <type> <sha>\t<path>`: the path is everything after the first tab.
+            let tab = record
+                .iter()
+                .position(|&b| b == b'\t')
+                .ok_or_else(unexpected)?;
+            let (meta, path) = (&record[..tab], &record[tab + 1..]);
+            let fields: Vec<&[u8]> = meta.split(|&b| b == b' ').collect();
+            let [_mode, kind, sha] = fields[..] else {
+                return Err(unexpected());
+            };
+            if kind == b"blob" {
+                entries.push(Entry::new(
+                    path.to_vec(),
+                    parse_sha(sha).ok_or_else(unexpected)?,
+                ));
+            }
+        }
+        Ok(entries)
+    }
+
+    /// `cat-file --batch-check` over `shas`: sizes of the names that are blobs; other types
+    /// and missing names are left out. Any number of names.
+    pub fn blob_sizes(&self, shas: &[Sha]) -> Result<HashMap<Sha, u64>, GitCmdError> {
+        const SUB: &str = "cat-file";
+        if shas.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let out = self.run(SUB, &[OsStr::new("--batch-check")], Some(name_lines(shas)))?;
+        let mut sizes = HashMap::new();
+        for line in out.split(|&b| b == b'\n').filter(|l| !l.is_empty()) {
+            match parse_header(line) {
+                Some(Header::Found { sha, kind, size }) => {
+                    if kind == b"blob" {
+                        sizes.insert(sha, size);
+                    }
+                }
+                Some(Header::Missing) => {}
+                None => {
+                    return Err(GitCmdError::Output {
+                        subcommand: SUB,
+                        detail: format!("{:?}", String::from_utf8_lossy(line)),
+                    });
+                }
+            }
+        }
+        Ok(sizes)
+    }
+
+    /// `cat-file --batch` over `shas`, calling `f(sha, bytes)` once per blob in the order
+    /// given as the stream arrives; non-blobs and missing names are skipped. One blob is in
+    /// memory at a time, and callers pass only names at or under
+    /// [`MAX_CONTENT_BYTES`](crate::kinds::generic::MAX_CONTENT_BYTES).
+    pub fn for_each_blob(
+        &self,
+        shas: &[Sha],
+        mut f: impl FnMut(&Sha, &[u8]),
+    ) -> Result<(), GitCmdError> {
+        const SUB: &str = "cat-file";
+        if shas.is_empty() {
+            return Ok(());
+        }
+        let mut running = self.spawn(SUB, &[OsStr::new("--batch")], Some(name_lines(shas)))?;
+        let Some(stdout) = running.child.stdout.take() else {
+            running.abort();
+            return Err(GitCmdError::Output {
+                subcommand: SUB,
+                detail: "no stdout".to_owned(),
+            });
+        };
+        let mut reader = BufReader::new(stdout);
+        let mut header = Vec::new();
+        let mut body = Vec::new();
+        // One reply per name, in order: a header, then for a found object exactly `size`
+        // bytes and a newline. A non-blob's body is read into the sink, never kept.
+        for sha in shas {
+            header.clear();
+            match read_reply(&mut reader, &mut header, &mut body) {
+                Ok(Reply::Blob) => f(sha, &body),
+                Ok(Reply::Skipped) => {}
+                Ok(Reply::Eof) => {
+                    drop(reader);
+                    // git quitting early usually means it failed; prefer its own reason.
+                    running.finish()?;
+                    return Err(GitCmdError::Output {
+                        subcommand: SUB,
+                        detail: "output ended early".to_owned(),
+                    });
+                }
+                Err(err) => {
+                    running.abort();
+                    return Err(err);
+                }
+            }
+        }
+        drop(reader);
+        running.finish()
     }
 
     /// `rev-list <flags> <tip> --not --all <exclude..>`, keeping the first token of each line:
@@ -293,6 +478,90 @@ impl Git {
         running.finish()?;
         Ok(out)
     }
+}
+
+/// One name per line, for a `--stdin` or `--batch` git.
+fn name_lines(shas: &[Sha]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(shas.len() * 65);
+    for sha in shas {
+        bytes.extend_from_slice(sha.as_str().as_bytes());
+        bytes.push(b'\n');
+    }
+    bytes
+}
+
+fn parse_sha(bytes: &[u8]) -> Option<Sha> {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|hex| Sha::parse(hex).ok())
+}
+
+/// A `cat-file --batch-check` or `--batch` header line.
+enum Header<'a> {
+    Found { sha: Sha, kind: &'a [u8], size: u64 },
+    Missing,
+}
+
+/// `<sha> <type> <size>` or `<name> missing`; anything else is `None`.
+fn parse_header(line: &[u8]) -> Option<Header<'_>> {
+    let fields: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
+    match fields[..] {
+        [_name, b"missing"] => Some(Header::Missing),
+        [sha, kind, size] => Some(Header::Found {
+            sha: parse_sha(sha)?,
+            kind,
+            size: std::str::from_utf8(size).ok()?.parse().ok()?,
+        }),
+        _ => None,
+    }
+}
+
+/// What one `cat-file --batch` reply was.
+enum Reply {
+    /// A blob, now in the body buffer.
+    Blob,
+    /// A missing name or a non-blob, whose body was discarded.
+    Skipped,
+    /// stdout closed before the reply's header.
+    Eof,
+}
+
+/// Reads one `cat-file --batch` reply: the header into `header`, a blob's body into `body`.
+fn read_reply(
+    reader: &mut impl BufRead,
+    header: &mut Vec<u8>,
+    body: &mut Vec<u8>,
+) -> Result<Reply, GitCmdError> {
+    const SUB: &str = "cat-file";
+    let io = |source| GitCmdError::Spawn {
+        subcommand: SUB,
+        source,
+    };
+    let unexpected = |detail: String| GitCmdError::Output {
+        subcommand: SUB,
+        detail,
+    };
+    if reader.read_until(b'\n', header).map_err(io)? == 0 {
+        return Ok(Reply::Eof);
+    }
+    let line = header.strip_suffix(b"\n").unwrap_or(header);
+    let (is_blob, size) = match parse_header(line) {
+        Some(Header::Missing) => return Ok(Reply::Skipped),
+        Some(Header::Found { kind, size, .. }) => (kind == b"blob", size),
+        None => return Err(unexpected(format!("{:?}", String::from_utf8_lossy(line)))),
+    };
+    let mut limited = reader.take(size);
+    let read = if is_blob {
+        body.clear();
+        limited.read_to_end(body).map_err(io)? as u64
+    } else {
+        std::io::copy(&mut limited, &mut std::io::sink()).map_err(io)?
+    };
+    let mut newline = [0u8; 1];
+    if read != size || reader.read_exact(&mut newline).is_err() || newline != *b"\n" {
+        return Err(unexpected("truncated object body".to_owned()));
+    }
+    Ok(if is_blob { Reply::Blob } else { Reply::Skipped })
 }
 
 /// A git child with its two helper threads; `finish` joins them and checks the exit status.

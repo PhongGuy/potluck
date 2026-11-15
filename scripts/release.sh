@@ -101,8 +101,14 @@ release_notes() {
 
 Pinned: \`$IMAGE@$digest\`
 
-Pull with \`podman pull $IMAGE:$tag\` or \`docker pull $IMAGE:$tag\`; the image is also tagged \`latest\`.
 NOTES
+    # latest moves only on a final vX.Y.Z, as the release workflow's merge job tags it.
+    local pull="Pull with \`podman pull $IMAGE:$tag\` or \`docker pull $IMAGE:$tag\`"
+    if [[ $tag == *-* ]]; then
+      echo "$pull."
+    else
+      echo "$pull; the image is also tagged \`latest\`."
+    fi
     if [[ ${ATTESTED:-} == true ]]; then
       echo "Check that this project's release workflow built it with \`gh attestation verify oci://$IMAGE:$tag --repo $repo\`."
     fi

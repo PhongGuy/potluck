@@ -235,3 +235,31 @@ fn an_empty_generate_notes_reply_fails() {
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("generate-notes"));
 }
+
+#[test]
+fn only_a_final_release_says_it_is_tagged_latest() {
+    let final_dir = repo_with(&["feat: x"], "v0.2.0");
+    let (out, text) = notes(final_dir.path(), "v0.2.0");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("also tagged `latest`"), "{text}");
+
+    let rc_dir = repo_with(&["feat: x"], "v0.2.0-rc.1");
+    let (out, text) = notes(rc_dir.path(), "v0.2.0-rc.1");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains(&format!("`docker pull {IMAGE}:v0.2.0-rc.1`")),
+        "{text}"
+    );
+    assert!(
+        !text.contains("latest"),
+        "a pre-release never moves latest: {text}"
+    );
+}

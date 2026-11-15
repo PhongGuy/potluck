@@ -205,5 +205,8 @@ jobs:
           [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no index digest from merge: '$DIGEST'"; exit 1; }
           version=$(scripts/release.sh version "$REF_NAME")
           scripts/release.sh notes "$REF_NAME" "$GITHUB_REPOSITORY" "$DIGEST" release-notes.md
-          gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+          # A pre-release tag such as v1.0.0-rc.1 must never become the repository's Latest release.
+          flags=(--draft --verify-tag)
+          if [[ $REF_NAME == *-* ]]; then flags+=(--prerelease); fi
+          gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" "${flags[@]}" \
             --title "Potluck $version" --notes-file release-notes.md

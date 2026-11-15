@@ -114,3 +114,16 @@ fn draft_writes_notes_with_the_script_and_only_drafts() {
         assert!(draft.contains(needle), "draft lacks {needle:?}");
     }
 }
+
+#[test]
+fn draft_marks_a_pre_release_tag_as_a_prerelease() {
+    let jobs = release();
+    let draft = job(&jobs, "draft");
+    for needle in [
+        "flags=(--draft --verify-tag)",
+        "if [[ $REF_NAME == *-* ]]; then flags+=(--prerelease); fi",
+        "\"${flags[@]}\"",
+    ] {
+        assert!(draft.contains(needle), "draft lacks {needle:?}");
+    }
+}

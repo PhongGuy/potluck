@@ -69,6 +69,10 @@ async fn init_reports_a_failing_git() {
         matches!(err, RepoError::Io { .. }),
         "a missing binary is an io error: {err:?}"
     );
+    assert!(
+        !dir.path().join("core").join("api.git").exists(),
+        "a failed spawn releases the claim"
+    );
     let r = repos(dir.path());
     let err = r
         .init(&slug("core"), &slug("bad"), "not a branch")
@@ -83,4 +87,41 @@ async fn init_reports_a_failing_git() {
             .exists(),
         "nothing half-made is left"
     );
+}
+
+#[tokio::test]
+async fn two_concurrent_inits_of_one_repository_claim_it_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = repos(dir.path());
+    let (team, ws) = (slug("core"), slug("api"));
+    let (a, b) = tokio::join!(r.init(&team, &ws, "main"), r.init(&team, &ws, "main"));
+    let (won, lost) = match (a, b) {
+        (Ok(p), Err(e)) | (Err(e), Ok(p)) => (p, e),
+        other => panic!("exactly one init wins: {other:?}"),
+    };
+    assert_eq!(won, dir.path().join("core").join("api.git"));
+    assert!(matches!(lost, RepoError::Exists { .. }), "got {lost:?}");
+    assert_eq!(
+        std::fs::read_to_string(won.join("HEAD")).unwrap().trim(),
+        "ref: refs/heads/main",
+        "the winner's repository is whole"
+    );
+}
+
+#[tokio::test]
+async fn remove_deletes_the_repository_and_reports_absence() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = repos(dir.path());
+    let path = r.init(&slug("core"), &slug("api"), "main").await.unwrap();
+    assert!(
+        r.remove(&slug("core"), &slug("api")).await.unwrap(),
+        "removed"
+    );
+    assert!(!path.exists());
+    assert!(
+        !r.remove(&slug("core"), &slug("api")).await.unwrap(),
+        "already gone"
+    );
+    r.init(&slug("core"), &slug("api"), "main").await.unwrap();
+    assert!(path.join("HEAD").is_file(), "the slug is free again");
 }

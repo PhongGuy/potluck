@@ -30,8 +30,9 @@ impl Repos {
         self.root.join(team.as_str()).join(format!("{ws}.git"))
     }
 
-    /// `git init --bare --initial-branch=<default_branch>` at `path(team, ws)`; refuses an
-    /// existing directory. Returns the repository path.
+    /// `git init --bare --initial-branch=<default_branch>` at `path(team, ws)`. Creating the
+    /// directory is the claim: it either succeeds or fails `AlreadyExists` (`Exists`), so two
+    /// concurrent calls cannot both succeed. Returns the repository path.
     pub async fn init(
         &self,
         team: &Slug,
@@ -46,8 +47,14 @@ impl Repos {
         tokio::fs::create_dir_all(self.root.join(team.as_str()))
             .await
             .map_err(io)?;
-        if tokio::fs::try_exists(&path).await.map_err(io)? {
-            return Err(RepoError::Exists { path });
+        // Creating the directory is atomic, so it decides which of two racing calls owns the slug;
+        // git then initialises inside the empty directory we hold.
+        match tokio::fs::create_dir(&path).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(RepoError::Exists { path });
+            }
+            Err(source) => return Err(io(source)),
         }
         // A clean environment, so the server user's own git config never shapes the repository.
         let mut command = Command::new(&self.git);
@@ -64,16 +71,27 @@ impl Repos {
         if let Some(search) = std::env::var_os("PATH") {
             command.env("PATH", search);
         }
-        let output = command.output().await.map_err(io)?;
-        if !output.status.success() {
-            // git can leave an empty directory behind; remove it so a retry starts clean.
-            let _ = tokio::fs::remove_dir_all(&path).await;
-            return Err(RepoError::GitInit {
+        // The directory is ours from the claim; on any failure remove it so a retry starts clean.
+        let failure = match command.output().await {
+            Ok(output) if output.status.success() => return Ok(path),
+            Ok(output) => RepoError::GitInit {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-                path,
-            });
+                path: path.clone(),
+            },
+            Err(source) => io(source),
+        };
+        let _ = tokio::fs::remove_dir_all(&path).await;
+        Err(failure)
+    }
+
+    /// Removes `path(team, ws)` and everything under it; `Ok(false)` when it was not there.
+    pub async fn remove(&self, team: &Slug, ws: &Slug) -> Result<bool, RepoError> {
+        let path = self.path(team, ws);
+        match tokio::fs::remove_dir_all(&path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(RepoError::Io { path, source }),
         }
-        Ok(path)
     }
 }
 

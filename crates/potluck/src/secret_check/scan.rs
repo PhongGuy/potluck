@@ -3,7 +3,7 @@
 //! Content over `MAX_CONTENT_BYTES`, blob or commit and tag message alike, is path-ruled but
 //! never content-scanned: the cap bounds the hook's cost per push.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 
 use crate::kinds::{self, Finding, Kind, generic};
@@ -95,7 +95,8 @@ impl Rejection {
 /// Deletions are skipped. Per ref, in stdin order, the target is peeled: a commit yields its
 /// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
 /// kind) over every changed entry, and content rules over the entries whose blob is new to
-/// the repository; in import mode the tip tree replaces both lists. A tree target is scanned
+/// the repository or whose path the kind's `content_path` accepts, each `(blob, path)` pair
+/// once per push; in import mode the tip tree replaces both lists. A tree target is scanned
 /// whole (every entry a candidate); a blob target is one entry at path `/`. Blobs over
 /// `MAX_CONTENT_BYTES` skip content rules. Per ref the path-rule rejections come first, then
 /// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
@@ -114,6 +115,8 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
     let mut seen: Vec<Sha> = Vec::new();
+    // A (blob, path) pair is content-checked once, under the first ref that brings it.
+    let mut queued: HashSet<(Sha, Vec<u8>)> = HashSet::new();
     // Message candidates in queue order; the map both finds a streamed object's (ref, index)
     // and keeps each object to the first ref that lists it.
     let mut messages: Vec<Sha> = Vec::new();
@@ -156,7 +159,10 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
                     (ri, 0, ei),
                     Rejection::new(update.name(), entry.path(), finding),
                 ));
-            } else if fresh.as_ref().is_none_or(|f| f.contains(entry.sha())) {
+            } else if (fresh.as_ref().is_none_or(|f| f.contains(entry.sha()))
+                || kind.is_some_and(|k| k.content_path(&path)))
+                && queued.insert((entry.sha().clone(), entry.path().to_vec()))
+            {
                 candidates.entry(entry.sha().clone()).or_default().push((
                     ri,
                     ei,

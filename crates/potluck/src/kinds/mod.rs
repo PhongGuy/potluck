@@ -90,8 +90,13 @@ pub trait Kind: Send + Sync + std::fmt::Debug {
     fn name(&self) -> &'static str;
     /// A rule on the path alone, for every path a new commit adds or changes.
     fn path_rule(&self, path: &str) -> Option<Finding>;
-    /// A rule on a blob new to the repository, with the path it was reached by.
+    /// A rule on a candidate blob with the path it was reached by: a blob new to the
+    /// repository, or any blob at a path `content_path` accepts.
     fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding>;
+    /// Whether `content_rule` applies at `path`. A blob a new commit adds or changes at such a
+    /// path is a content candidate even when the repository already holds it, so a file moved
+    /// or copied under the kind's paths is checked there.
+    fn content_path(&self, path: &str) -> bool;
     /// The files a new workspace of this kind starts with, in commit order.
     fn seed(&self) -> Vec<SeedFile>;
 }

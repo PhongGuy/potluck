@@ -44,6 +44,11 @@ impl Kind for Apinata {
             .flatten()
     }
 
+    /// The environment files, the only paths `content_rule` reads.
+    fn content_path(&self, path: &str) -> bool {
+        is_environment_file(path)
+    }
+
     fn seed(&self) -> Vec<SeedFile> {
         seed()
     }

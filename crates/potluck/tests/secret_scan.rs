@@ -406,3 +406,126 @@ fn a_message_over_the_cap_is_skipped_like_a_blob() {
     let tip = s.stage("main");
     assert!(scan_main(&s, &env(None), &tip).is_empty());
 }
+
+/// An isolated git that appends every name fed to `cat-file --batch` to `log`, so a test can
+/// say which blobs were read.
+fn logging_git(s: &Scratch, log: &std::path::Path) -> Git {
+    let iso = s.isolated_git();
+    let script = s.script(
+        "logging-git",
+        &format!(
+            "if [ \"$1\" = cat-file ] && [ \"$2\" = --batch ]; then tee -a '{}' | '{}' \"$@\"; exit $?; fi\nexec '{}' \"$@\"\n",
+            log.display(),
+            iso.display(),
+            iso.display()
+        ),
+    );
+    Git::new(script, Some(s.bare.clone()))
+}
+
+fn logged(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .map(|t| t.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_old_blob_moved_under_environments_is_checked_there_and_only_there() {
+    let s = Scratch::new();
+    s.write("notes/x.txt", ENV_YML);
+    s.write("README", b"seed\n");
+    let first = s.stage_commit("notes");
+    assert!(
+        scan_main(&s, &env(Some("apinata")), &first).is_empty(),
+        "under notes/ only the generic set applies"
+    );
+    s.publish("main");
+    // A move and a copy, both of blobs the server already has.
+    s.remove("notes/x.txt");
+    s.write("environments/dev.yml", ENV_YML);
+    s.write("docs/README", b"seed\n");
+    let tip = s.stage_commit("move");
+    let log = s.dir.path().join("batch-names");
+    let git = logging_git(&s, &log);
+    let main = update(&tip, "refs/heads/main");
+    assert_eq!(
+        rows(&scan(&env(Some("apinata")), std::slice::from_ref(&main), &git).unwrap()),
+        ["refs/heads/main environments/dev.yml secret_value secret_value"]
+    );
+    // The log also carries the commit the message pass reads, so look for the blobs by name.
+    let env_blob = s.blob("main", "environments/dev.yml");
+    let readme_blob = s.blob("main", "docs/README");
+    assert!(
+        rows(&scan(&env(None), &[main], &git).unwrap()).is_empty(),
+        "without a kind an old blob is nobody's candidate"
+    );
+    let read = logged(&log);
+    assert_eq!(
+        read.iter().filter(|name| **name == env_blob).count(),
+        1,
+        "read once, under the kind, and not without it: {read:?}"
+    );
+    assert!(
+        !read.contains(&readme_blob),
+        "the README copy under docs/ is never read: {read:?}"
+    );
+}
+
+#[test]
+fn a_rename_inside_environments_rechecks_a_clean_file_and_passes() {
+    let s = Scratch::new();
+    s.write("environments/dev.yml", b"name: dev\n");
+    s.commit("env");
+    s.publish("main");
+    s.remove("environments/dev.yml");
+    s.write("environments/prod.yml", b"name: dev\n");
+    let tip = s.stage_commit("rename");
+    let log = s.dir.path().join("batch-names");
+    let git = logging_git(&s, &log);
+    assert!(
+        rows(
+            &scan(
+                &env(Some("apinata")),
+                &[update(&tip, "refs/heads/main")],
+                &git
+            )
+            .unwrap()
+        )
+        .is_empty()
+    );
+    let read = logged(&log);
+    assert!(
+        read.contains(&s.blob("main", "environments/prod.yml")),
+        "the old blob is read under its new path: {read:?}"
+    );
+}
+
+#[test]
+fn the_same_blob_and_path_pushed_under_two_refs_is_reported_once() {
+    let s = Scratch::new();
+    s.write("README", b"seed\n");
+    s.commit("seed");
+    s.publish("main");
+    s.branch("a");
+    s.write("environments/dev.yml", ENV_YML);
+    s.commit("a");
+    s.checkout("main");
+    s.branch("b");
+    s.write("environments/dev.yml", ENV_YML);
+    s.write("b.txt", b"b\n");
+    s.commit("b");
+    let a = s.stage("a");
+    let b = s.stage("b");
+    assert_eq!(
+        rows(
+            &scan(
+                &env(Some("apinata")),
+                &[update(&a, "refs/heads/a"), update(&b, "refs/heads/b")],
+                &git_for(&s),
+            )
+            .unwrap()
+        ),
+        ["refs/heads/a environments/dev.yml secret_value secret_value"],
+        "two distinct commits, one (blob, path) pair: the first ref reports it"
+    );
+}

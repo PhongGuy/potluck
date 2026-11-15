@@ -207,3 +207,29 @@ async fn user_tokens_lists_and_token_revoke_answers_quietly() {
     );
     running.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_name_that_is_not_one_path_segment_is_refused_before_any_request() {
+    // No server here: a request that slipped through would be `Unreachable`, not `BadName`.
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["user", "set", "../x", "--disabled", "true"][..],
+        &["user", "tokens", "..%2e/workspaces"],
+        &["user", "reset-password", "a\\b"],
+        &["user", "tokens", "ann?x=1"],
+    ] {
+        let err = admin(dir.path(), args, "").await.0.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                AdminError::BadName {
+                    arg: "username",
+                    ..
+                }
+            ),
+            "{args:?}: got {err:?}"
+        );
+        let quoted = format!("{:?}", args[2]);
+        assert!(err.to_string().contains(&quoted), "names the value: {err}");
+    }
+}

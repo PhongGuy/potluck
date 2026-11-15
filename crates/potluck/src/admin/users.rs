@@ -3,7 +3,7 @@
 use serde_json::{Map, Value, json};
 
 use super::client::Verb;
-use super::{AdminError, Context, output, pretty};
+use super::{AdminError, Context, output, pretty, segment};
 
 /// The `user` verbs.
 #[derive(clap::Subcommand, Debug)]
@@ -117,6 +117,7 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
             server_admin,
             disabled,
         } => {
+            let username = segment("username", &username)?;
             // Only the given flags become keys, so the PATCH leaves every other field alone.
             let mut body = Map::new();
             if let Some(name) = display_name {
@@ -147,6 +148,7 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
             username,
             password_stdin,
         } => {
+            let username = segment("username", &username)?;
             let password = cx.new_password(password_stdin)?;
             let body = json!({"password": password.text}).to_string();
             let user = cx
@@ -165,6 +167,7 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
             )
         }
         UserCmd::Tokens { username } => {
+            let username = segment("username", &username)?;
             cx.call(
                 Verb::Get,
                 &format!("/api/v1/users/{username}/tokens"),

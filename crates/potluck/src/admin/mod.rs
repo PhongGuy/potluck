@@ -12,6 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
 use self::client::{AdminClient, ApiResponse, Verb};
+use crate::slug::{Slug, SlugError};
 
 /// `potluck admin`: one API call per verb, as the `system` actor.
 #[derive(clap::Args, Debug)]
@@ -85,6 +86,17 @@ pub enum AdminError {
     /// `--password-stdin` could not read stdin, or it was not UTF-8.
     #[error("cannot read the password from stdin")]
     Stdin(#[source] io::Error),
+    /// An argument that goes into the request path is not a valid name.
+    #[error("invalid {arg} {value:?}: {reason}")]
+    BadName {
+        /// Which argument.
+        arg: &'static str,
+        /// The value as given.
+        value: String,
+        /// What the name rules refuse.
+        #[source]
+        reason: SlugError,
+    },
     /// The OS random number generator failed while generating a password.
     #[error("cannot generate a password: the OS random number generator failed")]
     Rng,
@@ -190,6 +202,16 @@ impl Context<'_> {
             .write_all(text.as_bytes())
             .map_err(AdminError::Output)
     }
+}
+
+/// `value` checked as a name before it becomes one path segment: the URL parser would resolve
+/// `..`, `%2e%2e` and `\`, and split at `?` or `#`, so anything else could reach another route.
+pub(crate) fn segment(arg: &'static str, value: &str) -> Result<Slug, AdminError> {
+    Slug::parse(value).map_err(|reason| AdminError::BadName {
+        arg,
+        value: value.to_owned(),
+        reason,
+    })
 }
 
 /// `value` as pretty JSON with a final newline.

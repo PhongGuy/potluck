@@ -294,3 +294,79 @@ fn a_blob_over_the_content_cap_fails_closed_before_its_body_is_read() {
     );
     assert_eq!(calls, 0, "an oversized blob is never handed on");
 }
+
+#[test]
+fn messages_stream_for_commits_and_tags_and_skip_blobs_missing_names_and_big_objects() {
+    let s = Scratch::new();
+    let h = staged_history(&s);
+    s.tag("note", &h.merge);
+    let tag = s.stage("refs/tags/note");
+    s.git(
+        Some(&s.work),
+        &[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "--allow-empty-message",
+            "-m",
+            "",
+        ],
+    );
+    let empty = s.stage("main");
+    let big = s.dir.path().join("big-message");
+    let mut text = vec![b'a'; 1024 * 1024];
+    text.extend_from_slice(b"\nAKIAIOSFODNN7EXAMPLE\n");
+    std::fs::write(&big, &text).unwrap();
+    s.git(
+        Some(&s.work),
+        &["commit", "-q", "--allow-empty", "-F", big.to_str().unwrap()],
+    );
+    let huge = s.stage("main");
+    let mut seen = Vec::new();
+    git_for(&s)
+        .for_each_message(
+            &[
+                sha(&h.merge),
+                sha(&h.creds_blob),
+                sha(ZERO),
+                sha(&tag),
+                sha(&huge),
+                sha(&empty),
+                sha(&h.root),
+            ],
+            |sha, message| seen.push((sha.clone(), message.to_vec())),
+        )
+        .unwrap();
+    assert_eq!(
+        seen,
+        [
+            (sha(&h.merge), b"merge feat\n".to_vec()),
+            (sha(&tag), b"note\n".to_vec()),
+            (sha(&empty), Vec::new()),
+            (sha(&h.root), b"seed\n".to_vec()),
+        ],
+        "a blob, a missing name and an object over the cap are skipped; order is kept"
+    );
+    let mut none = 0;
+    git_for(&s).for_each_message(&[], |_, _| none += 1).unwrap();
+    assert_eq!(none, 0);
+}
+
+#[test]
+fn an_oversized_blob_is_an_error_for_the_blob_stream() {
+    let s = Scratch::new();
+    s.write("big.txt", &vec![b'a'; 1024 * 1024 + 1]);
+    let tip = s.commit("big");
+    s.stage("main");
+    let big = sha(&s.blob(&tip, "big.txt"));
+    assert!(
+        matches!(
+            git_for(&s).for_each_blob(&[big], |_, _| ()).unwrap_err(),
+            GitCmdError::Output {
+                subcommand: "cat-file",
+                ..
+            }
+        ),
+        "callers pre-filter by size, so a big blob here is a framing fault"
+    );
+}

@@ -91,12 +91,17 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     })?;
 
     // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
+    // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
     let router = crate::api::router(AppState::new(db.clone(), config.clone()));
     let (stop, rx) = watch::channel(false);
     let http = tokio::spawn(
-        axum::serve(tcp, with_actor(router.clone(), Actor::Anonymous))
-            .with_graceful_shutdown(stopped(rx.clone()))
-            .into_future(),
+        axum::serve(
+            tcp,
+            with_actor(router.clone(), Actor::Anonymous)
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(stopped(rx.clone()))
+        .into_future(),
     );
     let admin = tokio::spawn(
         axum::serve(unix, with_actor(router, Actor::System))

@@ -307,3 +307,90 @@ fn the_counted_parse_keeps_every_refusal_of_the_plain_parse() {
         "a tagged mapping is still walked"
     );
 }
+
+#[test]
+fn an_alias_or_a_merge_cannot_hide_a_valued_secret() {
+    for (name, bytes) in [
+        (
+            "env-alias-secret-value.yml",
+            fixture!("bad", "env-alias-secret-value.yml"),
+        ),
+        (
+            "env-merge-secret-value.yml",
+            fixture!("bad", "env-merge-secret-value.yml"),
+        ),
+        (
+            "aliased whole variable",
+            b"name: dev\nvariables:\n  - &v\n    secret: true\n    name: a\n    value: x\n  - *v\n"
+                as &[u8],
+        ),
+        (
+            "merge list, value from the second mapping",
+            b"a: &a {secret: true}\nb: &b {value: x}\nvariables:\n  - <<: [*a, *b]\n    name: k\n"
+                as &[u8],
+        ),
+        (
+            "merge brings secret, explicit value",
+            b"a: &a {secret: true}\nvariables:\n  - <<: *a\n    name: k\n    value: x\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            hit(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_merge_without_a_value_passes() {
+    assert_eq!(
+        Apinata.content_rule(
+            "environments/x.yml",
+            fixture!("good", "env-merge-secret-unvalued.yml")
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_explicit_null_value_beats_a_merged_value() {
+    // The anchor alone carries no `secret`, the variable alone no value.
+    let bytes =
+        b"a: &a {value: x}\nvariables:\n  - <<: *a\n    secret: true\n    name: k\n    value:\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
+}
+
+#[test]
+fn a_merge_under_a_tag_is_still_applied() {
+    let bytes = b"a: &a {value: x}\nv: !t {<<: *a, secret: true}\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), hit());
+}
+
+#[test]
+fn a_merge_yaml_serde_cannot_apply_is_unparsable() {
+    for (name, bytes) in [
+        (
+            "scalar merge",
+            b"variables:\n  - <<: 1\n    name: k\n" as &[u8],
+        ),
+        ("tagged merge", b"v: {<<: !t {k: 1}}\n" as &[u8]),
+        (
+            "scalar in merge list",
+            b"a: &a {secret: true}\nv: {<<: [*a, 1]}\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            unparsable(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_plain_merge_key_is_not_a_variable_key() {
+    // The merge key vanishes; a mapping with only `<<` and `name` has no secret.
+    let bytes = b"a: &a {name: base}\nvariables:\n  - <<: *a\n    secret: true\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
+}

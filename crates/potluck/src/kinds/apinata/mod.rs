@@ -55,13 +55,16 @@ impl Kind for Apinata {
 pub const NODE_CAP: usize = 2_000_000;
 
 /// The environment-file rule on `blob` alone with an explicit `node_cap`: `env_unparsable`
-/// when the bytes are not one YAML document or hold more than `node_cap` nodes,
-/// `secret_value` for a valued secret, else `None`. `content_rule` applies it with
-/// `NODE_CAP` to every path `is_environment_file` accepts.
+/// when the bytes are not one YAML document, hold more than `node_cap` nodes or carry a
+/// merge key yaml_serde cannot apply, `secret_value` for a valued secret once merges are
+/// folded in, else `None`. `content_rule` applies it with `NODE_CAP` to every path
+/// `is_environment_file` accepts.
 pub fn environment_rule(blob: &[u8], node_cap: usize) -> Option<Finding> {
     // Fail closed: Apinata reads with the same parser, so a file it refuses is one no
     // honest user relies on, and passing it would hide whatever it holds from the walk.
-    match parse_environment(blob, node_cap) {
+    // Count first so a merge cannot bypass the cap, merge before the walk so a pulled-in
+    // value is seen.
+    match parse_environment(blob, node_cap).and_then(|mut doc| doc.apply_merge().map(|()| doc)) {
         Ok(doc) => has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE)),
         Err(_) => Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
     }

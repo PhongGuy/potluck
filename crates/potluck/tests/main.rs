@@ -32,6 +32,7 @@ mod health_check;
 mod hooks;
 mod measurements;
 mod password;
+mod rate_limit;
 mod repos;
 mod serve;
 mod slug;

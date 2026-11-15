@@ -13,6 +13,7 @@ use crate::git::{GitEngine, GitLimits, Repos};
 
 mod actor;
 pub mod auth;
+pub mod client_ip;
 pub mod credential;
 pub mod error;
 mod system;

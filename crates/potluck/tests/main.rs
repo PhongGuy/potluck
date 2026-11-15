@@ -18,6 +18,7 @@ mod api_system;
 mod auth;
 mod authenticate;
 mod cli_version;
+mod client_ip;
 mod config;
 mod credential;
 mod db;

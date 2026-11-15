@@ -1,6 +1,6 @@
 //! The `potluck serve` flags and the validated [`Config`] built from them.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use url::{Host, Url};
@@ -30,6 +30,9 @@ pub struct ServeArgs {
     /// Tracing filter directive, such as `info` or `potluck=debug`.
     #[arg(long, env = "POTLUCK_LOG", default_value = "info")]
     log: String,
+    /// CIDRs or addresses whose `X-Forwarded-For` is believed; comma separated, none by default.
+    #[arg(long, env = "POTLUCK_TRUSTED_PROXIES", value_delimiter = ',')]
+    trusted_proxies: Vec<String>,
 }
 
 /// Validated server configuration. Built with `Config::try_from(ServeArgs)`.
@@ -42,6 +45,7 @@ pub struct Config {
     git: PathBuf,
     max_push_bytes: u64,
     log: String,
+    trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 impl Config {
@@ -73,6 +77,18 @@ impl Config {
     /// The tracing filter directive.
     pub fn log(&self) -> &str {
         &self.log
+    }
+
+    /// Whether `ip` is inside one of `--trusted-proxies`; an IPv4-mapped IPv6 address is tested
+    /// as its IPv4 form too.
+    pub fn trusts_proxy(&self, ip: IpAddr) -> bool {
+        let unmapped = match ip {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4),
+            IpAddr::V4(_) => None,
+        };
+        self.trusted_proxies
+            .iter()
+            .any(|net| net.contains(&ip) || unmapped.is_some_and(|v4| net.contains(&v4)))
     }
 
     /// `<data>/server.db`.
@@ -147,6 +163,14 @@ pub enum ConfigError {
         /// The io error's text.
         reason: String,
     },
+    /// A `--trusted-proxies` entry is neither an address nor a CIDR.
+    #[error("--trusted-proxies entry {value:?} is not an IP address or CIDR: {reason}")]
+    InvalidTrustedProxy {
+        /// The entry as given.
+        value: String,
+        /// The parser's complaint.
+        reason: String,
+    },
 }
 
 impl TryFrom<ServeArgs> for Config {
@@ -166,6 +190,7 @@ impl TryFrom<ServeArgs> for Config {
             path: args.data.clone(),
             reason: e.to_string(),
         })?;
+        let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
         Ok(Self {
             listen: args.listen,
             data,
@@ -173,8 +198,30 @@ impl TryFrom<ServeArgs> for Config {
             git: args.git,
             max_push_bytes: args.max_push_bytes,
             log: args.log,
+            trusted_proxies,
         })
     }
+}
+
+/// Each entry trimmed, empty ones dropped (so a trailing comma is harmless); a bare address
+/// becomes the single-host net it names, anything else must parse as a CIDR.
+fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<ipnet::IpNet>, ConfigError> {
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            if let Ok(addr) = entry.parse::<IpAddr>() {
+                return Ok(ipnet::IpNet::from(addr));
+            }
+            entry
+                .parse::<ipnet::IpNet>()
+                .map_err(|e| ConfigError::InvalidTrustedProxy {
+                    value: entry.to_owned(),
+                    reason: e.to_string(),
+                })
+        })
+        .collect()
 }
 
 /// Refuses a public URL that is malformed, carries credentials, a query or a fragment, is

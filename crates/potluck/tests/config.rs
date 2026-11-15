@@ -245,3 +245,64 @@ fn data_is_made_absolute_and_tmp_lives_under_it() {
     .unwrap();
     assert_eq!(config.tmp_dir(), Path::new("/srv/potluck/tmp"));
 }
+
+#[test]
+fn trusted_proxies_parse_cidrs_and_bare_addresses() {
+    let config = parse_config(&[
+        "--public-url",
+        "https://p.example.com",
+        "--trusted-proxies",
+        "10.0.0.0/8,192.168.1.5, fd00::/8,",
+    ])
+    .unwrap();
+    assert!(config.trusts_proxy("10.1.2.3".parse().unwrap()));
+    assert!(
+        config.trusts_proxy("192.168.1.5".parse().unwrap()),
+        "a bare address is itself"
+    );
+    assert!(!config.trusts_proxy("192.168.1.6".parse().unwrap()));
+    assert!(
+        config.trusts_proxy("fd00::1".parse().unwrap()),
+        "spaces around entries are trimmed"
+    );
+    assert!(!config.trusts_proxy("127.0.0.1".parse().unwrap()));
+}
+
+#[test]
+fn an_ipv4_mapped_ipv6_peer_matches_ipv4_cidrs() {
+    let config = parse_config(&[
+        "--public-url",
+        "https://p.example.com",
+        "--trusted-proxies",
+        "10.0.0.0/8",
+    ])
+    .unwrap();
+    assert!(config.trusts_proxy("::ffff:10.1.2.3".parse().unwrap()));
+    assert!(!config.trusts_proxy("::ffff:192.168.1.1".parse().unwrap()));
+    assert!(!config.trusts_proxy("fd00::1".parse().unwrap()));
+}
+
+#[test]
+fn no_proxy_is_trusted_by_default() {
+    let config = parse_config(&["--public-url", "https://p.example.com"]).unwrap();
+    assert!(!config.trusts_proxy("127.0.0.1".parse().unwrap()));
+    assert!(!config.trusts_proxy("10.0.0.1".parse().unwrap()));
+}
+
+#[test]
+fn a_bad_trusted_proxy_entry_is_refused() {
+    for bad in ["10.0.0.0/33", "proxy.example.com", "10.0.0/8", "fd00::/129"] {
+        let err = parse_config(&[
+            "--public-url",
+            "https://p.example.com",
+            "--trusted-proxies",
+            bad,
+        ])
+        .unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidTrustedProxy { .. }),
+            "{bad}: got {err:?}"
+        );
+        assert!(err.to_string().contains(bad), "{err}");
+    }
+}

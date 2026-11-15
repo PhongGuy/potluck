@@ -29,6 +29,7 @@ base64.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+ipnet.workspace = true
 jiff.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

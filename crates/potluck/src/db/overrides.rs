@@ -167,7 +167,10 @@ impl Db {
                 None => Ok(Disarmed::Missing),
                 Some(Some(_)) => Ok(Disarmed::Consumed),
                 Some(None) => {
-                    conn.execute("DELETE FROM overrides WHERE id = ?1", [id])?;
+                    conn.execute(
+                        "DELETE FROM overrides WHERE id = ?1 AND workspace_id = ?2",
+                        [id, workspace_id],
+                    )?;
                     Ok(Disarmed::Removed)
                 }
             }

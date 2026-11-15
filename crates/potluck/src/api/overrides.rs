@@ -137,6 +137,7 @@ pub(super) async fn disarm(
 fn actor_name(auth: &Authenticated) -> &str {
     match auth.actor() {
         Actor::User(caller) => caller.user().username(),
-        Actor::System | Actor::Anonymous => "system",
+        // Only `System` reaches this arm, since `load` has already refused `Anonymous`.
+        _ => "system",
     }
 }

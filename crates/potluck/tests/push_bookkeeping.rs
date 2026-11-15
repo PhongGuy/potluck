@@ -57,7 +57,7 @@ async fn import_server(with_override: bool) -> (GitServer, i64, i64) {
         )
         .await
         .unwrap();
-    let mut ctx = PushContext::new(ws.id(), "bob").import(true);
+    let mut ctx = PushContext::new(ws.id(), "bob");
     let mut access = TestAccess::new()
         .workspace("core", "api")
         .grant(TOKEN, "core", "api", Role::Write)

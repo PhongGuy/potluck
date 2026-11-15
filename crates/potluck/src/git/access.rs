@@ -62,34 +62,25 @@ impl Access {
     }
 }
 
-/// What bookkeeping needs about an accepted push: the workspace row, who pushed, and the flags
-/// the hook ran under. The resolver attaches it to a receive-pack `Access`; without it an
+/// What bookkeeping needs about an accepted push: the workspace row, who pushed, and the override
+/// the hook was given. The resolver attaches it to a receive-pack `Access`; without it an
 /// accepted push is served but not recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PushContext {
     workspace_id: i64,
     pusher: String,
-    import: bool,
     override_id: Option<i64>,
 }
 
 impl PushContext {
-    /// For `workspace_id`, pushed by `pusher` (a username), no flags.
+    /// For `workspace_id`, pushed by `pusher` (a username), with no override.
     pub fn new(workspace_id: i64, pusher: &str) -> Self {
         Self {
             workspace_id,
             pusher: pusher.to_owned(),
-            import: false,
             override_id: None,
         }
-    }
-
-    /// Whether the hook ran in import (tip-tree) mode.
-    #[must_use]
-    pub fn import(mut self, yes: bool) -> Self {
-        self.import = yes;
-        self
     }
 
     /// The override id the hook was given, if any.
@@ -107,11 +98,6 @@ impl PushContext {
     /// The pusher's username.
     pub fn pusher(&self) -> &str {
         &self.pusher
-    }
-
-    /// Whether the hook ran in import mode.
-    pub fn is_import(&self) -> bool {
-        self.import
     }
 
     /// The override id the hook was given, if any.
@@ -208,9 +194,7 @@ impl GitAccess for DbAccess {
                 access = access.with_hook_env("POTLUCK_OVERRIDE", &id.to_string());
             }
             // The same values the hook was given, so bookkeeping consumes exactly that override.
-            let push = PushContext::new(record.id(), user.user().username())
-                .import(record.import_pending())
-                .override_id(armed);
+            let push = PushContext::new(record.id(), user.user().username()).override_id(armed);
             Ok(access.with_push(push))
         })
     }

@@ -20,11 +20,7 @@ use crate::slug::Slug;
 /// `GET /workspaces/{team}/{ws}/events` (read; a user, so `System` is 403): `retry: 2000`, then
 /// one `ref` event per branch as the repository stands, then one per moved ref as pushes land,
 /// with the keep-alive comment every 15 s. Ends when the server closes it or the client lags.
-/// Order inside: `load` (401/404/403 as usual), `subscribe`, then the `list_refs` snapshot, then
-/// a re-check that drops the subscription and answers as `load` would when it fails: the token
-/// row still exists (`token_by_id`, else 401), its owner is not disabled (`user_by_username`,
-/// else 401), the workspace row still exists and the re-read owner is a server admin or holds a
-/// grant (else 404). Only then is the stream built.
+/// Access is re-checked once subscribed, so a grant lost meanwhile gets 401 or 404, not a stream.
 pub(super) async fn stream(
     State(state): State<AppState>,
     auth: Authenticated,

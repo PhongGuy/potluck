@@ -119,23 +119,23 @@ pub enum CommandError {
 pub fn parse_commands<R: Read>(mut body: R) -> Result<Vec<RefCommand>, CommandError> {
     let mut commands = Vec::new();
     for line in 1.. {
-        let malformed = CommandError::Malformed { line };
+        let malformed = || CommandError::Malformed { line };
         let mut header = [0u8; 4];
         read_exact(&mut body, &mut header)?;
         let len = std::str::from_utf8(&header)
             .ok()
             .filter(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
             .and_then(|hex| usize::from_str_radix(hex, 16).ok())
-            .ok_or(CommandError::Malformed { line })?;
+            .ok_or_else(malformed)?;
         // A flush ends the list; the other special lengths (delim, response-end) have no place here.
         match len {
             0 => break,
-            1..=4 => return Err(malformed),
+            1..=4 => return Err(malformed()),
             _ => {}
         }
         let mut payload = vec![0u8; len - 4];
         read_exact(&mut body, &mut payload)?;
-        let text = std::str::from_utf8(&payload).map_err(|_| CommandError::Malformed { line })?;
+        let text = std::str::from_utf8(&payload).map_err(|_| malformed())?;
         let text = text.strip_suffix('\n').unwrap_or(text);
         if text.starts_with("shallow ") {
             continue;
@@ -144,10 +144,10 @@ pub fn parse_commands<R: Read>(mut body: R) -> Result<Vec<RefCommand>, CommandEr
         let mut parts = text.splitn(3, ' ');
         let (Some(old), Some(new), Some(ref_name)) = (parts.next(), parts.next(), parts.next())
         else {
-            return Err(malformed);
+            return Err(malformed());
         };
         if !is_sha(old) || !is_sha(new) || ref_name.is_empty() {
-            return Err(malformed);
+            return Err(malformed());
         }
         // Checked before reading further, so an endless body is cut off at the cap.
         if commands.len() == MAX_COMMANDS {

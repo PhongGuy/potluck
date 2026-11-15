@@ -1,7 +1,14 @@
 //! The JSON objects serialise to the contract's shapes, and the test app serves.
 
-use potluck::api::objects::{IdentityJson, TokenJson, UserJson, identity};
+use potluck::api::objects::{
+    GrantJson, IdentityJson, SubjectJson, TeamJson, TokenJson, UserJson, WorkspaceJson, identity,
+    noreply_host,
+};
 use potluck::db::accounts::{NewToken, NewUser, UserPatch};
+use potluck::db::grants::{GrantRecord, Subject};
+use potluck::db::workspaces::NewWorkspace;
+use potluck::role::Role;
+use potluck::slug::Slug;
 use serde_json::json;
 
 use crate::common::{client, migrated_db, test_app};
@@ -73,5 +80,60 @@ async fn the_test_app_serves_the_api() {
         app.db.list_users().await.unwrap().len(),
         0,
         "the app's database is reachable"
+    );
+}
+
+#[tokio::test]
+async fn team_workspace_and_grant_json_match_the_contract() {
+    let (_dir, db) = migrated_db().await;
+    let core = db
+        .create_team(&Slug::parse("core").unwrap(), "Core")
+        .await
+        .unwrap();
+    let ws = db
+        .create_workspace(NewWorkspace::new(
+            core.id(),
+            &Slug::parse("api").unwrap(),
+            "API",
+            "apinata",
+            "main",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(TeamJson::new(&core, vec!["ann".into(), "bob".into()])).unwrap(),
+        json!({"slug": "core", "name": "Core", "members": ["ann", "bob"]})
+    );
+    assert_eq!(
+        serde_json::to_value(WorkspaceJson::new(
+            &ws,
+            Role::Write,
+            "https://team.example.com/potluck"
+        ))
+        .unwrap(),
+        json!({"team": "core", "slug": "api", "name": "API", "kind": "apinata", "default_branch": "main", "role": "write",
+               "git_url": "https://team.example.com/potluck/git/core/api.git",
+               "events_url": "https://team.example.com/potluck/api/v1/workspaces/core/api/events"})
+    );
+    assert_eq!(
+        serde_json::to_value(SubjectJson::from(&Subject::User("bob".into()))).unwrap(),
+        json!({"kind": "user", "name": "bob"})
+    );
+    assert_eq!(
+        serde_json::to_value(GrantJson::from(&GrantRecord::new(
+            Subject::Team("core".into()),
+            Role::Admin
+        )))
+        .unwrap(),
+        json!({"subject": {"kind": "team", "name": "core"}, "role": "admin"})
+    );
+    assert_eq!(
+        noreply_host("https://team.example.com/potluck"),
+        "team.example.com"
+    );
+    assert_eq!(
+        noreply_host("not a url"),
+        "localhost",
+        "the fallback host, never a panic"
     );
 }

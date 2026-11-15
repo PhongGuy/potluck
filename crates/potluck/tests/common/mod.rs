@@ -1,5 +1,7 @@
 //! Shared helpers. Every test reaches only 127.0.0.1 or a Unix socket under a temp dir.
 
+use std::net::SocketAddr;
+use std::path::Path;
 use std::process::Command;
 
 /// The built `potluck` binary with an empty environment, so no `POTLUCK_*` variable or
@@ -12,6 +14,7 @@ pub fn potluck() -> Command {
 
 use clap::Parser;
 use potluck::config::{Config, ConfigError, ServeArgs};
+use potluck::db::Db;
 
 #[derive(Parser)]
 struct ServeWrap {
@@ -25,4 +28,38 @@ pub fn parse_config(args: &[&str]) -> Result<Config, ConfigError> {
     let argv = std::iter::once("potluck").chain(args.iter().copied());
     let wrap = ServeWrap::try_parse_from(argv).expect("flags parse");
     Config::try_from(wrap.serve)
+}
+
+/// A `Config` for a server on an ephemeral loopback port with `dir` as its data directory.
+pub fn config_for(dir: &Path) -> Config {
+    let data = dir.to_str().expect("utf-8 temp path");
+    parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data,
+        "--public-url",
+        "http://127.0.0.1:8080",
+    ])
+    .expect("test config")
+}
+
+/// Serves `router` on an ephemeral loopback port for the life of the returned task.
+pub async fn serve(router: axum::Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve");
+    });
+    (addr, task)
+}
+
+/// A migrated database in its own temp dir.
+pub async fn migrated_db() -> (tempfile::TempDir, Db) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let db = Db::open(&dir.path().join("server.db")).expect("open");
+    db.migrate().await.expect("migrate");
+    (dir, db)
 }

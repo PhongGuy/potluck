@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
+mod migrations;
+
 /// A handle to the one connection to `server.db`, owned by a dedicated thread.
 /// Clones share the thread; `close` stops it.
 #[derive(Clone)]
@@ -144,6 +146,17 @@ impl Db {
             Ok(())
         })
         .await
+    }
+
+    /// Runs the shipped migrations; returns the schema version afterwards.
+    pub async fn migrate(&self) -> Result<u32, DbError> {
+        self.call(|c| migrations::migrate_with(c, migrations::MIGRATIONS))
+            .await
+    }
+
+    /// `PRAGMA user_version`.
+    pub async fn schema_version(&self) -> Result<u32, DbError> {
+        self.call(|c| migrations::user_version(c)).await
     }
 
     /// Stops the thread; every later call fails with `Closed`. Idempotent.

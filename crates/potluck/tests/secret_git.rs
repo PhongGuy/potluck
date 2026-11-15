@@ -1,8 +1,10 @@
 //! Ref lines, and the plumbing calls against a scratch repository.
 
-use potluck::secret_check::git::{ParseError, RefUpdate, Sha};
+use std::path::PathBuf;
 
-use crate::common::scratch::Scratch;
+use potluck::secret_check::git::{Git, GitCmdError, ObjectType, ParseError, RefUpdate, Sha};
+
+use crate::common::scratch::{Scratch, staged_history};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 
@@ -29,6 +31,10 @@ fn ref_update_lines_parse_and_a_zero_new_is_a_delete() {
     ));
     assert!(matches!(
         RefUpdate::parse_line(&format!("{ZERO} {a} refs/heads/two words")).unwrap_err(),
+        ParseError::Shape { .. }
+    ));
+    assert!(matches!(
+        RefUpdate::parse_line(&format!("{ZERO} {a} ")).unwrap_err(),
         ParseError::Shape { .. }
     ));
     assert!(matches!(
@@ -62,4 +68,96 @@ fn scratch_stages_objects_without_refs_and_publishes_with_them() {
     );
     s.publish("main");
     assert_eq!(s.bare_git(&["rev-parse", "refs/heads/main"]), tip);
+}
+
+fn git_for(s: &Scratch) -> Git {
+    Git::new(s.isolated_git(), Some(s.bare.clone()))
+}
+
+#[test]
+fn new_commits_exclude_what_the_server_has_and_what_the_caller_names() {
+    let s = Scratch::new();
+    let h = staged_history(&s);
+    let git = git_for(&s);
+    let all = git.new_commits(&sha(&h.tip), &[]).unwrap();
+    assert_eq!(all.len(), 5, "env, more, merge, add, remove: {all:?}");
+    assert!(all.contains(&sha(&h.merge)));
+    assert!(
+        !all.contains(&sha(&h.root)),
+        "the published seed is not new"
+    );
+    assert_eq!(
+        git.new_commits(&sha(&h.tip), &[sha(&h.merge)])
+            .unwrap()
+            .len(),
+        2,
+        "only add and remove sit above the merge"
+    );
+}
+
+#[test]
+fn new_objects_are_the_blobs_the_server_lacks() {
+    let s = Scratch::new();
+    let h = staged_history(&s);
+    let objects = git_for(&s).new_objects(&sha(&h.tip), &[]).unwrap();
+    assert!(objects.contains(&sha(&h.env_blob)));
+    assert!(objects.contains(&sha(&h.creds_blob)));
+    assert!(objects.contains(&sha(&h.merge)), "commits are objects too");
+    assert!(
+        !objects.contains(&sha(&h.seed_readme)),
+        "the seed README blob is already there"
+    );
+}
+
+#[test]
+fn peel_reports_the_target_type() {
+    let s = Scratch::new();
+    let h = staged_history(&s);
+    let git = git_for(&s);
+    assert_eq!(
+        git.peel(&sha(&h.tip)).unwrap(),
+        (sha(&h.tip), ObjectType::Commit)
+    );
+    let tree = s.work_git(&["rev-parse", "main^{tree}"]);
+    s.tag("tree-tag", &tree);
+    s.tag("blob-tag", &h.creds_blob);
+    s.tag("tag-tag", "refs/tags/blob-tag");
+    let tree_tag = s.stage("refs/tags/tree-tag");
+    let blob_tag = s.stage("refs/tags/blob-tag");
+    let tag_tag = s.stage("refs/tags/tag-tag");
+    assert_eq!(
+        git.peel(&sha(&tree_tag)).unwrap(),
+        (sha(&tree), ObjectType::Tree)
+    );
+    assert_eq!(
+        git.peel(&sha(&blob_tag)).unwrap(),
+        (sha(&h.creds_blob), ObjectType::Blob)
+    );
+    assert_eq!(
+        git.peel(&sha(&tag_tag)).unwrap(),
+        (sha(&h.creds_blob), ObjectType::Blob),
+        "a tag of a tag peels through"
+    );
+    assert!(
+        matches!(
+            git.peel(&sha(ZERO)).unwrap_err(),
+            GitCmdError::Output {
+                subcommand: "cat-file",
+                ..
+            }
+        ),
+        "a missing object"
+    );
+    assert!(
+        git.new_commits(&sha(&blob_tag), &[]).unwrap().is_empty(),
+        "rev-list sees no commit behind a blob tag"
+    );
+    let no_binary = Git::new(PathBuf::from("/nonexistent/git"), Some(s.bare.clone()));
+    assert!(
+        matches!(
+            no_binary.peel(&sha(ZERO)).unwrap_err(),
+            GitCmdError::Spawn { .. }
+        ),
+        "a missing binary is Spawn, not a panic"
+    );
 }

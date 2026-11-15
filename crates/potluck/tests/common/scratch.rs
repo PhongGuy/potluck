@@ -87,3 +87,97 @@ impl Scratch {
         self.work_git(&["rev-parse", rev])
     }
 }
+
+impl Scratch {
+    pub fn remove(&self, rel: &str) {
+        std::fs::remove_file(self.work.join(rel)).unwrap();
+    }
+
+    /// The blob name of `rel` at `rev`.
+    pub fn blob(&self, rev: &str, rel: &str) -> String {
+        self.work_git(&["rev-parse", &format!("{rev}:{rel}")])
+    }
+
+    pub fn branch(&self, name: &str) {
+        self.git(Some(&self.work), &["checkout", "-q", "-b", name]);
+    }
+
+    pub fn checkout(&self, name: &str) {
+        self.git(Some(&self.work), &["checkout", "-q", name]);
+    }
+
+    /// A merge commit of `name` into the current branch; returns it.
+    pub fn merge(&self, name: &str) -> String {
+        self.git(
+            Some(&self.work),
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                &format!("merge {name}"),
+                name,
+            ],
+        );
+        self.work_git(&["rev-parse", "HEAD"])
+    }
+
+    /// A sh wrapper that runs the system git with the same isolation as `common::git`, for
+    /// code under test that takes a git binary and passes its own environment through.
+    pub fn isolated_git(&self) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.dir.path().join("isolated-git");
+        let home = self.dir.path().to_str().unwrap();
+        let script = format!(
+            "#!/bin/sh\nHOME='{home}' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 exec git \"$@\"\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// An annotated tag `name` on any object `target` (a commit, tree, blob or tag).
+    pub fn tag(&self, name: &str, target: &str) -> String {
+        self.git(Some(&self.work), &["tag", "-a", "-m", name, name, target]);
+        self.work_git(&["rev-parse", &format!("refs/tags/{name}")])
+    }
+}
+
+/// Names from `staged_history`.
+pub struct History {
+    pub tip: String,
+    pub merge: String,
+    pub root: String,
+    pub env_blob: String,
+    pub creds_blob: String,
+    pub seed_readme: String,
+}
+
+/// main: seed (published). Then feat adds environments/dev.yml; main edits README and adds
+/// `notes/with space.txt`; merge feat; add creds.txt; remove creds.txt. Staged, not published.
+pub fn staged_history(s: &Scratch) -> History {
+    s.write("README", b"seed\n");
+    let root = s.commit("seed");
+    s.publish("main");
+    s.branch("feat");
+    s.write("environments/dev.yml", b"name: dev\n");
+    let env_commit = s.commit("env");
+    s.checkout("main");
+    s.write("README", b"seed\nmore\n");
+    s.write("notes/with space.txt", b"n\n");
+    s.commit("more");
+    let merge = s.merge("feat");
+    s.write("creds.txt", b"AKIAIOSFODNN7EXAMPLE\n");
+    let add = s.commit("add creds");
+    s.remove("creds.txt");
+    s.commit("remove creds");
+    let tip = s.stage("main");
+    History {
+        env_blob: s.blob(&env_commit, "environments/dev.yml"),
+        creds_blob: s.blob(&add, "creds.txt"),
+        seed_readme: s.blob(&root, "README"),
+        tip,
+        merge,
+        root,
+    }
+}

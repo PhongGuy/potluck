@@ -1,6 +1,12 @@
 //! The git plumbing the hook runs inside the push's quarantine.
 
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 
 /// A hex object name: 40 (SHA-1) or 64 (SHA-256) lower-case hex digits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -106,5 +112,258 @@ pub enum ParseError {
     Shape {
         /// The whole line.
         line: String,
+    },
+}
+
+/// What a pushed ref points at once tags are peeled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ObjectType {
+    /// A commit: the spec's path.
+    Commit,
+    /// A bare tree: scanned whole.
+    Tree,
+    /// A bare blob: one entry at path `-`.
+    Blob,
+}
+
+/// Runs git against one repository. The child inherits this process's environment, so git's
+/// quarantine variables reach it; `git_dir`, when set, is passed as `GIT_DIR`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Git {
+    binary: PathBuf,
+    git_dir: Option<PathBuf>,
+}
+
+/// What a git child's stderr is kept up to; the rest is read and dropped.
+const STDERR_KEEP: u64 = 4096;
+
+impl Git {
+    /// `POTLUCK_GIT` (default `git`); the repository is whatever `GIT_DIR` and the cwd say.
+    pub fn from_env() -> Git {
+        let binary = std::env::var_os("POTLUCK_GIT").unwrap_or_else(|| OsString::from("git"));
+        Git::new(PathBuf::from(binary), None)
+    }
+
+    /// A runner for `binary`, with `git_dir` passed as `GIT_DIR` when set.
+    pub fn new(binary: PathBuf, git_dir: Option<PathBuf>) -> Git {
+        Git { binary, git_dir }
+    }
+
+    /// `cat-file --batch-check` on `<sha>^{}`: the peeled object and its type. A missing
+    /// object or a type other than commit, tree or blob is `GitCmdError::Output`.
+    pub fn peel(&self, sha: &Sha) -> Result<(Sha, ObjectType), GitCmdError> {
+        const SUB: &str = "cat-file";
+        let out = self.run(
+            SUB,
+            &[OsStr::new("--batch-check")],
+            Some(format!("{sha}^{{}}\n").into_bytes()),
+        )?;
+        let text = String::from_utf8_lossy(&out);
+        let line = text.lines().next().unwrap_or_default();
+        let unexpected = || GitCmdError::Output {
+            subcommand: SUB,
+            detail: format!("{line:?}"),
+        };
+        // A found object answers `<sha> <type> <size>`; `<name> missing` has two fields.
+        let [name, kind, _size] = line.split(' ').collect::<Vec<_>>()[..] else {
+            return Err(unexpected());
+        };
+        let kind = match kind {
+            "commit" => ObjectType::Commit,
+            "tree" => ObjectType::Tree,
+            "blob" => ObjectType::Blob,
+            _ => return Err(unexpected()),
+        };
+        let peeled = Sha::parse(name).map_err(|_| unexpected())?;
+        Ok((peeled, kind))
+    }
+
+    /// `rev-list <tip> --not --all <exclude..>`: commits new to the repository.
+    pub fn new_commits(&self, tip: &Sha, exclude: &[Sha]) -> Result<Vec<Sha>, GitCmdError> {
+        self.rev_list(&[], tip, exclude)
+    }
+
+    /// `rev-list --objects <tip> --not --all <exclude..>`: every new object's name.
+    pub fn new_objects(&self, tip: &Sha, exclude: &[Sha]) -> Result<HashSet<Sha>, GitCmdError> {
+        Ok(self
+            .rev_list(&["--objects"], tip, exclude)?
+            .into_iter()
+            .collect())
+    }
+
+    /// `rev-list <flags> <tip> --not --all <exclude..>`, keeping the first token of each line:
+    /// with `--objects` a line may carry a path after the name, in any bytes.
+    fn rev_list(
+        &self,
+        flags: &[&str],
+        tip: &Sha,
+        exclude: &[Sha],
+    ) -> Result<Vec<Sha>, GitCmdError> {
+        const SUB: &str = "rev-list";
+        let mut args: Vec<&OsStr> = flags.iter().map(OsStr::new).collect();
+        args.push(OsStr::new(tip.as_str()));
+        args.push(OsStr::new("--not"));
+        args.push(OsStr::new("--all"));
+        args.extend(exclude.iter().map(|s| OsStr::new(s.as_str())));
+        let out = self.run(SUB, &args, None)?;
+        out.split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let name = line.split(|&b| b == b' ').next().unwrap_or_default();
+                std::str::from_utf8(name)
+                    .ok()
+                    .and_then(|hex| Sha::parse(hex).ok())
+                    .ok_or_else(|| GitCmdError::Output {
+                        subcommand: SUB,
+                        detail: format!("{:?}", String::from_utf8_lossy(line)),
+                    })
+            })
+            .collect()
+    }
+
+    /// Starts `git <args>` with stdin, stdout and stderr piped, feeding `input` from its own
+    /// thread and draining stderr on another (capped at STDERR_KEEP): git blocks once a pipe
+    /// holds 64 KiB, so writing everything first and reading after deadlocks on large inputs or
+    /// outputs. The caller reads stdout, then calls `finish`.
+    fn spawn(
+        &self,
+        subcommand: &'static str,
+        args: &[&OsStr],
+        input: Option<Vec<u8>>,
+    ) -> Result<Running, GitCmdError> {
+        let mut cmd = Command::new(&self.binary);
+        if let Some(dir) = &self.git_dir {
+            cmd.env("GIT_DIR", dir);
+        }
+        cmd.arg(subcommand)
+            .args(args)
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|source| GitCmdError::Spawn { subcommand, source })?;
+        let writer = input.and_then(|bytes| {
+            let mut stdin = child.stdin.take()?;
+            // EPIPE here means git quit early; its exit status says why.
+            Some(std::thread::spawn(move || {
+                let _ = stdin.write_all(&bytes);
+            }))
+        });
+        let stderr = child.stderr.take();
+        let drain = std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            if let Some(mut err) = stderr {
+                let _ = (&mut err).take(STDERR_KEEP).read_to_end(&mut kept);
+                let _ = std::io::copy(&mut err, &mut std::io::sink());
+            }
+            kept
+        });
+        Ok(Running {
+            subcommand,
+            child,
+            writer,
+            drain,
+        })
+    }
+
+    /// `spawn`, read stdout to EOF, `finish`; returns stdout.
+    fn run(
+        &self,
+        subcommand: &'static str,
+        args: &[&OsStr],
+        input: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>, GitCmdError> {
+        let mut running = self.spawn(subcommand, args, input)?;
+        let mut out = Vec::new();
+        let read = match running.child.stdout.take() {
+            Some(mut stdout) => stdout.read_to_end(&mut out).map(|_| ()),
+            None => Ok(()),
+        };
+        if let Err(source) = read {
+            running.abort();
+            return Err(GitCmdError::Spawn { subcommand, source });
+        }
+        running.finish()?;
+        Ok(out)
+    }
+}
+
+/// A git child with its two helper threads; `finish` joins them and checks the exit status.
+struct Running {
+    subcommand: &'static str,
+    child: Child,
+    writer: Option<JoinHandle<()>>,
+    drain: JoinHandle<Vec<u8>>,
+}
+
+impl Running {
+    /// Waits for git, joins the threads, and turns a non-zero exit into `Failed` with the
+    /// first kept stderr line. On an earlier parse failure call `abort` instead.
+    fn finish(mut self) -> Result<(), GitCmdError> {
+        let subcommand = self.subcommand;
+        let status = self.child.wait();
+        let stderr = self.join();
+        let status = status.map_err(|source| GitCmdError::Spawn { subcommand, source })?;
+        if status.success() {
+            return Ok(());
+        }
+        let text = String::from_utf8_lossy(&stderr);
+        Err(GitCmdError::Failed {
+            subcommand,
+            stderr: text.lines().next().unwrap_or_default().trim().to_owned(),
+        })
+    }
+
+    /// Kills git first, so a writer blocked on a full stdin pipe wakes up, then joins both threads.
+    fn abort(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.join();
+    }
+
+    /// Joins the writer and the stderr drain; a panicked thread keeps nothing.
+    fn join(self) -> Vec<u8> {
+        if let Some(writer) = self.writer {
+            let _ = writer.join();
+        }
+        self.drain.join().unwrap_or_default()
+    }
+}
+
+/// Why a plumbing call failed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum GitCmdError {
+    /// git could not be started, or its output could not be read.
+    #[error("cannot run git {subcommand}: {source}")]
+    Spawn {
+        /// The subcommand.
+        subcommand: &'static str,
+        /// The io error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// git exited non-zero.
+    #[error("git {subcommand} failed: {stderr}")]
+    Failed {
+        /// The subcommand.
+        subcommand: &'static str,
+        /// Its first stderr line, trimmed.
+        stderr: String,
+    },
+    /// git exited 0 with output this module cannot read.
+    #[error("unexpected git {subcommand} output: {detail}")]
+    Output {
+        /// The subcommand.
+        subcommand: &'static str,
+        /// What was unexpected.
+        detail: String,
     },
 }

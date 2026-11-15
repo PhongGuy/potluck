@@ -16,7 +16,9 @@ use axum::routing::{get, post};
 use crate::api::AppState;
 use crate::api::credential::credential_from_headers;
 use crate::api::error::ApiError;
-use crate::git::access::Access;
+use crate::git::access::{Access, PushContext};
+use crate::git::engine::PushObserver;
+use crate::git::push::RefMove;
 use crate::git::{GitError, Service};
 use crate::slug::Slug;
 
@@ -101,6 +103,12 @@ async fn rpc(
                 .map_err(|_| ApiError::invalid_request("unsupported Content-Encoding"))?,
         ),
     };
+    // Only a receive-pack the resolver tied to a workspace is watched; everything else is served
+    // without bookkeeping.
+    let on_push = match (service, access.push()) {
+        (Service::ReceivePack, Some(ctx)) => Some(observer(state, ctx.clone())),
+        _ => None,
+    };
     let out = state
         .git()
         .rpc(
@@ -110,10 +118,38 @@ async fn rpc(
             encoding,
             access.hook_env(),
             body,
-            None,
+            on_push,
         )
         .await?;
     Ok(git_response(service.result_type(), out))
+}
+
+/// Logs a push's confirmed moves and publishes them on its workspace's topic. It runs on the
+/// reaper task, so it stays synchronous and cheap.
+fn observer(state: &AppState, ctx: PushContext) -> PushObserver {
+    let notices = state.notices().clone();
+    Box::new(move |moves: Vec<RefMove>| {
+        if moves.is_empty() {
+            tracing::debug!(
+                workspace_id = ctx.workspace_id(),
+                pusher = ctx.pusher(),
+                "push moved no refs"
+            );
+            return;
+        }
+        let refs = moves
+            .iter()
+            .map(|m| format!("{} {}..{}", m.ref_name(), m.old(), m.new_sha()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::info!(
+            workspace_id = ctx.workspace_id(),
+            pusher = ctx.pusher(),
+            refs,
+            "push accepted"
+        );
+        notices.publish(ctx.workspace_id(), &moves);
+    })
 }
 
 /// The checks every route shares, in the order that leaks least: the repository name, the

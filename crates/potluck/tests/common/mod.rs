@@ -17,8 +17,9 @@ use potluck::auth::token::MintedToken;
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
 use potluck::db::accounts::{NewToken, NewUser, UserRecord};
-use potluck::git::access::{Access, BoxFuture, GitAccess};
+use potluck::git::access::{Access, BoxFuture, GitAccess, PushContext};
 use potluck::git::{GitLimits, Repos};
+use potluck::notices::Notices;
 use potluck::role::Role;
 use potluck::server::{Running, start};
 use potluck::slug::Slug;
@@ -233,6 +234,7 @@ pub struct TestAccess {
     workspaces: HashSet<(String, String)>,
     grants: HashMap<(String, String, String), Role>,
     hook_env: Vec<(String, String)>,
+    push: Option<PushContext>,
 }
 
 impl TestAccess {
@@ -252,6 +254,11 @@ impl TestAccess {
     /// Every granted `Access` carries `key=value` for the hook.
     pub fn hook_env(mut self, key: &str, value: &str) -> Self {
         self.hook_env.push((key.into(), value.into()));
+        self
+    }
+    /// Every granted `Access` carries `push` (so pushes are recorded against it).
+    pub fn push_context(mut self, push: PushContext) -> Self {
+        self.push = Some(push);
         self
     }
 }
@@ -282,10 +289,14 @@ impl GitAccess for TestAccess {
                     ws.to_string(),
                 ))
                 .ok_or_else(|| ApiError::not_found("no such workspace"))?;
-            Ok(self
+            let access = self
                 .hook_env
                 .iter()
-                .fold(Access::new(*role), |a, (k, v)| a.with_hook_env(k, v)))
+                .fold(Access::new(*role), |a, (k, v)| a.with_hook_env(k, v));
+            Ok(match &self.push {
+                Some(ctx) => access.with_push(ctx.clone()),
+                None => access,
+            })
         })
     }
 }
@@ -297,6 +308,7 @@ pub struct GitServer {
     pub dir: tempfile::TempDir,
     pub base: String,
     pub repos: Repos,
+    pub notices: Notices,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -354,11 +366,13 @@ pub async fn git_server_at(
     if let Some(limits) = limits {
         state = state.with_git_limits(limits);
     }
+    let notices = state.notices().clone();
     let (addr, task) = serve(router(state)).await;
     GitServer {
         dir,
         base: format!("http://{addr}"),
         repos,
+        notices,
         _task: task,
     }
 }

@@ -42,6 +42,7 @@ mod release_workflow;
 mod repos;
 mod secret_entries;
 mod secret_git;
+mod secret_report;
 mod serve;
 mod session;
 mod session_proxies;

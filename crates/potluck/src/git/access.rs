@@ -80,7 +80,10 @@ impl GitAccess for DenyAll {
 /// The resolver over `server.db`: the credential through `authenticate_with` (401 for an
 /// unknown, expired or revoked token or a disabled owner), the workspace by slugs (404), the
 /// role through `workspace_role` (server admins are `Admin` everywhere, else the highest grant;
-/// none is the same 404). The hook environment is empty until the next task.
+/// none is the same 404), and the hook environment, in this order: `POTLUCK_KIND` (the workspace's
+/// kind), `POTLUCK_PUSHER` (username), `POTLUCK_PUSHER_TOKEN` (the token's row id),
+/// `POTLUCK_IMPORT=1` only while the import state is set, `POTLUCK_OVERRIDE=<id>` only when an
+/// override is armed for the pusher.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct DbAccess {
@@ -102,7 +105,8 @@ impl GitAccess for DbAccess {
         ws: &'a Slug,
     ) -> BoxFuture<'a, Result<Access, ApiError>> {
         Box::pin(async move {
-            let actor = Actor::User(authenticate_with(&self.db, credential).await?);
+            let user = authenticate_with(&self.db, credential).await?;
+            let actor = Actor::User(user.clone());
             // A workspace the caller holds no role on is answered exactly like a missing one.
             let no_ws = || ApiError::not_found("no such workspace");
             let Some(record) = self
@@ -112,10 +116,26 @@ impl GitAccess for DbAccess {
             else {
                 return Err(no_ws());
             };
-            match workspace_role(&self.db, &actor, &record).await? {
-                Some(role) => Ok(Access::new(role)),
-                None => Err(no_ws()),
+            let Some(role) = workspace_role(&self.db, &actor, &record).await? else {
+                return Err(no_ws());
+            };
+            // The flags are looked up only once the role is known, so a 404 costs no extra query.
+            // The token travels by row id only; the secret itself never reaches the hook.
+            let mut access = Access::new(role)
+                .with_hook_env("POTLUCK_KIND", record.kind())
+                .with_hook_env("POTLUCK_PUSHER", user.user().username())
+                .with_hook_env("POTLUCK_PUSHER_TOKEN", &user.token_id().to_string());
+            if record.import_pending() {
+                access = access.with_hook_env("POTLUCK_IMPORT", "1");
             }
+            let armed = self
+                .db
+                .armed_override(record.id(), user.user().id())
+                .await?;
+            if let Some(id) = armed {
+                access = access.with_hook_env("POTLUCK_OVERRIDE", &id.to_string());
+            }
+            Ok(access)
         })
     }
 }

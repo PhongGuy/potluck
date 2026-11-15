@@ -8,7 +8,7 @@ use serde_json::json;
 
 use crate::common::{
     FullServer, SEED_COMMIT, api_admin, api_team, api_user, api_workspace, call, failed,
-    full_server, git, ok, work_tree,
+    full_server, git, ok, work_tree, write_hook,
 };
 
 struct Arena {
@@ -244,5 +244,84 @@ async fn roles_decide_who_fetches_and_pushes() {
     assert!(
         out.contains("not found"),
         "every grant gone: the clone cannot even fetch: {out}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hook_sees_kind_pusher_token_and_flags() {
+    let a = arena(false).await;
+    grant(&a, "api", "user", "bob", "write").await;
+    write_hook(
+        &a.server.hooks_dir(),
+        "echo \"kind=$POTLUCK_KIND pusher=$POTLUCK_PUSHER token=$POTLUCK_PUSHER_TOKEN import=$POTLUCK_IMPORT override=$POTLUCK_OVERRIDE\" >&2\nexit 1",
+    );
+    let work = work_tree(&a.home, "work");
+    let bob = a
+        .server
+        .db()
+        .user_by_username("bob")
+        .await
+        .unwrap()
+        .unwrap();
+    let token_id = a.server.db().tokens_for_user(bob.id()).await.unwrap()[0].id();
+    let out = failed(git(
+        &a.home,
+        Some(&work),
+        Some(&a.bob),
+        &["push", "--porcelain", &a.url, "main"],
+    ));
+    assert!(
+        out.contains(&format!(
+            "remote: kind=apinata pusher=bob token={token_id} import=1 override="
+        )),
+        "{out}"
+    );
+    let ws = a
+        .server
+        .db()
+        .workspace_by_slugs("core", "api")
+        .await
+        .unwrap()
+        .unwrap();
+    let id = a
+        .server
+        .db()
+        .arm_override(ws.id(), bob.id(), "import", "system")
+        .await
+        .unwrap();
+    let out = failed(git(
+        &a.home,
+        Some(&work),
+        Some(&a.bob),
+        &["push", "--porcelain", &a.url, "main"],
+    ));
+    assert!(
+        out.contains(&format!("import=1 override={id}")),
+        "an armed override reaches the hook: {out}"
+    );
+    api_workspace(&a.server.api(""), &a.root, "core", "docs", true).await;
+    grant(&a, "docs", "user", "bob", "write").await;
+    let docs = a.server.git_url("core", "docs");
+    let out = failed(git(
+        &a.home,
+        Some(&work),
+        Some(&a.bob),
+        &["push", "--porcelain", &docs, "main:refs/heads/extra"],
+    ));
+    assert!(
+        out.contains(&format!(
+            "remote: kind=apinata pusher=bob token={token_id} import= override="
+        )),
+        "a seeded workspace has no import flag: {out}"
+    );
+    assert_eq!(
+        ok(git(
+            &a.home,
+            Some(&a.home),
+            Some(&a.root),
+            &["ls-remote", &a.url]
+        )),
+        "",
+        "the declining hook let nothing land"
     );
 }

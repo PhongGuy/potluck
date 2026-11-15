@@ -394,3 +394,23 @@ fn a_plain_merge_key_is_not_a_variable_key() {
     let bytes = b"a: &a {name: base}\nvariables:\n  - <<: *a\n    secret: true\n";
     assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
 }
+
+#[test]
+fn a_chained_merge_cannot_hide_a_valued_secret() {
+    for (name, bytes) in [
+        (
+            "plain chain",
+            b"base: &b {value: x}\nmid: &m {<<: *b}\nvariables:\n  - <<: *m\n    secret: true\n    name: k\n" as &[u8],
+        ),
+        (
+            "chain through merge lists",
+            b"base: &b {value: x}\nmid: &m {<<: [*b]}\nvariables:\n  - <<: [*m]\n    secret: true\n    name: k\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            hit(),
+            "{name}"
+        );
+    }
+}

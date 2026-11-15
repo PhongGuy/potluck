@@ -64,9 +64,40 @@ pub fn environment_rule(blob: &[u8], node_cap: usize) -> Option<Finding> {
     // honest user relies on, and passing it would hide whatever it holds from the walk.
     // Count first so a merge cannot bypass the cap, merge before the walk so a pulled-in
     // value is seen.
-    match parse_environment(blob, node_cap).and_then(|mut doc| doc.apply_merge().map(|()| doc)) {
-        Ok(doc) => has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE)),
-        Err(_) => Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
+    let Ok(mut doc) = parse_environment(blob, node_cap) else {
+        return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE));
+    };
+    if !fold_merges(&mut doc) {
+        return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE));
+    }
+    has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE))
+}
+
+// Rounds of `apply_merge` allowed before a leftover `<<` counts as unparsable; the
+// parser's nesting limit, since each round folds at least one level.
+const MERGE_ROUNDS: usize = 128;
+
+// One `apply_merge` folds a single level, so a `<<` carried in by a merge survives it;
+// repeat until none is left. Merges move entries and never clone, so no round grows the
+// tree past what the counted parse paid for. `false` on a merge error or the bound.
+fn fold_merges(doc: &mut Value) -> bool {
+    for _ in 0..MERGE_ROUNDS {
+        if !has_merge_key(doc) {
+            return true;
+        }
+        if doc.apply_merge().is_err() {
+            return false;
+        }
+    }
+    !has_merge_key(doc)
+}
+
+fn has_merge_key(node: &Value) -> bool {
+    match node {
+        Value::Mapping(map) => map.contains_key("<<") || map.values().any(has_merge_key),
+        Value::Sequence(items) => items.iter().any(has_merge_key),
+        Value::Tagged(tagged) => has_merge_key(&tagged.value),
+        _ => false,
     }
 }
 

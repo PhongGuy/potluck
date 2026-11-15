@@ -13,7 +13,7 @@ pub const PREFIX_LEN: usize = 8;
 const SCHEME: &str = "plk_";
 
 /// A fresh token: the secret, shown to the client once, and what the database keeps.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct MintedToken {
     secret: String,

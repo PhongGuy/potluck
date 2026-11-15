@@ -28,3 +28,4 @@ mod password;
 mod repos;
 mod serve;
 mod slug;
+mod token;

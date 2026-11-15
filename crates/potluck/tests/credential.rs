@@ -30,11 +30,19 @@ fn bearer_and_basic_yield_the_token() {
     let from_basic = credential_from_headers(&headers(&format!("Basic {basic}")))
         .unwrap()
         .unwrap();
-    assert_eq!(from_basic, bearer, "the username is ignored");
+    assert_eq!(
+        from_basic.secret(),
+        bearer.secret(),
+        "the username is ignored"
+    );
     let lower = credential_from_headers(&headers("bearer plk_abc"))
         .unwrap()
         .unwrap();
-    assert_eq!(lower, bearer, "schemes are case-insensitive");
+    assert_eq!(
+        lower.secret(),
+        bearer.secret(),
+        "schemes are case-insensitive"
+    );
     let colon = base64::engine::general_purpose::STANDARD.encode("user:plk_a:b");
     assert_eq!(
         credential_from_headers(&headers(&format!("Basic {colon}")))

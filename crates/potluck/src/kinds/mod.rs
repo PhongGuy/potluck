@@ -75,6 +75,14 @@ impl SeedFile {
     }
 }
 
+/// The kind module for `name`: `apinata` now; `dbento` is reserved and answers `None`.
+pub fn by_name(name: &str) -> Option<&'static dyn Kind> {
+    match name {
+        "apinata" => Some(&apinata::Apinata),
+        _ => None,
+    }
+}
+
 /// A kind's own rules and seed. The generic set runs for every kind before these.
 pub trait Kind: Send + Sync + std::fmt::Debug {
     /// The kind's name as `POTLUCK_KIND` and the workspace record carry it.

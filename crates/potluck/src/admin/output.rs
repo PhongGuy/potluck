@@ -135,3 +135,52 @@ pub(crate) fn workspaces(items: &[Value]) -> String {
         &rows,
     )
 }
+
+/// `SUBJECT  ROLE` rows from Grant objects, the subject as `{kind}:{name}`.
+pub(crate) fn grants(items: &[Value]) -> String {
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|g| {
+            let subject = &g["subject"];
+            vec![
+                format!("{}:{}", text(&subject["kind"]), text(&subject["name"])),
+                text(&g["role"]),
+            ]
+        })
+        .collect();
+    table(&["SUBJECT", "ROLE"], &rows)
+}
+
+/// `ID  FOR USER  REASON  ARMED BY  ARMED AT  CONSUMED AT  REFS` rows from Override objects;
+/// REFS is how many refs the consuming push moved, `-` while armed.
+pub(crate) fn overrides(items: &[Value]) -> String {
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|o| {
+            let refs = o["consumed_refs"]
+                .as_array()
+                .map_or_else(|| "-".to_owned(), |moves| moves.len().to_string());
+            vec![
+                text(&o["id"]),
+                text(&o["for_user"]),
+                text(&o["reason"]),
+                text(&o["armed_by"]),
+                text(&o["armed_at"]),
+                text(&o["consumed_at"]),
+                refs,
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "ID",
+            "FOR USER",
+            "REASON",
+            "ARMED BY",
+            "ARMED AT",
+            "CONSUMED AT",
+            "REFS",
+        ],
+        &rows,
+    )
+}

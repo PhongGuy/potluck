@@ -10,7 +10,8 @@ use potluck::slug::Slug;
 use tokio::time::timeout;
 
 use crate::common::{
-    GitServer, TestAccess, create_user, failed, git, git_server, ok, work_tree, write_hook,
+    GitServer, TestAccess, api_admin, api_team, api_user, api_workspace, call, create_user, failed,
+    full_server, git, git_server, ok, work_tree, write_hook,
 };
 
 const TOKEN: &str = "plk_writer_token_000000000000000000000000000";
@@ -202,4 +203,44 @@ async fn notices_go_out_even_when_the_database_is_closed() {
         "refs/heads/main",
         "the record failed, the notice still went"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_through_the_production_resolver_ends_the_import() {
+    let server = full_server().await;
+    let root = api_admin(server.db()).await;
+    let (_, bob) = api_user(server.db(), "bob").await;
+    api_team(&server.api(""), &root, "core").await;
+    api_workspace(&server.api(""), &root, "core", "api", false).await;
+    let (status, _) = call(
+        &server.api("/workspaces/core/api/grants/user/bob"),
+        reqwest::Method::PUT,
+        Some(&root),
+        Some(serde_json::json!({"role": "write"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    // The stub hook accepts only an import-mode push, so acceptance proves the resolver saw the state.
+    write_hook(&server.hooks_dir(), "[ \"$POTLUCK_IMPORT\" = 1 ] || exit 1");
+    let home = server.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    ok(git(
+        &home,
+        Some(&work),
+        Some(&bob),
+        &["push", "-q", &server.git_url("core", "api"), "main"],
+    ));
+    // The record lands after git exits, so poll the row until the import state is gone.
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let ws = server.db().workspace_by_slugs("core", "api").await.unwrap();
+            if !ws.unwrap().import_pending() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the first accepted push ends the import within 10 s");
 }

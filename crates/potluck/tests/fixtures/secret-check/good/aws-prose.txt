@@ -1,0 +1,2 @@
+Access key ids start with AKIA (long-term) or ASIA (temporary).
+A truncated one, AKIAIOSFODNN7EXAMPL, is not a key; neither is akiaiosfodnn7example.

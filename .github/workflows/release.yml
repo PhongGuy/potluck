@@ -22,7 +22,8 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/phongguy/potluck
-  PUBLISH: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+  # Only a v tag publishes: a dispatch on any other tag builds and smoke-tests only.
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
 
 jobs:
   build:
@@ -108,7 +109,7 @@ jobs:
 
   merge:
     needs: build
-    if: github.ref_type == 'tag' && !inputs.dry_run
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
@@ -134,7 +135,10 @@ jobs:
         working-directory: ${{ runner.temp }}/digests
         run: |
           sources=()
-          for d in *; do sources+=("$IMAGE@sha256:$d"); done
+          for d in *; do
+            [[ $d =~ ^[0-9a-f]{64}$ ]] || { echo "::error::not a digest: $d"; exit 1; }
+            sources+=("$IMAGE@sha256:$d")
+          done
           [ "${#sources[@]}" -eq 2 ] || { echo "::error::expected 2 digests, got ${#sources[@]}"; exit 1; }
           tags=(-t "$IMAGE:$REF_NAME")
           # latest never moves on a pre-release such as v1.0.0-rc.1.
@@ -148,6 +152,58 @@ jobs:
       - id: index
         env:
           REF_NAME: ${{ github.ref_name }}
+        # Fails closed: a failed inspect or a malformed digest stops here, not in attest or draft.
         run: |
-          digest=$(docker buildx imagetools inspect "$IMAGE:$REF_NAME" --format '{{json .Manifest}}' | jq -r .digest)
+          set -euo pipefail
+          digest=$(docker buildx imagetools inspect "$IMAGE:$REF_NAME" --format '{{json .Manifest}}' |
+            jq -re '.digest | select(test("^sha256:[0-9a-f]{64}$"))')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  # The only job bound to the release environment: it builds nothing and checks nothing out.
+  attest:
+    needs: merge
+    # actions/attest needs a public repository; a private one skips here and drafts without it.
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && !github.event.repository.private }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      id-token: write # the attestation's signing certificate
+      attestations: write # store the attestation
+      artifact-metadata: write # link it to the image
+      packages: write # push the attestation beside the image
+    steps:
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ needs.merge.outputs.digest }}
+          push-to-registry: true
+
+  draft:
+    needs: [merge, attest]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && needs.merge.result == 'success' && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the draft release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+          ATTESTED: ${{ needs.attest.result == 'success' }}
+        run: |
+          [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no index digest from merge: '$DIGEST'"; exit 1; }
+          version=$(scripts/release.sh version "$REF_NAME")
+          scripts/release.sh notes "$REF_NAME" "$GITHUB_REPOSITORY" "$DIGEST" release-notes.md
+          gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "Potluck $version" --notes-file release-notes.md

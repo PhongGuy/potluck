@@ -169,3 +169,27 @@ fn release_jobs_restore_no_caches() {
         );
     }
 }
+
+#[test]
+fn release_publishes_only_from_version_tags() {
+    // A dispatch on any other tag must not push an image, so every publishing gate names the
+    // v prefix rather than the ref type.
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml")).unwrap();
+    assert!(
+        !text.contains("github.ref_type"),
+        "release.yml gates on the ref type, which any tag passes"
+    );
+    let gate = "startsWith(github.ref, 'refs/tags/v')";
+    assert!(
+        text.lines()
+            .any(|l| l.trim_start().starts_with("PUBLISH:") && l.contains(gate)),
+        "PUBLISH does not require a v tag"
+    );
+    for (name, body) in jobs(&text).into_iter().filter(|(n, _)| n != "build") {
+        assert!(
+            body.lines()
+                .any(|l| l.trim_start().starts_with("if:") && l.contains(gate)),
+            "job {name} does not require a v tag"
+        );
+    }
+}

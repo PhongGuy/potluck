@@ -25,6 +25,7 @@ mod health_check;
 mod hooks;
 mod measurements;
 mod release_notes;
+mod release_workflow;
 mod repos;
 mod serve;
 mod slug;

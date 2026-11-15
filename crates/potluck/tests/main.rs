@@ -22,6 +22,7 @@ mod git_denials;
 mod git_http;
 mod git_requests;
 mod health_check;
+mod hooks;
 mod measurements;
 mod repos;
 mod serve;

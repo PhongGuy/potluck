@@ -114,3 +114,42 @@ async fn dropping_unregisters_and_a_lagged_stream_ends() {
         "a registry that is gone ends its streams"
     );
 }
+
+#[tokio::test]
+async fn a_closed_stream_stays_ended() {
+    let n = Notices::new();
+    let mut s = n.subscribe(1, 10, 100);
+    n.close_token(100);
+    assert!(ended(&mut s).await);
+    assert!(
+        ended(&mut s).await,
+        "a second call after a close is None too"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_opened_after_close_all_stays_ended() {
+    let n = Notices::new();
+    n.close_all();
+    let mut s = n.subscribe(1, 10, 100);
+    assert!(ended(&mut s).await);
+    assert!(
+        ended(&mut s).await,
+        "a second call after close_all is None too"
+    );
+}
+
+#[tokio::test]
+async fn a_lagged_stream_does_not_resume() {
+    let n = Notices::new();
+    let mut s = n.subscribe(1, 10, 100);
+    let moves: Vec<RefMove> = (0..=CAPACITY)
+        .map(|i| mv(&format!("refs/heads/b{i}")))
+        .collect();
+    n.publish(1, &moves);
+    assert!(ended(&mut s).await);
+    assert!(
+        ended(&mut s).await,
+        "a lagged stream does not pick up again"
+    );
+}

@@ -46,6 +46,9 @@ pub struct Subscription {
     // receivers.
     moves: broadcast::Receiver<RefMove>,
     closed: oneshot::Receiver<()>,
+    // Set once `next` has returned `None`: a finished oneshot panics if polled again, and a
+    // lagged receiver would otherwise resume.
+    ended: bool,
     _guard: Guard,
 }
 
@@ -79,11 +82,16 @@ impl Subscription {
     /// The next move; `None` once the server closed this stream, once it lagged by more than
     /// `CAPACITY` moves, or once the registry is gone.
     pub async fn next(&mut self) -> Option<RefMove> {
-        tokio::select! {
+        if self.ended {
+            return None;
+        }
+        let next = tokio::select! {
             _ = &mut self.closed => None,
             // A lag ends the stream too: the client's reconnect snapshot resynchronises it.
             r = self.moves.recv() => r.ok(),
-        }
+        };
+        self.ended = next.is_none();
+        next
     }
 }
 
@@ -122,6 +130,7 @@ impl Notices {
         Subscription {
             moves,
             closed,
+            ended: false,
             _guard: Guard {
                 id,
                 workspace_id,
@@ -165,8 +174,11 @@ impl Notices {
     /// stream that ends at once and is never registered. For shutdown, where the listeners are
     /// still accepting until the stop flag is sent.
     pub fn close_all(&self) -> usize {
-        lock(&self.inner).closed = true;
-        self.close(|_| true)
+        let mut reg = lock(&self.inner);
+        reg.closed = true;
+        let open = reg.streams.len();
+        reg.streams.clear();
+        open
     }
 
     /// The workspaces `user_id` has streams on, deduplicated, ascending.

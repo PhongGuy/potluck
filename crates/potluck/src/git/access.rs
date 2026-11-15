@@ -207,7 +207,11 @@ impl GitAccess for DbAccess {
             if let Some(id) = armed {
                 access = access.with_hook_env("POTLUCK_OVERRIDE", &id.to_string());
             }
-            Ok(access)
+            // The same values the hook was given, so bookkeeping consumes exactly that override.
+            let push = PushContext::new(record.id(), user.user().username())
+                .import(record.import_pending())
+                .override_id(armed);
+            Ok(access.with_push(push))
         })
     }
 }

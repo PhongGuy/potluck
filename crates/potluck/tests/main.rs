@@ -45,6 +45,7 @@ mod measurements;
 mod notices;
 mod objects;
 mod password;
+mod push_bookkeeping;
 mod push_refs;
 mod rate_limit;
 mod release_notes;

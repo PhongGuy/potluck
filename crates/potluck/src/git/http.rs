@@ -124,31 +124,12 @@ async fn rpc(
     Ok(git_response(service.result_type(), out))
 }
 
-/// Logs a push's confirmed moves and publishes them on its workspace's topic. It runs on the
-/// reaper task, so it stays synchronous and cheap.
+/// Hands a push's confirmed moves to the bookkeeping. It runs on the reaper task, so the
+/// record itself is spawned rather than awaited.
 fn observer(state: &AppState, ctx: PushContext) -> PushObserver {
-    let notices = state.notices().clone();
+    let state = state.clone();
     Box::new(move |moves: Vec<RefMove>| {
-        if moves.is_empty() {
-            tracing::debug!(
-                workspace_id = ctx.workspace_id(),
-                pusher = ctx.pusher(),
-                "push moved no refs"
-            );
-            return;
-        }
-        let refs = moves
-            .iter()
-            .map(|m| format!("{} {}..{}", m.ref_name(), m.old(), m.new_sha()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        tracing::info!(
-            workspace_id = ctx.workspace_id(),
-            pusher = ctx.pusher(),
-            refs,
-            "push accepted"
-        );
-        notices.publish(ctx.workspace_id(), &moves);
+        tokio::spawn(crate::api::pushes::record(state, ctx, moves));
     })
 }
 

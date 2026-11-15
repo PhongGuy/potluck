@@ -308,6 +308,7 @@ pub struct GitServer {
     pub dir: tempfile::TempDir,
     pub base: String,
     pub repos: Repos,
+    pub db: Db,
     pub notices: Notices,
     _task: tokio::task::JoinHandle<()>,
 }
@@ -362,7 +363,7 @@ pub async fn git_server_at(
     let db = Db::open(&config.db_path()).expect("open");
     db.migrate().await.expect("migrate");
     let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
-    let mut state = AppState::new(db, config).with_git_access(Arc::new(access));
+    let mut state = AppState::new(db.clone(), config).with_git_access(Arc::new(access));
     if let Some(limits) = limits {
         state = state.with_git_limits(limits);
     }
@@ -372,6 +373,43 @@ pub async fn git_server_at(
         dir,
         base: format!("http://{addr}"),
         repos,
+        db,
+        notices,
+        _task: task,
+    }
+}
+
+/// `server` served again on a new port with `access` as its resolver; the data dir, database
+/// and repositories are the same. The old listener task is aborted first, so no stray server
+/// outlives the test.
+pub async fn git_server_with(server: GitServer, access: TestAccess) -> GitServer {
+    let GitServer {
+        dir,
+        repos,
+        db,
+        _task: old,
+        ..
+    } = server;
+    old.abort();
+    // The hook is installed and the database migrated already; only the router is new.
+    let data = dir.path().to_str().expect("utf-8 temp path").to_owned();
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        &data,
+        "--public-url",
+        "http://127.0.0.1:8080",
+    ])
+    .expect("test config");
+    let state = AppState::new(db.clone(), config).with_git_access(Arc::new(access));
+    let notices = state.notices().clone();
+    let (addr, task) = serve(router(state)).await;
+    GitServer {
+        dir,
+        base: format!("http://{addr}"),
+        repos,
+        db,
         notices,
         _task: task,
     }

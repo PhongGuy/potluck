@@ -120,6 +120,11 @@ impl Config {
         self.data.join("admin.sock")
     }
 
+    /// `<data>/server.lock`: the advisory lock `serve` holds while it runs.
+    pub fn lock_path(&self) -> PathBuf {
+        self.data.join("server.lock")
+    }
+
     /// `<data>/tmp`: where request bodies are spooled.
     pub fn tmp_dir(&self) -> PathBuf {
         self.data.join("tmp")

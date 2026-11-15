@@ -12,18 +12,25 @@
 mod common;
 
 mod access;
+mod actor;
 mod api_error;
 mod api_system;
+mod auth;
+mod authenticate;
 mod cli_version;
 mod config;
 mod credential;
 mod db;
+mod db_tokens;
+mod db_users;
 mod git_denials;
 mod git_http;
 mod git_requests;
 mod health_check;
 mod hooks;
 mod measurements;
+mod password;
 mod repos;
 mod serve;
 mod slug;
+mod token;

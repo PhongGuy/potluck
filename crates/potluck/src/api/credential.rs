@@ -9,7 +9,7 @@ use super::error::ApiError;
 
 /// A token as presented by a client. `Debug` prints `Credential(redacted)` so it can never reach
 /// a log through a struct dump.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct Credential(String);
 

@@ -5,21 +5,23 @@ use std::sync::Arc;
 use axum::Router;
 use axum::routing::get;
 
+use crate::auth::password::Passwords;
 use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DenyAll, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
 
 mod actor;
+pub mod auth;
 pub mod credential;
 pub mod error;
 mod system;
 
-pub use actor::Actor;
+pub use actor::{Actor, AuthUser};
 use error::ApiError;
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver and the git engine.
+/// resolver, the git engine and the password hasher.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -27,11 +29,13 @@ pub struct AppState {
     config: Arc<Config>,
     git_access: Arc<dyn GitAccess>,
     git: Arc<GitEngine>,
+    passwords: Passwords,
 }
 
 impl AppState {
     /// Bundles the handle and the config for the router, with the deny-all resolver and the
-    /// default git limits; the engine reads its paths and body cap from `config`.
+    /// default git limits and the production hashing cost; the engine reads its paths and body
+    /// cap from `config`.
     pub fn new(db: Db, config: Config) -> Self {
         let git = Arc::new(git_engine(&config, GitLimits::default()));
         AppState {
@@ -39,6 +43,7 @@ impl AppState {
             config: Arc::new(config),
             git_access: Arc::new(DenyAll),
             git,
+            passwords: Passwords::new(),
         }
     }
 
@@ -54,6 +59,18 @@ impl AppState {
     pub fn with_git_limits(mut self, limits: GitLimits) -> Self {
         self.git = Arc::new(git_engine(&self.config, limits));
         self
+    }
+
+    /// Another hashing cost (tests).
+    #[must_use]
+    pub fn with_passwords(mut self, passwords: Passwords) -> Self {
+        self.passwords = passwords;
+        self
+    }
+
+    /// The hasher.
+    pub fn passwords(&self) -> &Passwords {
+        &self.passwords
     }
 
     /// The resolver.

@@ -161,3 +161,32 @@ fn peel_reports_the_target_type() {
         "a missing binary is Spawn, not a panic"
     );
 }
+
+#[test]
+fn a_failing_git_flooding_both_pipes_keeps_4_kib_of_stderr_and_returns() {
+    let s = Scratch::new();
+    // 3 MB on stderr before 3 MB on stdout: a runner that does not drain stderr while
+    // reading stdout blocks here, so the bounded wait below also pins the drain.
+    let fake = s.script(
+        "flooding-git",
+        "head -c 3000000 /dev/zero | tr '\\0' e >&2\nhead -c 3000000 /dev/zero | tr '\\0' o\nexit 3\n",
+    );
+    let git = Git::new(fake, Some(s.bare.clone()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(git.new_commits(&sha(&"a".repeat(40)), &[]));
+    });
+    let result = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the call returns");
+    match result {
+        Err(GitCmdError::Failed { stderr, .. }) => {
+            assert_eq!(stderr.len(), 4096, "stderr is kept up to 4 KiB");
+            assert!(
+                stderr.bytes().all(|b| b == b'e'),
+                "only stderr bytes are kept"
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}

@@ -61,6 +61,13 @@ fn server_main(server: &GitServer, home: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
 }
 
+/// The work tree's `HEAD`, the commit an accepted push of `main` leaves on the server.
+fn work_head(home: &Path, work: &Path) -> String {
+    ok(git(home, Some(work), None, &["rev-parse", "HEAD"]))
+        .trim()
+        .to_owned()
+}
+
 fn commit_all(home: &Path, work: &Path, message: &str) {
     ok(git(home, Some(work), None, &["add", "-A"]));
     ok(git(
@@ -111,6 +118,7 @@ async fn a_push_with_secrets_is_declined_with_the_contract_lines_and_a_clean_one
         Some(TOKEN),
         &["push", "--porcelain", &url, "main"],
     ));
+    assert_eq!(server_main(&server, &home), None, "still nothing landed");
     assert!(
         output.contains("potluck-reject secret_env_file"),
         "{output}"
@@ -128,10 +136,7 @@ async fn a_push_with_secrets_is_declined_with_the_contract_lines_and_a_clean_one
         Some(TOKEN),
         &["push", "-q", &url, "main"],
     ));
-    let head = ok(git(&home, Some(&work), None, &["rev-parse", "HEAD"]))
-        .trim()
-        .to_owned();
-    assert_eq!(server_main(&server, &home), Some(head));
+    assert_eq!(server_main(&server, &home), Some(work_head(&home, &work)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -162,11 +167,12 @@ async fn history_already_on_the_server_does_not_block_later_pushes() {
         Some(TOKEN),
         &["push", "-q", &url, "main"],
     ));
+    assert_eq!(server_main(&server, &home), Some(work_head(&home, &work)));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn import_mode_scans_the_tip_tree_only() {
-    let (_server, home, url) = apinata_server(&[("POTLUCK_IMPORT", "1")]).await;
+    let (server, home, url) = apinata_server(&[("POTLUCK_IMPORT", "1")]).await;
     let work = work_tree(&home, "work");
     std::fs::write(work.join("creds.txt"), AWS).unwrap();
     commit_all(&home, &work, "add");
@@ -178,6 +184,8 @@ async fn import_mode_scans_the_tip_tree_only() {
         Some(TOKEN),
         &["push", "-q", &url, "main"],
     ));
+    let imported = work_head(&home, &work);
+    assert_eq!(server_main(&server, &home), Some(imported.clone()));
     std::fs::write(work.join(".env"), "x\n").unwrap();
     commit_all(&home, &work, "env in tip");
     let output = failed(git(
@@ -186,6 +194,11 @@ async fn import_mode_scans_the_tip_tree_only() {
         Some(TOKEN),
         &["push", "--porcelain", &url, "main"],
     ));
+    assert_eq!(
+        server_main(&server, &home),
+        Some(imported),
+        "the ref did not move"
+    );
     assert!(
         output.contains("remote: potluck-reject secret_env_file refs/heads/main .env env_file"),
         "{output}"
@@ -194,7 +207,7 @@ async fn import_mode_scans_the_tip_tree_only() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_armed_override_passes_the_push_unscanned() {
-    let (_server, home, url) = apinata_server(&[("POTLUCK_OVERRIDE", "7")]).await;
+    let (server, home, url) = apinata_server(&[("POTLUCK_OVERRIDE", "7")]).await;
     let work = work_tree(&home, "work");
     std::fs::write(work.join(".env"), "x\n").unwrap();
     commit_all(&home, &work, "env");
@@ -204,6 +217,7 @@ async fn an_armed_override_passes_the_push_unscanned() {
         Some(TOKEN),
         &["push", "-q", &url, "main"],
     ));
+    assert_eq!(server_main(&server, &home), Some(work_head(&home, &work)));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -61,10 +61,6 @@ impl From<rusqlite::Error> for DbError {
 
 /// Maps a failed write: a UNIQUE or PRIMARY KEY violation becomes `Conflict` with `what()`,
 /// any other failure `Sqlite`, as `From<rusqlite::Error>` gives.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the create paths adopt it next")
-)]
 pub(crate) fn conflict_on_unique(err: rusqlite::Error, what: impl FnOnce() -> String) -> DbError {
     // Match the extended codes, not ConstraintViolation: CHECK, NOT NULL and foreign-key
     // failures share that primary code and are server faults, not duplicates.

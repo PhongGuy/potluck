@@ -3,7 +3,7 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use super::{Db, DbError};
+use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 use crate::slug::Slug;
 
@@ -126,19 +126,9 @@ impl Db {
     /// Inserts with `created_at = now`; `Conflict` ("workspace {slug} exists in this team")
     /// on the `(team_id, slug)` key. The kind must pass the schema's CHECK.
     pub async fn create_workspace(&self, ws: NewWorkspace) -> Result<WorkspaceRecord, DbError> {
-        // The check and the insert share one job, so no other insert can slip between them;
-        // an unknown kind or team is left to the schema and surfaces as `Sqlite`.
+        // The UNIQUE constraint is the duplicate check, so a writer on another connection is
+        // caught too; an unknown kind or team is left to the schema and surfaces as `Sqlite`.
         self.call(move |conn| {
-            let taken: bool = conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM workspaces WHERE team_id = ?1 AND slug = ?2)",
-                params![ws.team_id, ws.slug],
-                |row| row.get(0),
-            )?;
-            if taken {
-                return Err(DbError::Conflict {
-                    what: format!("workspace {} exists in this team", ws.slug),
-                });
-            }
             conn.execute(
                 "INSERT INTO workspaces \
                  (team_id, slug, name, kind, default_branch, import_pending, created_at) \
@@ -152,7 +142,10 @@ impl Db {
                     ws.import_pending,
                     clock::now_rfc3339(),
                 ],
-            )?;
+            )
+            .map_err(|e| {
+                conflict_on_unique(e, || format!("workspace {} exists in this team", ws.slug))
+            })?;
             let sql = format!(
                 "SELECT {WORKSPACE_COLUMNS} FROM workspaces w JOIN teams t ON t.id = w.team_id \
                  WHERE w.id = ?1"

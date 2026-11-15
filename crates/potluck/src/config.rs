@@ -108,6 +108,10 @@ pub enum ConfigError {
         /// What is wrong with it.
         reason: String,
     },
+    /// The public URL carries a username or password. The message leaves the URL out so
+    /// the credentials never reach a log.
+    #[error("--public-url must not carry a username or password")]
+    PublicUrlHasCredentials,
     /// The public URL uses a scheme other than http or https.
     #[error("--public-url {url:?} must use http or https")]
     UnsupportedScheme {
@@ -136,14 +140,13 @@ impl TryFrom<ServeArgs> for Config {
     type Error = ConfigError;
 
     fn try_from(args: ServeArgs) -> Result<Self, Self::Error> {
-        validate_public_url(&args.public_url, args.insecure_http)?;
+        let public_url = validate_public_url(&args.public_url, args.insecure_http)?;
         if let Err(e) = tracing_subscriber::EnvFilter::try_new(&args.log) {
             return Err(ConfigError::InvalidLog {
                 filter: args.log,
                 reason: e.to_string(),
             });
         }
-        let public_url = args.public_url.trim_end_matches('/').to_owned();
         Ok(Self {
             listen: args.listen,
             data: args.data,
@@ -155,27 +158,37 @@ impl TryFrom<ServeArgs> for Config {
     }
 }
 
-/// Refuses a public URL that is malformed, carries a query or fragment, is not http(s),
-/// or would send tokens in clear over the network without the operator opting in.
-fn validate_public_url(raw: &str, insecure_http: bool) -> Result<(), ConfigError> {
+/// Refuses a public URL that is malformed, carries credentials, a query or a fragment, is
+/// not http(s), or would send tokens in clear over the network without the operator opting
+/// in. Returns the parsed URL without a trailing slash.
+fn validate_public_url(raw: &str, insecure_http: bool) -> Result<String, ConfigError> {
     let invalid = |reason: String| ConfigError::InvalidPublicUrl {
         url: raw.to_owned(),
         reason,
     };
     let url = Url::parse(raw).map_err(|e| invalid(e.to_string()))?;
+    // First, because every later refusal echoes the URL it was given.
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ConfigError::PublicUrlHasCredentials);
+    }
     if url.query().is_some() || url.fragment().is_some() {
         return Err(invalid("must not have a query or fragment".to_owned()));
     }
     match url.scheme() {
-        "https" => Ok(()),
-        "http" if insecure_http || is_loopback(url.host()) => Ok(()),
-        "http" => Err(ConfigError::InsecurePublicUrl {
-            url: raw.to_owned(),
-        }),
-        _ => Err(ConfigError::UnsupportedScheme {
-            url: raw.to_owned(),
-        }),
+        "https" => {}
+        "http" if insecure_http || is_loopback(url.host()) => {}
+        "http" => {
+            return Err(ConfigError::InsecurePublicUrl {
+                url: raw.to_owned(),
+            });
+        }
+        _ => {
+            return Err(ConfigError::UnsupportedScheme {
+                url: raw.to_owned(),
+            });
+        }
     }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
 fn is_loopback(host: Option<Host<&str>>) -> bool {

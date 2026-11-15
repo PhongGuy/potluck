@@ -128,6 +128,33 @@ fn trailing_slashes_are_trimmed_and_a_path_prefix_is_kept() {
 }
 
 #[test]
+fn trailing_whitespace_is_not_stored() {
+    let config = parse_config(&["--public-url", "https://p.example.com/potluck "]).unwrap();
+    assert_eq!(config.public_url(), "https://p.example.com/potluck");
+}
+
+#[test]
+fn credentials_in_the_public_url_are_refused_and_not_echoed() {
+    let err = parse_config(&["--public-url", "https://alice:s3cretpw@p.example.com"]).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::PublicUrlHasCredentials),
+        "got {err:?}"
+    );
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains("alice"), "the username leaked: {text}");
+    assert!(!text.contains("s3cretpw"), "the password leaked: {text}");
+}
+
+#[test]
+fn a_username_alone_in_the_public_url_is_refused() {
+    let err = parse_config(&["--public-url", "http://alice@team.example.com"]).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::PublicUrlHasCredentials),
+        "got {err:?}"
+    );
+}
+
+#[test]
 fn an_invalid_log_filter_is_refused() {
     let err = parse_config(&[
         "--public-url",

@@ -1,6 +1,7 @@
 //! Workspace kinds: each kind's push rules and seed files. Nothing outside this module
 //! knows an app's file format.
 
+pub mod apinata;
 pub mod generic;
 
 /// Stable refusal codes the client parses. Later rule sets add rules, never codes.

@@ -169,3 +169,15 @@ async fn the_admin_socket_lists_users_as_system() {
     assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), json!([]));
     running.shutdown().await;
 }
+
+#[tokio::test]
+async fn display_name_and_email_are_stored_trimmed() {
+    let app = test_app().await;
+    create_user(&app.db, "alice", "pw-123456", true).await;
+    let alice = login(&app, "alice", "pw-123456").await;
+    let body = json!({"username": "carol", "display_name": "  Carol  ", "email": " c@example.com ", "password": "carol-pw-1"});
+    let (status, body) = post_user(&app, &alice, body).await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(body["display_name"], "Carol", "{body}");
+    assert_eq!(body["email"], "c@example.com", "{body}");
+}

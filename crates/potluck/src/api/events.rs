@@ -13,6 +13,7 @@ use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
 use super::workspaces::{WsPath, load, workspace_role};
+use crate::db::accounts::UserRecord;
 use crate::git::push::list_refs;
 use crate::slug::Slug;
 
@@ -78,6 +79,28 @@ pub(super) async fn stream(
     Ok(Sse::new(stream::iter(first).chain(live))
         .keep_alive(keep_alive())
         .into_response())
+}
+
+/// For each of `users`, closes the streams on workspaces the user can no longer read: no grant
+/// (`role_for` is `None`) and not a server admin. Returns how many streams closed.
+pub(crate) async fn reap_unreadable(
+    state: &AppState,
+    users: &[UserRecord],
+) -> Result<usize, ApiError> {
+    let notices = state.notices();
+    let mut closed = 0;
+    for user in users {
+        if user.server_admin() {
+            continue;
+        }
+        // Only workspaces the user streams cost a query, so a user without streams costs none.
+        for ws in notices.workspaces_of(user.id()) {
+            if state.db().role_for(ws, user.id()).await?.is_none() {
+                closed += notices.close_grant(ws, user.id());
+            }
+        }
+    }
+    Ok(closed)
 }
 
 /// `event: ref` with `data: {"ref": <ref>, "sha": <sha>}`.

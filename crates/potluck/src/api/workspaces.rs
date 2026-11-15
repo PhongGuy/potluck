@@ -173,12 +173,15 @@ pub(super) async fn delete(
     };
     let repos = state.git().repos().clone();
     let db = state.db().clone();
+    let notices = state.notices().clone();
     // Row first, so a git request never meets a live workspace without its repository; the
     // spawned task finishes both steps even when axum drops this future on a disconnect.
     let task = tokio::spawn(async move {
         if !db.delete_workspace(ws.id()).await? {
             return Err(ApiError::not_found("no such workspace"));
         }
+        // The rows are gone, so the streams go now, even if removing the repository fails.
+        notices.close_workspace(ws.id());
         if let Err(err) = repos.remove(&team_slug, &slug).await {
             tracing::error!(id = ws.id(), error = %err, "removing a deleted workspace's repository failed");
             return Err(ApiError::internal("repository could not be removed"));

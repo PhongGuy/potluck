@@ -9,6 +9,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
+use super::events;
 use super::json::ApiJson;
 use super::objects::GrantJson;
 use super::workspaces::{WsPath, load, require};
@@ -67,11 +68,23 @@ pub(super) async fn delete(
     path: GrantPath,
 ) -> Result<StatusCode, ApiError> {
     let (ws, subject) = load_subject(&state, &auth, path).await?;
-    if state.db().delete_grant(ws.id(), subject).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("no such grant"))
+    if !state.db().delete_grant(ws.id(), subject.clone()).await? {
+        return Err(ApiError::not_found("no such grant"));
     }
+    // Everyone who held the grant may have lost their last way in; their streams close here.
+    let names = match subject {
+        Subject::User(name) => vec![name],
+        Subject::Team(slug) => match state.db().team_by_slug(&slug).await? {
+            Some(team) => state.db().team_members(team.id()).await?,
+            None => Vec::new(),
+        },
+    };
+    let mut users = Vec::with_capacity(names.len());
+    for name in names {
+        users.extend(state.db().user_by_username(&name).await?);
+    }
+    events::reap_unreadable(&state, &users).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// The workspace (the caller must be its admin) and the grant's subject from the path. The

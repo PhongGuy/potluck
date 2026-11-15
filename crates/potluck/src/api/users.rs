@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer};
 use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
+use super::events;
 use super::json::ApiJson;
 use super::objects::UserJson;
 use crate::db::accounts::{NewUser, UserPatch};
@@ -186,6 +187,10 @@ pub(super) async fn patch(
     };
     if body.disabled == Some(true) {
         state.notices().close_user(user.id());
+    }
+    // The implicit admin role was never a grant row, so streams that relied on it close.
+    if body.server_admin == Some(false) {
+        events::reap_unreadable(&state, std::slice::from_ref(&user)).await?;
     }
     Ok(Json(UserJson::from(&user)))
 }

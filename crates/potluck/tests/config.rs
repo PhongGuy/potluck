@@ -146,6 +146,18 @@ fn credentials_in_the_public_url_are_refused_and_not_echoed() {
 }
 
 #[test]
+fn credentials_in_an_unparsable_public_url_are_not_echoed() {
+    let err = parse_config(&["--public-url", "https://alice:pw@host:99999"]).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidPublicUrl { .. }),
+        "got {err:?}"
+    );
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains("alice"), "the username leaked: {text}");
+    assert!(!text.contains("pw"), "the password leaked: {text}");
+}
+
+#[test]
 fn a_username_alone_in_the_public_url_is_refused() {
     let err = parse_config(&["--public-url", "http://alice@team.example.com"]).unwrap_err();
     assert!(

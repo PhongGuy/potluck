@@ -163,7 +163,7 @@ impl TryFrom<ServeArgs> for Config {
 /// in. Returns the parsed URL without a trailing slash.
 fn validate_public_url(raw: &str, insecure_http: bool) -> Result<String, ConfigError> {
     let invalid = |reason: String| ConfigError::InvalidPublicUrl {
-        url: raw.to_owned(),
+        url: redact_userinfo(raw),
         reason,
     };
     let url = Url::parse(raw).map_err(|e| invalid(e.to_string()))?;
@@ -189,6 +189,22 @@ fn validate_public_url(raw: &str, insecure_http: bool) -> Result<String, ConfigE
         }
     }
     Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+/// The input with any userinfo in its authority replaced by `***`, for error text about
+/// a URL that may not parse.
+fn redact_userinfo(raw: &str) -> String {
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_owned();
+    };
+    let start = scheme_end + 3;
+    let authority_len = raw[start..]
+        .find(['/', '?', '#'])
+        .unwrap_or(raw.len() - start);
+    match raw[start..start + authority_len].rfind('@') {
+        Some(at) => format!("{}***{}", &raw[..start], &raw[start + at..]),
+        None => raw.to_owned(),
+    }
 }
 
 fn is_loopback(host: Option<Host<&str>>) -> bool {

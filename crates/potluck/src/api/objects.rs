@@ -1,11 +1,14 @@
-//! The contract's JSON objects: `User`, `Token`, `Identity`, `Team`, `Workspace`, `Grant`.
+//! The contract's JSON objects: `User`, `Token`, `Identity`, `Team`, `Workspace`, `Grant`,
+//! `Override`.
 
 use serde::Serialize;
 
 use crate::db::accounts::{TokenRecord, UserRecord};
 use crate::db::grants::{GrantRecord, Subject};
+use crate::db::overrides::OverrideRecord;
 use crate::db::teams::TeamRecord;
 use crate::db::workspaces::WorkspaceRecord;
+use crate::git::RefMove;
 use crate::role::Role;
 
 /// The `User` object: `{username, display_name, email|null, server_admin, disabled, created_at}`.
@@ -185,6 +188,36 @@ impl From<&GrantRecord> for GrantJson {
         GrantJson {
             subject: SubjectJson::from(grant.subject()),
             role: grant.role().as_str(),
+        }
+    }
+}
+
+/// The `Override` object: `{id, workspace, for_user, reason, armed_by, armed_at, consumed_at|null,
+/// consumed_refs: [{ref, old, new}]|null}`; `workspace` is `{team}/{ws}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct OverrideJson {
+    id: i64,
+    workspace: String,
+    for_user: String,
+    reason: String,
+    armed_by: String,
+    armed_at: String,
+    consumed_at: Option<String>,
+    consumed_refs: Option<Vec<RefMove>>,
+}
+
+impl From<&OverrideRecord> for OverrideJson {
+    fn from(record: &OverrideRecord) -> Self {
+        OverrideJson {
+            id: record.id(),
+            workspace: record.workspace().to_owned(),
+            for_user: record.for_user().to_owned(),
+            reason: record.reason().to_owned(),
+            armed_by: record.armed_by().to_owned(),
+            armed_at: record.armed_at().to_owned(),
+            consumed_at: record.consumed_at().map(str::to_owned),
+            consumed_refs: record.consumed_refs().map(<[RefMove]>::to_vec),
         }
     }
 }

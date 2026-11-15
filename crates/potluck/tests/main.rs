@@ -44,6 +44,7 @@ mod kinds_generic;
 mod measurements;
 mod notices;
 mod objects;
+mod overrides;
 mod password;
 mod push_bookkeeping;
 mod push_refs;

@@ -21,6 +21,7 @@ pub mod error;
 mod grants;
 pub mod json;
 pub mod objects;
+mod overrides;
 pub(crate) mod pushes;
 mod session;
 mod system;
@@ -160,6 +161,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/workspaces/{team}/{ws}/grants/{kind}/{name}",
             put(grants::put).delete(grants::delete),
+        )
+        .route(
+            "/workspaces/{team}/{ws}/overrides",
+            get(overrides::list).post(overrides::arm),
+        )
+        .route(
+            "/workspaces/{team}/{ws}/overrides/{id}",
+            delete(overrides::disarm),
         );
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.

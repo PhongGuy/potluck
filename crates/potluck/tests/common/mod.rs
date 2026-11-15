@@ -404,6 +404,11 @@ pub fn work_tree(home: &Path, name: &str) -> std::path::PathBuf {
     work
 }
 
+/// `<data>/repos/{team}/{ws}.git`.
+pub fn repo_path(data: &Path, team: &str, ws: &str) -> std::path::PathBuf {
+    data.join("repos").join(team).join(format!("{ws}.git"))
+}
+
 /// A served API over a migrated database with fast hashing; the dir and the task live as long as it.
 pub struct TestApp {
     pub _dir: tempfile::TempDir,

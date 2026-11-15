@@ -24,6 +24,7 @@ mod system;
 mod teams;
 mod tokens;
 mod users;
+pub(crate) mod workspaces;
 
 pub use actor::{Actor, AuthUser};
 use error::ApiError;
@@ -133,6 +134,7 @@ pub fn router(state: AppState) -> Router {
             "/teams/{team}/members/{username}",
             put(teams::add_member).delete(teams::remove_member),
         )
+        .route("/teams/{team}/workspaces", post(workspaces::create))
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", delete(tokens::revoke))
         .route("/users", get(users::list).post(users::create))

@@ -53,3 +53,4 @@ mod tokens;
 mod users;
 mod users_patch;
 mod workflows;
+mod workspaces;

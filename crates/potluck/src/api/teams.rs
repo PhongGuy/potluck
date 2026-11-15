@@ -44,13 +44,7 @@ pub(super) async fn create(
     // The body is extracted as a `Result` so a non-admin's bad body still answers 403.
     auth.require_server_admin()?;
     let ApiJson(body) = body?;
-    let slug = Slug::parse(&body.slug).map_err(|_| {
-        ApiError::invalid_value(
-            "slug",
-            "slug must be 1 to 63 lowercase letters, digits or hyphens, starting with a letter \
-             or digit",
-        )
-    })?;
+    let slug = check_slug(&body.slug)?;
     let name = check_name(&body.name)?;
     let team = state.db().create_team(&slug, name).await?;
     Ok((StatusCode::CREATED, Json(TeamJson::new(&team, Vec::new()))))
@@ -83,6 +77,17 @@ pub(super) async fn remove_member(
     } else {
         Err(ApiError::not_found("no such member"))
     }
+}
+
+/// `s` as a slug, else 422 `slug`.
+pub(super) fn check_slug(s: &str) -> Result<Slug, ApiError> {
+    Slug::parse(s).map_err(|_| {
+        ApiError::invalid_value(
+            "slug",
+            "slug must be 1 to 63 lowercase letters, digits or hyphens, starting with a letter \
+             or digit",
+        )
+    })
 }
 
 /// The trimmed `name`: 1 to 200 characters after trimming, else 422 `name`.

@@ -1,6 +1,7 @@
 //! The command line surface of the `potluck` binary.
 
 use std::io::IsTerminal;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use tokio::signal::unix::{SignalKind, signal};
@@ -32,18 +33,42 @@ pub enum Command {
     Serve(Box<ServeArgs>),
     /// Exit 0 if the server on this data directory answers its health check.
     HealthCheck(HealthArgs),
+    /// Run by git from `<data>/hooks/pre-receive`; not for people.
+    #[command(hide = true)]
+    Hook(HookArgs),
+}
+
+/// Which hook to run.
+#[derive(clap::Args, Debug)]
+#[non_exhaustive]
+pub struct HookArgs {
+    /// The hook.
+    #[command(subcommand)]
+    pub hook: HookKind,
+}
+
+/// The hooks git may run.
+#[derive(Subcommand, Debug)]
+#[non_exhaustive]
+pub enum HookKind {
+    /// The secret check: `<old> <new> <ref>` lines on stdin, findings on stderr, exit 1 to refuse.
+    PreReceive,
 }
 
 /// Runs the parsed command to completion. `serve` returns after SIGTERM or Ctrl-C;
-/// `health-check` prints `ok` when the server is healthy.
-pub async fn run(cli: Cli) -> anyhow::Result<()> {
+/// `health-check` prints `ok` when the server is healthy; both give `ExitCode::SUCCESS` on
+/// `Ok`. `hook pre-receive` returns the hook's exit code, so a refusal prints only its lines.
+pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
-        Command::Serve(args) => serve(*args).await,
+        Command::Serve(args) => serve(*args).await.map(|()| ExitCode::SUCCESS),
         Command::HealthCheck(args) => {
             crate::health_check::run(args).await?;
             println!("ok");
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
+        Command::Hook(args) => Ok(match args.hook {
+            HookKind::PreReceive => crate::secret_check::run_pre_receive(),
+        }),
     }
 }
 

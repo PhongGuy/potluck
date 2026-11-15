@@ -10,8 +10,11 @@ use clap::Parser;
 use potluck::api::credential::Credential;
 use potluck::api::error::ApiError;
 use potluck::api::{AppState, router};
+use potluck::auth::password::Passwords;
+use potluck::auth::token::MintedToken;
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
+use potluck::db::accounts::{NewToken, NewUser, UserRecord};
 use potluck::git::access::{Access, BoxFuture, GitAccess};
 use potluck::git::{GitLimits, Repos};
 use potluck::role::Role;
@@ -72,6 +75,55 @@ pub async fn migrated_db() -> (tempfile::TempDir, Db) {
     let db = Db::open(&dir.path().join("server.db")).expect("open");
     db.migrate().await.expect("migrate");
     (dir, db)
+}
+
+/// argon2id at the minimum cost: a test login costs a millisecond, not a tenth of a second.
+pub fn fast_passwords() -> Passwords {
+    Passwords::with_cost(1024, 1, 1).expect("valid cost")
+}
+
+/// An `AppState` over a migrated database with fast hashing; the dir keeps the files alive.
+pub async fn test_state() -> (tempfile::TempDir, Db, AppState) {
+    let (dir, db) = migrated_db().await;
+    let state = AppState::new(db.clone(), config_for(dir.path())).with_passwords(fast_passwords());
+    (dir, db, state)
+}
+
+/// A user whose display name is the username, with `password` hashed at test cost.
+pub async fn create_user(
+    db: &Db,
+    username: &str,
+    password: &str,
+    server_admin: bool,
+) -> UserRecord {
+    let hash = fast_passwords().hash(password).expect("hash");
+    db.create_user(
+        NewUser::new(username, username)
+            .password_hash(&hash)
+            .server_admin(server_admin),
+    )
+    .await
+    .expect("create user")
+}
+
+/// Mints a token for `user` straight in the database and returns the secret.
+pub async fn mint_token(
+    db: &Db,
+    user: &UserRecord,
+    name: &str,
+    expires_at: Option<&str>,
+) -> String {
+    let minted = MintedToken::mint().expect("rng");
+    db.create_token(NewToken::new(
+        user.id(),
+        name,
+        minted.prefix(),
+        *minted.digest(),
+        expires_at,
+    ))
+    .await
+    .expect("create token");
+    minted.secret().to_owned()
 }
 
 /// One HTTP/1.1 GET over a Unix socket; returns the status code and the body.

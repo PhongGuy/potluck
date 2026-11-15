@@ -18,6 +18,7 @@ mod cli_version;
 mod config;
 mod credential;
 mod db;
+mod git_http;
 mod health_check;
 mod measurements;
 mod repos;

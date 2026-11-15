@@ -3,14 +3,17 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
+use std::sync::Arc;
 
 use clap::Parser;
 use potluck::api::credential::Credential;
 use potluck::api::error::ApiError;
+use potluck::api::{AppState, router};
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
 use potluck::git::access::{Access, BoxFuture, GitAccess};
+use potluck::git::{GitLimits, Repos};
 use potluck::role::Role;
 use potluck::slug::Slug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -157,4 +160,136 @@ impl GitAccess for TestAccess {
                 .fold(Access::new(*role), |a, (k, v)| a.with_hook_env(k, v)))
         })
     }
+}
+
+/// A served router with the git routes over a temp data dir and a `TestAccess`. The data dir
+/// is `dir`, so the hooks dir is `dir.path().join("hooks")`. No field without a reader: this is
+/// a test binary, where an unread field warns even when `pub`.
+pub struct GitServer {
+    pub dir: tempfile::TempDir,
+    pub base: String,
+    pub repos: Repos,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+impl GitServer {
+    /// `{base}/git/{team}/{ws}.git`.
+    pub fn url(&self, team: &str, ws: &str) -> String {
+        format!("{}/git/{team}/{ws}.git", self.base)
+    }
+}
+
+/// Starts the server with `dir` as `--data`; `extra` adds `potluck serve` flags such as
+/// `--max-push-bytes`.
+pub async fn git_server(
+    access: TestAccess,
+    limits: Option<GitLimits>,
+    extra: &[&str],
+) -> GitServer {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let data = dir.path().to_str().expect("utf-8 temp path").to_owned();
+    git_server_at(dir, &data, access, limits, extra).await
+}
+
+/// Like `git_server`, with `--data` given as `data_flag` (which may be relative) while `dir`
+/// keeps the directory alive.
+pub async fn git_server_at(
+    dir: tempfile::TempDir,
+    data_flag: &str,
+    access: TestAccess,
+    limits: Option<GitLimits>,
+    extra: &[&str],
+) -> GitServer {
+    let mut args = vec![
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data_flag,
+        "--public-url",
+        "http://127.0.0.1:8080",
+    ];
+    args.extend_from_slice(extra);
+    let config = parse_config(&args).expect("test config");
+    for d in [config.hooks_dir(), config.repos_dir(), config.tmp_dir()] {
+        std::fs::create_dir_all(d).expect("data subdir");
+    }
+    let db = Db::open(&config.db_path()).expect("open");
+    db.migrate().await.expect("migrate");
+    let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
+    let mut state = AppState::new(db, config).with_git_access(Arc::new(access));
+    if let Some(limits) = limits {
+        state = state.with_git_limits(limits);
+    }
+    let (addr, task) = serve(router(state)).await;
+    GitServer {
+        dir,
+        base: format!("http://{addr}"),
+        repos,
+        _task: task,
+    }
+}
+
+/// A `git` command isolated from the developer's config and keyring, with the token (when given)
+/// sent as a Bearer header through `GIT_CONFIG_*` variables, never through argv or the URL.
+pub fn git(home: &Path, cwd: Option<&Path>, token: Option<&str>, args: &[&str]) -> Output {
+    let mut cmd = Command::new("git");
+    cmd.args(args)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid");
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    if let Some(token) = token {
+        cmd.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("Authorization: Bearer {token}"),
+            );
+    }
+    cmd.output().expect("run git")
+}
+
+/// Panics with stderr when `out` failed; returns stdout.
+pub fn ok(out: Output) -> String {
+    assert!(
+        out.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Asserts failure and returns stdout followed by stderr: `push --porcelain` reports rejected
+/// refs on stdout while curl's errors and `remote:` lines go to stderr.
+pub fn failed(out: Output) -> String {
+    assert!(
+        !out.status.success(),
+        "git unexpectedly succeeded: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// A work tree with one commit on `main`.
+pub fn work_tree(home: &Path, name: &str) -> std::path::PathBuf {
+    let work = home.join(name);
+    std::fs::create_dir_all(&work).unwrap();
+    ok(git(home, Some(&work), None, &["init", "-q", "-b", "main"]));
+    std::fs::write(work.join("README"), "hello\n").unwrap();
+    ok(git(home, Some(&work), None, &["add", "README"]));
+    ok(git(home, Some(&work), None, &["commit", "-q", "-m", "one"]));
+    work
 }

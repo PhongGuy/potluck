@@ -130,10 +130,6 @@ impl GitEngine {
     /// within `upload_timeout`, spawns git with the spool as stdin and `extra_env` in its
     /// environment, and returns its stdout as the response body. The slot is released when git
     /// exits.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by the git routes, which follow")
-    )]
     pub(crate) async fn rpc(
         &self,
         service: Service,

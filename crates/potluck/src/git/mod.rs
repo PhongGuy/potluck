@@ -2,11 +2,14 @@
 
 pub mod access;
 pub mod engine;
+pub(crate) mod http;
 pub mod repos;
 mod spool;
 
 pub use engine::{GitEngine, GitError, GitLimits};
 pub use repos::{RepoError, Repos};
+
+use crate::role::Role;
 
 /// The two smart HTTP services.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +44,14 @@ impl Service {
         match self {
             Service::UploadPack => "upload-pack",
             Service::ReceivePack => "receive-pack",
+        }
+    }
+
+    /// The least role that may use this service: `Read` to fetch, `Write` to push.
+    pub fn required_role(self) -> Role {
+        match self {
+            Service::UploadPack => Role::Read,
+            Service::ReceivePack => Role::Write,
         }
     }
 

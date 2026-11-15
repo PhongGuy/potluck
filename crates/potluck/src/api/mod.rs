@@ -57,13 +57,11 @@ impl AppState {
     }
 
     /// The resolver.
-    #[expect(dead_code, reason = "wired by the git routes, which follow")]
     pub(crate) fn git_access(&self) -> &dyn GitAccess {
         &*self.git_access
     }
 
     /// The engine.
-    #[expect(dead_code, reason = "wired by the git routes, which follow")]
     pub(crate) fn git(&self) -> &GitEngine {
         &self.git
     }
@@ -90,7 +88,8 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
     )
 }
 
-/// Every route under `/api/v1`; unknown paths and wrong methods answer `not_found`.
+/// Every route under `/api/v1` and the git smart HTTP routes under `/git`; unknown paths and
+/// wrong methods answer `not_found`.
 pub fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/health", get(system::health))
@@ -99,6 +98,7 @@ pub fn router(state: AppState) -> Router {
     // method is answered like an unknown path rather than with a bare 405.
     Router::new()
         .nest("/api/v1", v1)
+        .merge(crate::git::http::router())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
         .with_state(state)

@@ -22,6 +22,7 @@ pub mod objects;
 mod session;
 mod system;
 mod tokens;
+mod users;
 
 pub use actor::{Actor, AuthUser};
 use error::ApiError;
@@ -128,6 +129,7 @@ pub fn router(state: AppState) -> Router {
         .route("/me", get(tokens::me))
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", delete(tokens::revoke))
+        .route("/users", get(users::list).post(users::create))
         .route("/users/{username}/tokens", get(tokens::list_for_user));
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.

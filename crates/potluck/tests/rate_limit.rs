@@ -51,6 +51,18 @@ fn retry_after_is_at_least_one_second() {
 }
 
 #[test]
+fn retry_after_rounds_a_partial_second_up() {
+    let l = RateLimiter::new(1, Duration::from_secs(2));
+    let t0 = Instant::now();
+    l.check_at("a", t0).unwrap();
+    assert_eq!(
+        l.check_at("a", t0 + Duration::from_millis(500)),
+        Err(2),
+        "1.5 s left is 2"
+    );
+}
+
+#[test]
 fn check_uses_the_real_clock() {
     let l = RateLimiter::new(2, Duration::from_secs(60));
     assert!(l.check("k").is_ok());

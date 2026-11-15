@@ -163,3 +163,24 @@ impl Default for SessionLimits {
         Self::new(10, 5, Duration::from_secs(60))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Every reset of a held key leaves a stale log entry; compaction must keep the log bounded
+    // even when the map never grows.
+    #[test]
+    fn the_order_log_stays_bounded_under_resets() {
+        let l = RateLimiter::new(1, Duration::from_secs(1));
+        let t0 = Instant::now();
+        for i in 0..(3 * MAX_KEYS as u64) {
+            l.check_at("a", t0 + Duration::from_secs(i)).unwrap();
+            let log = l.state.lock().unwrap().order.len();
+            assert!(
+                log <= 2 * MAX_KEYS + 1,
+                "log grew to {log} after {i} resets"
+            );
+        }
+    }
+}

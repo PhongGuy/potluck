@@ -18,6 +18,7 @@ mod cli_version;
 mod config;
 mod credential;
 mod db;
+mod deploy_files;
 mod git_denials;
 mod git_http;
 mod git_requests;

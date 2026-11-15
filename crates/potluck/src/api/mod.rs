@@ -12,6 +12,7 @@ use crate::git::access::{DenyAll, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
 
 mod actor;
+pub mod auth;
 pub mod credential;
 pub mod error;
 mod system;

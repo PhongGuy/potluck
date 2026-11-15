@@ -184,6 +184,21 @@ pub async fn api_team(api: &str, token: &str, slug: &str) {
     assert_eq!(status, 201, "team {slug}: {body}");
 }
 
+/// `POST {api}/teams/{team}/workspaces` for an apinata workspace on `main` as `token`; asserts
+/// 201 and returns the Workspace object.
+pub async fn api_workspace(api: &str, token: &str, team: &str, slug: &str, seed: bool) -> Value {
+    let body = serde_json::json!({"slug": slug, "name": slug, "kind": "apinata", "default_branch": "main", "seed": seed});
+    let (status, ws) = call(
+        &format!("{api}/teams/{team}/workspaces"),
+        Method::POST,
+        Some(token),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, 201, "workspace {team}/{slug}: {ws}");
+    ws
+}
+
 /// One HTTP/1.1 GET over a Unix socket; returns the status code and the body.
 pub async fn unix_get(socket: &Path, target: &str) -> (u16, String) {
     let mut stream = tokio::net::UnixStream::connect(socket)

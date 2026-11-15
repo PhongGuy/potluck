@@ -9,7 +9,8 @@ use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
 use super::json::ApiJson;
-use super::objects::{IdentityJson, TokenJson, UserJson, identity};
+use super::objects::{IdentityJson, TokenJson, UserJson, WorkspaceJson, identity};
+use super::workspaces;
 use crate::auth::token::MintedToken;
 use crate::clock::{normalize_rfc3339, now_rfc3339};
 use crate::db::accounts::NewToken;
@@ -19,7 +20,7 @@ use crate::db::accounts::NewToken;
 pub(super) struct MeResponse {
     user: UserJson,
     identity: IdentityJson,
-    workspaces: Vec<serde_json::Value>,
+    workspaces: Vec<WorkspaceJson>,
 }
 
 /// The `POST /tokens` body; an absent `expires_at` reads as `None` like an explicit null.
@@ -36,7 +37,7 @@ pub(super) struct CreatedToken {
     token_meta: TokenJson,
 }
 
-/// `GET /me` (self): `{user, identity, workspaces: []}`; the workspace list stays empty until workspaces exist.
+/// `GET /me` (self): `{user, identity, workspaces}`, the workspaces as `GET /workspaces` lists them.
 pub(super) async fn me(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -45,7 +46,7 @@ pub(super) async fn me(
     Ok(Json(MeResponse {
         user: UserJson::from(user),
         identity: identity(user, state.config().public_url()),
-        workspaces: Vec::new(),
+        workspaces: workspaces::held(&state, auth.actor()).await?,
     }))
 }
 

@@ -139,7 +139,9 @@ pub fn router(state: AppState) -> Router {
         .route("/tokens/{id}", delete(tokens::revoke))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{username}", patch(users::patch))
-        .route("/users/{username}/tokens", get(tokens::list_for_user));
+        .route("/users/{username}/tokens", get(tokens::list_for_user))
+        .route("/workspaces", get(workspaces::list))
+        .route("/workspaces/{team}/{ws}", get(workspaces::get));
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.
     Router::new()

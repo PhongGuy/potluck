@@ -54,3 +54,4 @@ mod users;
 mod users_patch;
 mod workflows;
 mod workspaces;
+mod workspaces_read;

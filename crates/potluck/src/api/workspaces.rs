@@ -1,17 +1,19 @@
 //! Workspaces: creation with the seed or the import state, the readable list, one workspace.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::rejection::PathRejection;
+use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 
-use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
 use super::json::ApiJson;
 use super::objects::{WorkspaceJson, noreply_host};
 use super::teams::{check_name, check_slug};
-use crate::db::workspaces::NewWorkspace;
+use super::{Actor, AppState};
+use crate::db::workspaces::{NewWorkspace, WorkspaceRecord};
+use crate::db::{Db, DbError};
 use crate::git::RepoError;
 use crate::kinds;
 use crate::role::Role;
@@ -116,6 +118,133 @@ pub(super) async fn create(
             state.config().public_url(),
         )),
     ))
+}
+
+/// `{team}` and `{ws}` from the URL, or the rejection, so a bad segment answers our 404.
+pub(super) type WsPath = Result<Path<(String, String)>, PathRejection>;
+
+/// `GET /workspaces?kind=` (self; `System` and server admins see everything at `admin`): the
+/// caller's held workspaces, by team then slug, only those of `kind` when the query has one.
+pub(super) async fn list(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    RawQuery(query): RawQuery,
+) -> Result<Json<Vec<WorkspaceJson>>, ApiError> {
+    // An unknown kind is a filter that matches nothing, not a validation error.
+    let kind = query
+        .as_deref()
+        .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("kind=")));
+    let mut list = held_records(&state, auth.actor()).await?;
+    if let Some(kind) = kind {
+        list.retain(|(ws, _)| ws.kind() == kind);
+    }
+    Ok(Json(to_json(&state, &list)))
+}
+
+/// `GET /workspaces/{team}/{ws}` (read): the Workspace with the caller's role.
+pub(super) async fn get(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    path: WsPath,
+) -> Result<Json<WorkspaceJson>, ApiError> {
+    let (ws, role) = load(&state, &auth, path).await?;
+    require(role, Role::Read, "read")?;
+    Ok(Json(WorkspaceJson::new(
+        &ws,
+        role,
+        state.config().public_url(),
+    )))
+}
+
+/// The one place a role is decided: `System` and a `server_admin` user are `Admin` on every
+/// workspace; any other user is the highest grant (`Db::role_for`), `None` without one;
+/// `Anonymous` is `None`. A disabled user never gets here (`authenticate` refuses the token).
+pub(crate) async fn workspace_role(
+    db: &Db,
+    actor: &Actor,
+    ws: &WorkspaceRecord,
+) -> Result<Option<Role>, DbError> {
+    if actor.is_server_admin() {
+        return Ok(Some(Role::Admin));
+    }
+    match actor.user() {
+        Some(user) => db.role_for(ws.id(), user.user().id()).await,
+        None => Ok(None),
+    }
+}
+
+/// The workspace and the caller's role through `workspace_role`: 401 `Anonymous`; an unknown
+/// workspace, a non-slug segment or a user without a grant is 404 "no such workspace".
+pub(super) async fn load(
+    state: &AppState,
+    auth: &Authenticated,
+    path: WsPath,
+) -> Result<(WorkspaceRecord, Role), ApiError> {
+    if let Actor::Anonymous = auth.actor() {
+        return Err(ApiError::unauthenticated("a valid token is required"));
+    }
+    let no_ws = || ApiError::not_found("no such workspace");
+    let Ok(Path((team, ws))) = path else {
+        return Err(no_ws());
+    };
+    let (Ok(team), Ok(ws)) = (Slug::parse(&team), Slug::parse(&ws)) else {
+        return Err(no_ws());
+    };
+    let Some(record) = state
+        .db()
+        .workspace_by_slugs(team.as_str(), ws.as_str())
+        .await?
+    else {
+        return Err(no_ws());
+    };
+    // Without a role the workspace is hidden, answered exactly like one that does not exist.
+    match workspace_role(state.db(), auth.actor(), &record).await? {
+        Some(role) => Ok((record, role)),
+        None => Err(no_ws()),
+    }
+}
+
+/// 403 "role {have} cannot {verb}" when `have < need`.
+pub(super) fn require(have: Role, need: Role, verb: &str) -> Result<(), ApiError> {
+    if have < need {
+        return Err(ApiError::forbidden(format!(
+            "role {} cannot {verb}",
+            have.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// The caller's workspaces as `list` answers them, unfiltered; `/me` uses it.
+pub(super) async fn held(state: &AppState, actor: &Actor) -> Result<Vec<WorkspaceJson>, ApiError> {
+    Ok(to_json(state, &held_records(state, actor).await?))
+}
+
+/// Server admins and `System` hold every workspace at `admin`; a user holds their grants;
+/// `Anonymous` is 401.
+async fn held_records(
+    state: &AppState,
+    actor: &Actor,
+) -> Result<Vec<(WorkspaceRecord, Role)>, ApiError> {
+    if actor.is_server_admin() {
+        let all = state.db().list_workspaces().await?;
+        return Ok(all.into_iter().map(|ws| (ws, Role::Admin)).collect());
+    }
+    let Some(user) = actor.user() else {
+        return Err(ApiError::unauthenticated("a valid token is required"));
+    };
+    let held = state.db().workspaces_for_user(user.user().id()).await?;
+    Ok(held
+        .into_iter()
+        .map(|h| (h.workspace().clone(), h.role()))
+        .collect())
+}
+
+fn to_json(state: &AppState, list: &[(WorkspaceRecord, Role)]) -> Vec<WorkspaceJson> {
+    let url = state.config().public_url();
+    list.iter()
+        .map(|(ws, role)| WorkspaceJson::new(ws, *role, url))
+        .collect()
 }
 
 /// A directory already there is the client's conflict; any other repository failure is logged

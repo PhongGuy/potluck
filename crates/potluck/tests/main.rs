@@ -20,6 +20,7 @@ mod credential;
 mod db;
 mod git_denials;
 mod git_http;
+mod git_requests;
 mod health_check;
 mod measurements;
 mod repos;

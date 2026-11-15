@@ -10,6 +10,7 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 pub mod accounts;
+pub mod grants;
 mod migrations;
 pub mod teams;
 pub mod workspaces;

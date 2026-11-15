@@ -2,6 +2,7 @@
 
 pub mod engine;
 pub mod repos;
+mod spool;
 
 pub use engine::{GitEngine, GitError, GitLimits};
 pub use repos::{RepoError, Repos};

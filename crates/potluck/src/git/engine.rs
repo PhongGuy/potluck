@@ -5,11 +5,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::process::Command;
+use axum::body::Body;
+use tokio::io::AsyncReadExt;
+use tokio::process::{ChildStderr, Command};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::api::error::ApiError;
-use crate::git::{Repos, Service};
+use crate::git::{Repos, Service, spool};
 
 /// How many git slots exist, how long a request waits for one, and how long an upload may
 /// hold one before git starts.
@@ -50,18 +52,10 @@ impl Default for GitLimits {
 pub struct GitEngine {
     repos: Repos,
     hooks_dir: PathBuf,
-    #[expect(
-        dead_code,
-        reason = "the POST body spool reads it once the rpc path lands"
-    )]
     tmp_dir: PathBuf,
     max_body: u64,
     permits: Arc<Semaphore>,
     queue_wait: Duration,
-    #[expect(
-        dead_code,
-        reason = "the POST body spool reads it once the rpc path lands"
-    )]
     upload_timeout: Duration,
 }
 
@@ -132,6 +126,68 @@ impl GitEngine {
         Ok(body)
     }
 
+    /// Serves one `POST git-upload-pack` or `git-receive-pack`: takes a slot, spools the body
+    /// within `upload_timeout`, spawns git with the spool as stdin and `extra_env` in its
+    /// environment, and returns its stdout as the response body. The slot is released when git
+    /// exits.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired by the git routes, which follow")
+    )]
+    pub(crate) async fn rpc(
+        &self,
+        service: Service,
+        repo: &Path,
+        v2: bool,
+        encoding: Option<&str>,
+        extra_env: &[(String, String)],
+        body: Body,
+    ) -> Result<Body, GitError> {
+        // The slot covers the spool too, so the disk holds at most `processes` bodies at once; the
+        // upload timeout keeps a trickling client from parking on a slot.
+        let permit = self.acquire().await?;
+        // Spool before spawning: a 413 can still be answered, and git reads its request from a
+        // file, so nothing has to feed stdin while git is already writing progress to stdout.
+        let stdin = tokio::time::timeout(
+            self.upload_timeout,
+            spool::spool(body, encoding, self.max_body, &self.tmp_dir),
+        )
+        .await
+        .map_err(|_| GitError::SlowBody(self.upload_timeout))??;
+        let mut child = self
+            .command(service, v2, extra_env)
+            .arg(repo)
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(GitError::Spawn)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| GitError::Spawn(std::io::Error::other("git has no stdout")))?;
+        let stderr = child.stderr.take();
+        // The reaper owns the child and the slot: the slot returns when git exits, and a non-zero
+        // exit is logged with the tail of stderr. Nothing from the request reaches the log.
+        tokio::spawn(async move {
+            let _permit = permit;
+            let tail = stderr_tail(stderr).await;
+            match child.wait().await {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(
+                    service = service.name(),
+                    %status,
+                    stderr = %tail,
+                    "git exited with an error"
+                ),
+                Err(err) => {
+                    tracing::warn!(service = service.name(), error = %err, "waiting for git failed");
+                }
+            }
+        });
+        Ok(Body::from_stream(tokio_util::io::ReaderStream::new(stdout)))
+    }
+
     /// A process slot, or `Busy` once `queue_wait` has passed without one.
     async fn acquire(&self) -> Result<OwnedSemaphorePermit, GitError> {
         tokio::time::timeout(self.queue_wait, Arc::clone(&self.permits).acquire_owned())
@@ -166,6 +222,28 @@ impl GitEngine {
         cmd.kill_on_drop(true);
         cmd
     }
+}
+
+/// Drains git's stderr to EOF so git never blocks on a full pipe, keeping only the last 8 KiB
+/// for the log.
+async fn stderr_tail(stderr: Option<ChildStderr>) -> String {
+    const KEEP: usize = 8 * 1024;
+    let Some(mut stderr) = stderr else {
+        return String::new();
+    };
+    let mut tail = Vec::with_capacity(KEEP);
+    let mut chunk = [0u8; 4096];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                tail.extend_from_slice(&chunk[..n]);
+                let excess = tail.len().saturating_sub(KEEP);
+                tail.drain(..excess);
+            }
+        }
+    }
+    String::from_utf8_lossy(&tail).trim().to_owned()
 }
 
 /// Why a git request could not be served; `From<GitError> for ApiError` maps each variant.
@@ -376,5 +454,155 @@ mod tests {
             Service::UploadPack.result_type(),
             "application/x-git-upload-pack-result"
         );
+    }
+
+    /// One commit on `main` in `bare`, made in a scratch work tree and fetched in.
+    pub(super) fn seed_commit(bare: &Path, scratch: &Path) {
+        let run = |args: &[&str], cwd: &Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("HOME", scratch)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let work = scratch.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        run(&["init", "-q", "-b", "main"], &work);
+        std::fs::write(work.join("README"), "seed\n").unwrap();
+        run(&["add", "README"], &work);
+        run(&["commit", "-q", "-m", "seed"], &work);
+        run(
+            &[
+                "--git-dir",
+                bare.to_str().unwrap(),
+                "fetch",
+                "-q",
+                work.to_str().unwrap(),
+                "main:main",
+            ],
+            scratch,
+        );
+    }
+
+    async fn collect(body: Body) -> Vec<u8> {
+        axum::body::to_bytes(body, 1 << 20).await.unwrap().to_vec()
+    }
+
+    #[tokio::test]
+    async fn rpc_answers_a_v2_ls_refs_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        seed_commit(&repo, dir.path());
+        let body = Body::from("0014command=ls-refs\n0000");
+        let out = collect(
+            engine
+                .rpc(Service::UploadPack, &repo, true, None, &[], body)
+                .await
+                .unwrap(),
+        )
+        .await;
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("refs/heads/main"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn rpc_cuts_a_stalled_upload_at_the_upload_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = GitLimits::new(1, Duration::from_millis(100), Duration::from_millis(200));
+        let (engine, repo) = engine_in(dir.path(), short).await;
+        // A body that never yields a byte: the spool cannot finish, so the timeout must fire and
+        // the slot must come back.
+        let stalled = Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >());
+        let err = engine
+            .rpc(Service::ReceivePack, &repo, false, None, &[], stalled)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitError::SlowBody(d) if d == Duration::from_millis(200)),
+            "got {err:?}"
+        );
+        assert_eq!(engine.permits.available_permits(), 1, "the slot is back");
+    }
+
+    #[tokio::test]
+    async fn rpc_inflates_a_gzip_request() {
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        seed_commit(&repo, dir.path());
+        let mut enc = async_compression::tokio::write::GzipEncoder::new(Vec::new());
+        enc.write_all(b"0014command=ls-refs\n0000").await.unwrap();
+        enc.shutdown().await.unwrap();
+        let body = Body::from(enc.into_inner());
+        let out = collect(
+            engine
+                .rpc(Service::UploadPack, &repo, true, Some("gzip"), &[], body)
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&out).contains("refs/heads/main"));
+    }
+
+    #[tokio::test]
+    async fn rpc_refuses_an_oversized_body_before_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos = Repos::new(dir.path().join("repos"), PathBuf::from("git"));
+        let repo = repos
+            .init(
+                &Slug::parse("t").unwrap(),
+                &Slug::parse("w").unwrap(),
+                "main",
+            )
+            .await
+            .unwrap();
+        std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        let engine = GitEngine::new(
+            repos,
+            dir.path().join("hooks"),
+            dir.path().join("tmp"),
+            16,
+            limits(1, 200),
+        );
+        let err = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(vec![0u8; 17]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitError::TooLarge { limit: 16 }),
+            "got {err:?}"
+        );
+        assert_eq!(
+            engine.permits.available_permits(),
+            1,
+            "the refused request returned its slot"
+        );
+        engine
+            .advertise(Service::UploadPack, &repo, false)
+            .await
+            .unwrap();
     }
 }

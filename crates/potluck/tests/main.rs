@@ -16,5 +16,6 @@ mod api_system;
 mod cli_version;
 mod config;
 mod db;
+mod health_check;
 mod measurements;
 mod serve;

@@ -8,10 +8,6 @@ use tokio::net::UnixStream;
 
 /// One `GET target` over the Unix socket at `path` with `Connection: close`; returns the
 /// status code and the body. GET only, no chunked decoding: enough for `health-check`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "wired by health-check, which follows")
-)]
 pub(crate) async fn get(path: &Path, target: &str) -> io::Result<(u16, String)> {
     let mut stream = UnixStream::connect(path).await?;
     let request = format!("GET {target} HTTP/1.1\r\nHost: potluck\r\nConnection: close\r\n\r\n");

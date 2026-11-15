@@ -7,6 +7,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{Config, ServeArgs};
+use crate::health_check::HealthArgs;
 
 /// The `potluck` command line.
 #[derive(Parser, Debug)]
@@ -28,12 +29,20 @@ pub struct Cli {
 pub enum Command {
     /// Run the server.
     Serve(ServeArgs),
+    /// Exit 0 if the server on this data directory answers its health check.
+    HealthCheck(HealthArgs),
 }
 
-/// Runs the parsed command to completion. `serve` returns after SIGTERM or Ctrl-C.
+/// Runs the parsed command to completion. `serve` returns after SIGTERM or Ctrl-C;
+/// `health-check` prints `ok` when the server is healthy.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Serve(args) => serve(args).await,
+        Command::HealthCheck(args) => {
+            crate::health_check::run(args).await?;
+            println!("ok");
+            Ok(())
+        }
     }
 }
 

@@ -350,3 +350,28 @@ pub fn work_tree(home: &Path, name: &str) -> std::path::PathBuf {
     ok(git(home, Some(&work), None, &["commit", "-q", "-m", "one"]));
     work
 }
+
+/// A served API over a migrated database with fast hashing; the dir and the task live as long as it.
+pub struct TestApp {
+    pub _dir: tempfile::TempDir,
+    pub db: Db,
+    pub addr: SocketAddr,
+    pub _task: tokio::task::JoinHandle<()>,
+}
+
+impl TestApp {
+    pub fn url(&self, path: &str) -> String {
+        format!("http://{}/api/v1{path}", self.addr)
+    }
+}
+
+pub async fn test_app() -> TestApp {
+    let (dir, db, state) = test_state().await;
+    let (addr, task) = serve(potluck::api::router(state)).await;
+    TestApp {
+        _dir: dir,
+        db,
+        addr,
+        _task: task,
+    }
+}

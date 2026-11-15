@@ -31,6 +31,7 @@ mod git_requests;
 mod health_check;
 mod hooks;
 mod measurements;
+mod objects;
 mod password;
 mod rate_limit;
 mod repos;

@@ -6,6 +6,7 @@ use axum::Router;
 use axum::routing::get;
 
 use crate::auth::password::Passwords;
+use crate::auth::rate_limit::SessionLimits;
 use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DenyAll, GitAccess};
@@ -17,13 +18,14 @@ pub mod client_ip;
 pub mod credential;
 pub mod error;
 pub mod json;
+pub mod objects;
 mod system;
 
 pub use actor::{Actor, AuthUser};
 use error::ApiError;
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver, the git engine and the password hasher.
+/// resolver, the git engine, the password hasher and the sign-in rate limiters.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -32,6 +34,7 @@ pub struct AppState {
     git_access: Arc<dyn GitAccess>,
     git: Arc<GitEngine>,
     passwords: Passwords,
+    session_limits: Arc<SessionLimits>,
 }
 
 impl AppState {
@@ -46,6 +49,7 @@ impl AppState {
             git_access: Arc::new(DenyAll),
             git,
             passwords: Passwords::new(),
+            session_limits: Arc::new(SessionLimits::default()),
         }
     }
 
@@ -73,6 +77,11 @@ impl AppState {
     /// The hasher.
     pub fn passwords(&self) -> &Passwords {
         &self.passwords
+    }
+
+    /// The `POST /session` limiters, shared by every clone of the state.
+    pub fn session_limits(&self) -> &SessionLimits {
+        &self.session_limits
     }
 
     /// The resolver.

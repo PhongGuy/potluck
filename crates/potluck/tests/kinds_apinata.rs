@@ -1,26 +1,34 @@
 //! The apinata kind: environment files, the YAML walk and the seed.
 
-use potluck::kinds::apinata::{Apinata, is_environment_file, seed};
+use potluck::kinds::apinata::{
+    Apinata, ENV_UNPARSABLE, NODE_CAP, SECRET_VALUE, environment_rule, is_environment_file, seed,
+};
 use potluck::kinds::generic;
 use potluck::kinds::{Code, Finding, Kind, by_name};
 
 const SEED_COLLECTION: &[u8] = b"opencollection: 1.0.0\n\ninfo:\n  name: Workspace\nbundled: false\nextensions:\n  bruno:\n    ignore:\n      - node_modules\n      - .git\n";
 
 #[test]
-fn environment_files_at_any_depth_are_checked_and_nothing_else_is() {
+fn only_root_environment_yml_files_are_checked() {
     for p in [
         "environments/dev.yml",
-        "collections/api/environments/dev.yml",
+        "environments/Dev.yml",
+        "environments/a-b_c.yml",
     ] {
         assert!(is_environment_file(p), "{p}");
     }
     for p in [
-        "environments/nested/dev.yml",
+        "Environments/dev.yml",
+        "sub/environments/dev.yml",
+        "collections/api/environments/dev.yml",
         "environments/dev.yaml",
+        "environments/dev.YML",
+        "environments/nested/dev.yml",
         "my-environments/dev.yml",
         "dev.yml",
         "environments.yml",
         "environments/dev.yml.bak",
+        "/environments/dev.yml",
         "-",
         "",
     ] {
@@ -57,7 +65,18 @@ macro_rules! fixture {
 }
 
 fn hit() -> Option<Finding> {
-    Some(Finding::new(Code::SecretValue, "secret_value"))
+    Some(Finding::new(Code::SecretValue, SECRET_VALUE))
+}
+
+fn unparsable() -> Option<Finding> {
+    Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE))
+}
+
+#[test]
+fn rule_names_are_the_contract_names() {
+    assert_eq!(SECRET_VALUE, "secret_value");
+    assert_eq!(ENV_UNPARSABLE, "env_unparsable");
+    assert_eq!(unparsable().map(|f| f.code()), Some(Code::SecretValue));
 }
 
 #[test]
@@ -76,7 +95,13 @@ fn by_name_knows_apinata_only() {
 fn the_rule_follows_the_path() {
     let bad = fixture!("bad", "env-secret-valued.yml");
     assert_eq!(Apinata.content_rule("environments/dev.yml", bad), hit());
-    assert_eq!(Apinata.content_rule("api/environments/dev.yml", bad), hit());
+    assert_eq!(
+        Apinata.content_rule("api/environments/dev.yml", bad),
+        None,
+        "Apinata reads only the root directory"
+    );
+    assert_eq!(Apinata.content_rule("Environments/dev.yml", bad), None);
+    assert_eq!(Apinata.content_rule("environments/dev.yaml", bad), None);
     assert_eq!(Apinata.content_rule("notes/dev.yml", bad), None);
     assert_eq!(Apinata.content_rule("-", bad), None);
     assert_eq!(Apinata.path_rule("environments/dev.yml"), None);
@@ -114,7 +139,7 @@ fn an_empty_string_value_is_still_a_value() {
 }
 
 #[test]
-fn unvalued_false_null_and_unparsable_pass() {
+fn unvalued_false_and_null_pass() {
     for (name, bytes) in [
         (
             "env-secret-unvalued.yml",
@@ -128,7 +153,6 @@ fn unvalued_false_null_and_unparsable_pass() {
             "env-secret-null-value.yml",
             fixture!("good", "env-secret-null-value.yml"),
         ),
-        ("env-not-yaml.yml", fixture!("good", "env-not-yaml.yml")),
     ] {
         assert_eq!(
             Apinata.content_rule("environments/x.yml", bytes),
@@ -136,24 +160,52 @@ fn unvalued_false_null_and_unparsable_pass() {
             "{name}"
         );
     }
-    assert_eq!(Apinata.content_rule("environments/x.yml", b""), None);
-    assert_eq!(
-        Apinata.content_rule("environments/x.yml", &[0xff, 0xfe, b':']),
-        None,
-        "invalid UTF-8 is not an environment file"
-    );
 }
 
 #[test]
-fn a_multi_document_file_passes_unscanned() {
-    // Pinned, not desired: yaml_serde reads one document, so a second one is invisible.
-    assert_eq!(
-        Apinata.content_rule(
-            "environments/x.yml",
-            fixture!("good", "env-two-documents.yml")
+fn an_empty_file_is_one_null_document_and_passes() {
+    assert_eq!(Apinata.content_rule("environments/x.yml", b""), None);
+    assert_eq!(Apinata.content_rule("environments/x.yml", b"\n  \n"), None);
+}
+
+#[test]
+fn files_apinata_cannot_read_are_refused() {
+    for (name, bytes) in [
+        (
+            "env-two-documents.yml",
+            fixture!("bad", "env-two-documents.yml"),
         ),
-        None
-    );
+        ("env-not-yaml.yml", fixture!("bad", "env-not-yaml.yml")),
+        (
+            "env-duplicate-key-top.yml",
+            fixture!("bad", "env-duplicate-key-top.yml"),
+        ),
+        (
+            "env-duplicate-key-variable.yml",
+            fixture!("bad", "env-duplicate-key-variable.yml"),
+        ),
+        (
+            "env-deep-nesting.yml",
+            fixture!("bad", "env-deep-nesting.yml"),
+        ),
+        ("env-alias-bomb.yml", fixture!("bad", "env-alias-bomb.yml")),
+        ("unterminated flow sequence", b"variables: [1, 2" as &[u8]),
+        ("invalid utf-8", b"name: \xff\xfe\n" as &[u8]),
+        ("unknown alias", b"name: *nowhere\n" as &[u8]),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            unparsable(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn unparsable_is_only_for_environment_files() {
+    let bytes = fixture!("bad", "env-not-yaml.yml");
+    assert_eq!(Apinata.content_rule("notes/x.yml", bytes), None);
+    assert_eq!(Apinata.content_rule("environments/x.yaml", bytes), None);
 }
 
 #[test]
@@ -183,6 +235,194 @@ fn every_seed_file_passes_the_yaml_walk() {
             None,
             "{} under an environment path",
             file.path()
+        );
+    }
+}
+
+#[test]
+fn the_node_cap_is_two_million() {
+    assert_eq!(NODE_CAP, 2_000_000);
+}
+
+#[test]
+fn nodes_are_counted_after_alias_expansion_keys_included() {
+    // sequence + 3 scalars
+    assert_eq!(environment_rule(b"[1, 2, 3]", 4), None);
+    assert_eq!(environment_rule(b"[1, 2, 3]", 3), unparsable());
+    // root map, key a, sequence of 3 (4), key b, the alias copy (4)
+    let aliased = b"a: &a [1, 2, 3]\nb: *a\n";
+    assert_eq!(environment_rule(aliased, 11), None);
+    assert_eq!(environment_rule(aliased, 10), unparsable());
+    // a tag wrapper is free: root map, key v, scalar
+    assert_eq!(environment_rule(b"v: !t 1\n", 3), None);
+    assert_eq!(environment_rule(b"v: !t 1\n", 2), unparsable());
+    // an empty document is one null node
+    assert_eq!(environment_rule(b"", 1), None);
+    assert_eq!(environment_rule(b"", 0), unparsable());
+}
+
+#[test]
+fn a_valued_secret_under_the_cap_is_still_secret_value() {
+    let bad = fixture!("bad", "env-secret-valued.yml");
+    assert_eq!(environment_rule(bad, NODE_CAP), hit());
+    assert_eq!(
+        environment_rule(bad, 5),
+        unparsable(),
+        "the cap is checked first"
+    );
+}
+
+fn wide(aliases: usize) -> Vec<u8> {
+    let mut s = String::from("a: &a [");
+    s.push_str(&vec!["x"; 4000].join(", "));
+    s.push_str("]\nb: [");
+    s.push_str(&vec!["*a"; aliases].join(", "));
+    s.push_str("]\n");
+    s.into_bytes()
+}
+
+// The one test at the real cap: 0.67 s in a release build, slower in the unoptimised test
+// profile. Every other cap test uses a small `node_cap` through `environment_rule`.
+#[test]
+fn the_real_cap_refuses_a_wide_alias_fan_out() {
+    // 1 + 1 + 4001 + 1 + 1 + 501 * 4001 = 2_008_506 nodes, 501 jumps: yaml_serde accepts it.
+    assert_eq!(
+        Apinata.content_rule("environments/x.yml", &wide(501)),
+        unparsable()
+    );
+    // The accepted side of the real cap is deliberately untested: the small-cap boundary
+    // tests cover it, and a 1,996,503-node document costs as much as the refused one.
+}
+
+#[test]
+fn the_counted_parse_keeps_every_refusal_of_the_plain_parse() {
+    for (name, bytes) in [
+        (
+            "env-duplicate-key-variable.yml",
+            fixture!("bad", "env-duplicate-key-variable.yml"),
+        ),
+        (
+            "env-deep-nesting.yml",
+            fixture!("bad", "env-deep-nesting.yml"),
+        ),
+        ("env-alias-bomb.yml", fixture!("bad", "env-alias-bomb.yml")),
+        ("flow duplicate", b"{a: 1, a: 2}" as &[u8]),
+    ] {
+        assert_eq!(environment_rule(bytes, NODE_CAP), unparsable(), "{name}");
+    }
+    assert_eq!(
+        environment_rule(
+            b"name: dev\nv: !custom {secret: true, value: fixture-tagged}\n",
+            NODE_CAP
+        ),
+        hit(),
+        "a tagged mapping is still walked"
+    );
+}
+
+#[test]
+fn an_alias_or_a_merge_cannot_hide_a_valued_secret() {
+    for (name, bytes) in [
+        (
+            "env-alias-secret-value.yml",
+            fixture!("bad", "env-alias-secret-value.yml"),
+        ),
+        (
+            "env-merge-secret-value.yml",
+            fixture!("bad", "env-merge-secret-value.yml"),
+        ),
+        (
+            "aliased whole variable",
+            b"name: dev\nvariables:\n  - &v\n    secret: true\n    name: a\n    value: x\n  - *v\n"
+                as &[u8],
+        ),
+        (
+            "merge list, value from the second mapping",
+            b"a: &a {secret: true}\nb: &b {value: x}\nvariables:\n  - <<: [*a, *b]\n    name: k\n"
+                as &[u8],
+        ),
+        (
+            "merge brings secret, explicit value",
+            b"a: &a {secret: true}\nvariables:\n  - <<: *a\n    name: k\n    value: x\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            hit(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_merge_without_a_value_passes() {
+    assert_eq!(
+        Apinata.content_rule(
+            "environments/x.yml",
+            fixture!("good", "env-merge-secret-unvalued.yml")
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_explicit_null_value_beats_a_merged_value() {
+    // The anchor alone carries no `secret`, the variable alone no value.
+    let bytes =
+        b"a: &a {value: x}\nvariables:\n  - <<: *a\n    secret: true\n    name: k\n    value:\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
+}
+
+#[test]
+fn a_merge_under_a_tag_is_still_applied() {
+    let bytes = b"a: &a {value: x}\nv: !t {<<: *a, secret: true}\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), hit());
+}
+
+#[test]
+fn a_merge_yaml_serde_cannot_apply_is_unparsable() {
+    for (name, bytes) in [
+        (
+            "scalar merge",
+            b"variables:\n  - <<: 1\n    name: k\n" as &[u8],
+        ),
+        ("tagged merge", b"v: {<<: !t {k: 1}}\n" as &[u8]),
+        (
+            "scalar in merge list",
+            b"a: &a {secret: true}\nv: {<<: [*a, 1]}\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            unparsable(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_plain_merge_key_is_not_a_variable_key() {
+    // The merge key vanishes; a mapping with only `<<` and `name` has no secret.
+    let bytes = b"a: &a {name: base}\nvariables:\n  - <<: *a\n    secret: true\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
+}
+
+#[test]
+fn a_chained_merge_cannot_hide_a_valued_secret() {
+    for (name, bytes) in [
+        (
+            "plain chain",
+            b"base: &b {value: x}\nmid: &m {<<: *b}\nvariables:\n  - <<: *m\n    secret: true\n    name: k\n" as &[u8],
+        ),
+        (
+            "chain through merge lists",
+            b"base: &b {value: x}\nmid: &m {<<: [*b]}\nvariables:\n  - <<: [*m]\n    secret: true\n    name: k\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            hit(),
+            "{name}"
         );
     }
 }

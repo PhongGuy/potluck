@@ -1,4 +1,5 @@
 //! Shared helpers. Every test reaches only 127.0.0.1 or a Unix socket under a temp dir.
+pub mod scratch;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -340,6 +341,12 @@ pub async fn git_server_at(
     for d in [config.hooks_dir(), config.repos_dir(), config.tmp_dir()] {
         std::fs::create_dir_all(d).expect("data subdir");
     }
+    potluck::hooks::install(
+        &config.hooks_dir(),
+        std::path::Path::new(env!("CARGO_BIN_EXE_potluck")),
+        config.git(),
+    )
+    .expect("install hook");
     let db = Db::open(&config.db_path()).expect("open");
     db.migrate().await.expect("migrate");
     let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());

@@ -7,7 +7,7 @@ use clap::Parser;
 #[tokio::main]
 async fn main() -> ExitCode {
     match potluck::cli::run(potluck::cli::Cli::parse()).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err:#}");
             ExitCode::FAILURE

@@ -2,6 +2,7 @@
 //! and a busy engine answers 503.
 
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::time::Duration;
 
 use potluck::git::GitLimits;
@@ -31,15 +32,21 @@ fn relative_to_cwd(dir: &std::path::Path) -> String {
 }
 
 #[test]
-fn install_writes_an_executable_stub_and_replaces_an_old_one() {
+fn install_writes_a_script_that_execs_potluck_and_replaces_an_old_one() {
     let dir = tempfile::tempdir().unwrap();
     let hook = dir.path().join("pre-receive");
     std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-    let written = install(dir.path()).unwrap();
+    let written = install(
+        dir.path(),
+        Path::new("/opt/pot luck/bin/potluck"),
+        Path::new("/usr/bin/it's-git"),
+    )
+    .unwrap();
     assert_eq!(written, hook);
-    let text = std::fs::read_to_string(&hook).unwrap();
-    assert!(text.starts_with("#!/bin/sh\n"), "{text}");
-    assert!(text.ends_with("exit 0\n"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(&hook).unwrap(),
+        "#!/bin/sh\n# Written by potluck at every start; edits are lost. Runs the secret check.\nPOTLUCK_GIT='/usr/bin/it'\\''s-git' exec '/opt/pot luck/bin/potluck' hook pre-receive\n"
+    );
     assert_eq!(
         std::fs::metadata(&hook).unwrap().permissions().mode() & 0o777,
         0o755

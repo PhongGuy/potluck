@@ -71,10 +71,12 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         std::fs::create_dir_all(&path).map_err(|source| ServerError::DataDir { path, source })?;
     }
     let hooks_dir = config.hooks_dir();
-    crate::hooks::install(&hooks_dir).map_err(|source| ServerError::Hooks {
-        path: hooks_dir,
-        source,
-    })?;
+    std::env::current_exe()
+        .and_then(|exe| crate::hooks::install(&hooks_dir, &exe, config.git()))
+        .map_err(|source| ServerError::Hooks {
+            path: hooks_dir,
+            source,
+        })?;
     let db = Db::open(&config.db_path())?;
     db.migrate().await?;
     let addr = config.listen();

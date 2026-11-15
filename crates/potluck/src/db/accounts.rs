@@ -1,5 +1,5 @@
-//! The user rows of `server.db`: create, look up, list and patch, each one job on the database
-//! thread. Password hashes never reach `Debug` output.
+//! The user and token rows of `server.db`, each query one job on the database thread. Password
+//! hashes and token digests never reach `Debug` output.
 
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, params, params_from_iter};
@@ -231,16 +231,171 @@ impl std::fmt::Debug for UserPatch {
 const USER_COLUMNS: &str =
     "id, username, display_name, email, password_hash, server_admin, disabled, created_at";
 
-fn user_from_row(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
-    Ok(UserRecord {
+/// What `create_token` inserts; `created_at` is set by the database thread. `Debug` prints the
+/// digest as `<redacted>`.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NewToken {
+    user_id: i64,
+    name: String,
+    prefix: String,
+    digest: [u8; 32],
+    expires_at: Option<String>,
+}
+
+impl NewToken {
+    /// A token for `user_id`; `expires_at` is an RFC 3339 UTC stamp or `None` for no expiry.
+    pub fn new(
+        user_id: i64,
+        name: &str,
+        prefix: &str,
+        digest: [u8; 32],
+        expires_at: Option<&str>,
+    ) -> Self {
+        NewToken {
+            user_id,
+            name: name.to_owned(),
+            prefix: prefix.to_owned(),
+            digest,
+            expires_at: expires_at.map(str::to_owned),
+        }
+    }
+}
+
+impl std::fmt::Debug for NewToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewToken")
+            .field("user_id", &self.user_id)
+            .field("name", &self.name)
+            .field("prefix", &self.prefix)
+            .field("digest", &Redacted)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// A `tokens` row without its digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TokenRecord {
+    id: i64,
+    user_id: i64,
+    name: String,
+    prefix: String,
+    created_at: String,
+    last_used_at: Option<String>,
+    expires_at: Option<String>,
+}
+
+impl TokenRecord {
+    /// The row id.
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+
+    /// The owning user's row id.
+    pub fn user_id(&self) -> i64 {
+        self.user_id
+    }
+
+    /// The label the owner gave the token.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The token's first 8 characters, `plk_` included.
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// When the row was created, RFC 3339 UTC to the second.
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+
+    /// When the token last authenticated a request, if ever.
+    pub fn last_used_at(&self) -> Option<&str> {
+        self.last_used_at.as_deref()
+    }
+
+    /// When the token stops working; `None` for never.
+    pub fn expires_at(&self) -> Option<&str> {
+        self.expires_at.as_deref()
+    }
+}
+
+/// One token sharing a presented prefix, with its digest and owner, for the auth path. `Debug`
+/// prints the digest as `<redacted>` and the user through its own redacting `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TokenCandidate {
+    token: TokenRecord,
+    digest: [u8; 32],
+    user: UserRecord,
+}
+
+impl TokenCandidate {
+    /// The token row.
+    pub fn token(&self) -> &TokenRecord {
+        &self.token
+    }
+
+    /// The stored SHA-256 digest of the full token text.
+    pub fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
+
+    /// The token's owner.
+    pub fn user(&self) -> &UserRecord {
+        &self.user
+    }
+}
+
+impl std::fmt::Debug for TokenCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenCandidate")
+            .field("token", &self.token)
+            .field("digest", &Redacted)
+            .field("user", &self.user)
+            .finish()
+    }
+}
+
+const TOKEN_COLUMNS: &str = "id, user_id, name, prefix, created_at, last_used_at, expires_at";
+
+fn token_from_row(row: &Row<'_>) -> rusqlite::Result<TokenRecord> {
+    Ok(TokenRecord {
         id: row.get(0)?,
-        username: row.get(1)?,
-        display_name: row.get(2)?,
-        email: row.get(3)?,
-        password_hash: row.get(4)?,
-        server_admin: row.get(5)?,
-        disabled: row.get(6)?,
-        created_at: row.get(7)?,
+        user_id: row.get(1)?,
+        name: row.get(2)?,
+        prefix: row.get(3)?,
+        created_at: row.get(4)?,
+        last_used_at: row.get(5)?,
+        expires_at: row.get(6)?,
+    })
+}
+
+fn select_token(conn: &rusqlite::Connection, id: i64) -> Result<Option<TokenRecord>, DbError> {
+    let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
+    Ok(conn.query_row(&sql, [id], token_from_row).optional()?)
+}
+
+fn user_from_row(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
+    user_at(row, 0)
+}
+
+// Reads the `USER_COLUMNS` that start at column `base`, so a join can carry a user after other
+// columns.
+fn user_at(row: &Row<'_>, base: usize) -> rusqlite::Result<UserRecord> {
+    Ok(UserRecord {
+        id: row.get(base)?,
+        username: row.get(base + 1)?,
+        display_name: row.get(base + 2)?,
+        email: row.get(base + 3)?,
+        password_hash: row.get(base + 4)?,
+        server_admin: row.get(base + 5)?,
+        disabled: row.get(base + 6)?,
+        created_at: row.get(base + 7)?,
     })
 }
 
@@ -332,6 +487,90 @@ impl Db {
                 conn.execute(&sql, params_from_iter(values))?;
             }
             select_user(conn, &username)
+        })
+        .await
+    }
+    /// Inserts with `created_at = clock::now_rfc3339()`.
+    pub async fn create_token(&self, token: NewToken) -> Result<TokenRecord, DbError> {
+        self.call(move |conn| {
+            conn.execute(
+                "INSERT INTO tokens (user_id, name, prefix, digest, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    token.user_id,
+                    token.name,
+                    token.prefix,
+                    token.digest,
+                    clock::now_rfc3339(),
+                    token.expires_at,
+                ],
+            )?;
+            let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
+            Ok(conn.query_row(&sql, [conn.last_insert_rowid()], token_from_row)?)
+        })
+        .await
+    }
+
+    /// Tokens whose stored prefix is `prefix`, each with its digest and owner.
+    pub async fn tokens_by_prefix(&self, prefix: &str) -> Result<Vec<TokenCandidate>, DbError> {
+        let prefix = prefix.to_owned();
+        self.call(move |conn| {
+            // Token columns, then the digest, then the user, each read at a fixed offset; a digest
+            // that is not 32 bytes fails the read.
+            const SQL: &str = "SELECT t.id, t.user_id, t.name, t.prefix, t.created_at, \
+                 t.last_used_at, t.expires_at, t.digest, u.id, u.username, u.display_name, \
+                 u.email, u.password_hash, u.server_admin, u.disabled, u.created_at \
+                 FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.prefix = ?1 ORDER BY t.id";
+            let mut stmt = conn.prepare(SQL)?;
+            let candidates = stmt
+                .query_map([&prefix], |row| {
+                    Ok(TokenCandidate {
+                        token: token_from_row(row)?,
+                        digest: row.get(7)?,
+                        user: user_at(row, 8)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(candidates)
+        })
+        .await
+    }
+
+    /// A user's tokens in creation order.
+    pub async fn tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenRecord>, DbError> {
+        self.call(move |conn| {
+            let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE user_id = ?1 ORDER BY id");
+            let mut stmt = conn.prepare(&sql)?;
+            let tokens = stmt
+                .query_map([user_id], token_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(tokens)
+        })
+        .await
+    }
+
+    /// The token with row id `id`, if it exists.
+    pub async fn token_by_id(&self, id: i64) -> Result<Option<TokenRecord>, DbError> {
+        self.call(move |conn| select_token(conn, id)).await
+    }
+
+    /// `Ok(true)` when a row went.
+    pub async fn delete_token(&self, id: i64) -> Result<bool, DbError> {
+        self.call(move |conn| Ok(conn.execute("DELETE FROM tokens WHERE id = ?1", [id])? > 0))
+            .await
+    }
+
+    /// Sets `last_used_at = now` only when it is null or before `stale_before`; a missing row is
+    /// not an error.
+    pub async fn touch_token(&self, id: i64, now: &str, stale_before: &str) -> Result<(), DbError> {
+        let (now, stale_before) = (now.to_owned(), stale_before.to_owned());
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE tokens SET last_used_at = ?1 \
+                 WHERE id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)",
+                params![now, id, stale_before],
+            )?;
+            Ok(())
         })
         .await
     }

@@ -42,3 +42,4 @@ mod slug;
 mod token;
 mod tokens;
 mod users;
+mod users_patch;

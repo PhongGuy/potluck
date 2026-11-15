@@ -108,7 +108,7 @@ impl Authenticated {
     }
 }
 
-fn token_required() -> ApiError {
+pub(super) fn token_required() -> ApiError {
     ApiError::unauthenticated("a valid token is required")
 }
 

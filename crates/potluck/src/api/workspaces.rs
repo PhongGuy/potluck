@@ -6,7 +6,7 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 
-use super::auth::Authenticated;
+use super::auth::{Authenticated, token_required};
 use super::error::ApiError;
 use super::json::ApiJson;
 use super::objects::{WorkspaceJson, noreply_host};
@@ -180,7 +180,7 @@ pub(super) async fn delete(
             return Err(ApiError::not_found("no such workspace"));
         }
         if let Err(err) = repos.remove(&team_slug, &slug).await {
-            tracing::error!(error = %err, "removing a deleted workspace's repository failed");
+            tracing::error!(id = ws.id(), error = %err, "removing a deleted workspace's repository failed");
             return Err(ApiError::internal("repository could not be removed"));
         }
         Ok(StatusCode::NO_CONTENT)
@@ -216,7 +216,7 @@ pub(super) async fn load(
     path: WsPath,
 ) -> Result<(WorkspaceRecord, Role), ApiError> {
     if let Actor::Anonymous = auth.actor() {
-        return Err(ApiError::unauthenticated("a valid token is required"));
+        return Err(token_required());
     }
     let no_ws = || ApiError::not_found("no such workspace");
     let Ok(Path((team, ws))) = path else {
@@ -266,7 +266,7 @@ async fn held_records(
         return Ok(all.into_iter().map(|ws| (ws, Role::Admin)).collect());
     }
     let Some(user) = actor.user() else {
-        return Err(ApiError::unauthenticated("a valid token is required"));
+        return Err(token_required());
     };
     let held = state.db().workspaces_for_user(user.user().id()).await?;
     Ok(held

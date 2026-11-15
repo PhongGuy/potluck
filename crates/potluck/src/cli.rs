@@ -1,5 +1,7 @@
 //! The command line surface of the `potluck` binary.
 
+use std::io::IsTerminal;
+
 use clap::{Parser, Subcommand};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
@@ -42,18 +44,22 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(config.log())?)
         .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
         .try_init()
         .map_err(|err| anyhow::anyhow!(err))?;
+    // Both handlers go in before start, so a SIGTERM or Ctrl-C during startup still reaches
+    // shutdown; `ctrl_c()` would only register once polled.
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
     let running = crate::server::start(&config).await?;
     tracing::info!(
         "listening on http://{} ; admin socket {}",
         running.http_addr(),
         running.admin_socket().display()
     );
-    let mut terminate = signal(SignalKind::terminate())?;
     tokio::select! {
         _ = terminate.recv() => {}
-        result = tokio::signal::ctrl_c() => result?,
+        _ = interrupt.recv() => {}
     }
     running.shutdown().await;
     Ok(())

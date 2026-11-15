@@ -127,3 +127,29 @@ fn serve_refuses_a_non_loopback_http_public_url_from_the_environment() {
         "nothing is created before config passes"
     );
 }
+
+#[test]
+fn serve_on_a_busy_port_prints_the_cause_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let busy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = busy.local_addr().unwrap().to_string();
+    let out = potluck()
+        .args([
+            "serve",
+            "--listen",
+            &addr,
+            "--public-url",
+            "http://127.0.0.1:8080",
+            "--data",
+        ])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "a bind failure exits 1");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        stderr.matches("Address already in use").count(),
+        1,
+        "{stderr}"
+    );
+}

@@ -18,7 +18,7 @@ use crate::db::{Db, DbError};
 #[non_exhaustive]
 pub enum ServerError {
     /// A directory under `--data` could not be created.
-    #[error("cannot create {path}: {source}")]
+    #[error("cannot create {path}")]
     DataDir {
         /// The directory that could not be created.
         path: PathBuf,
@@ -27,7 +27,7 @@ pub enum ServerError {
         source: io::Error,
     },
     /// The TCP listen address could not be bound.
-    #[error("cannot listen on {addr}: {source}")]
+    #[error("cannot listen on {addr}")]
     Listen {
         /// The address from `--listen`.
         addr: SocketAddr,
@@ -36,7 +36,7 @@ pub enum ServerError {
         source: io::Error,
     },
     /// The admin socket could not be bound, including when another instance holds it.
-    #[error("cannot bind the admin socket {path}: {source}")]
+    #[error("cannot bind the admin socket {path}")]
     AdminSocket {
         /// The socket path under `--data`.
         path: PathBuf,
@@ -101,8 +101,8 @@ async fn stopped(mut rx: watch::Receiver<bool>) {
     let _ = rx.changed().await;
 }
 
-/// A started server. Dropping it without `shutdown` leaves the tasks running until the
-/// runtime stops.
+/// A started server. Dropping it without `shutdown` signals a graceful stop but neither
+/// waits for in-flight requests nor removes the socket file.
 #[non_exhaustive]
 pub struct Running {
     http_addr: SocketAddr,

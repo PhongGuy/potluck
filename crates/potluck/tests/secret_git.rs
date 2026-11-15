@@ -190,3 +190,50 @@ fn a_failing_git_flooding_both_pipes_keeps_4_kib_of_stderr_and_returns() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
+
+#[test]
+fn new_tags_list_the_pushed_tag_chain_and_skip_tags_the_server_has() {
+    let s = Scratch::new();
+    let h = staged_history(&s);
+    let git = git_for(&s);
+    assert!(
+        git.new_tags(&sha(&h.tip), &[]).unwrap().is_empty(),
+        "a commit tip is no tag"
+    );
+    s.tag("inner", &h.root);
+    s.tag("outer", "refs/tags/inner");
+    s.tag("blob-tag", &h.creds_blob);
+    let inner = s.stage("refs/tags/inner");
+    let outer = s.stage("refs/tags/outer");
+    let blob_tag = s.stage("refs/tags/blob-tag");
+    let sorted = |mut v: Vec<Sha>| {
+        v.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        v
+    };
+    let chain = sorted(vec![sha(&outer), sha(&inner)]);
+    assert_eq!(
+        sorted(git.new_tags(&sha(&outer), &[]).unwrap()),
+        chain,
+        "both tags of the chain, the published root commit left out"
+    );
+    assert_eq!(
+        sorted(git.new_tags(&sha(&outer), &[sha(&h.tip)]).unwrap()),
+        chain,
+        "an excluded commit tip hides no tag"
+    );
+    assert_eq!(
+        git.new_tags(&sha(&blob_tag), &[]).unwrap(),
+        [sha(&blob_tag)],
+        "a tag of a blob is listed too"
+    );
+    // The inner tag lands under a ref, as an accepted earlier push would have left it.
+    let work = s.work.to_str().unwrap().to_owned();
+    s.bare_git(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        &work,
+        "+refs/tags/inner:refs/tags/inner",
+    ]);
+    assert_eq!(git.new_tags(&sha(&outer), &[]).unwrap(), [sha(&outer)]);
+}

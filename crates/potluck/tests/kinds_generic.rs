@@ -29,6 +29,7 @@ fn only_a_file_named_dot_env_hits_the_path_rule() {
         "x.env",
         "environments/dev.yml",
         "-",
+        "/",
         "",
     ] {
         assert_eq!(path_rule(p), None, "{p}");

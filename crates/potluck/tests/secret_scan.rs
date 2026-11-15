@@ -265,3 +265,49 @@ fn a_git_failure_is_an_error() {
     .unwrap_err();
     assert!(matches!(err, ScanError::Git(_)), "{err:?}");
 }
+
+#[test]
+fn a_blob_new_to_the_repository_is_checked_under_every_ref_that_brings_it() {
+    let s = Scratch::new();
+    s.write("notes/dev.yml", ENV_YML);
+    s.commit("notes");
+    s.branch("feat");
+    s.write("environments/dev.yml", ENV_YML);
+    s.commit("env");
+    let feat = s.stage("feat");
+    let main = s.stage("main");
+    let r = scan(
+        &env(Some("apinata")),
+        &[
+            update(&main, "refs/heads/main"),
+            update(&feat, "refs/heads/feat"),
+        ],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&r),
+        ["refs/heads/feat environments/dev.yml secret_value secret_value"],
+        "the earlier ref's copy of the blob must not hide the later path"
+    );
+}
+
+#[test]
+fn a_candidate_blob_with_no_size_is_an_error() {
+    let s = Scratch::new();
+    s.write("creds.txt", AWS);
+    let tip = s.stage_commit("secret");
+    // Real git answers every lookup; this one hides blobs from `--batch-check`, keeping peel's commit answer.
+    let iso = s.isolated_git();
+    let lossy = s.script(
+        "blobless-git",
+        &format!(
+            "if [ \"$1\" = cat-file ] && [ \"$2\" = --batch-check ]; then '{}' \"$@\" | sed '/ blob /d'; exit 0; fi\nexec '{}' \"$@\"\n",
+            iso.display(),
+            iso.display()
+        ),
+    );
+    let git = Git::new(lossy, Some(s.bare.clone()));
+    let err = scan(&env(None), &[update(&tip, "refs/heads/main")], &git).unwrap_err();
+    assert!(matches!(err, ScanError::Git(_)), "{err:?}");
+}

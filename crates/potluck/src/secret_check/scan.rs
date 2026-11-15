@@ -114,8 +114,10 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
         let (target, object) = git.peel(update.new())?;
         let (entries, fresh) = match object {
             ObjectType::Commit if !env.is_import() => {
+                // Commits shared with an earlier ref are listed once, under that ref; a blob
+                // counts as new under every ref, since the kind's content rule depends on path.
                 let commits = git.new_commits(&target, &seen)?;
-                let fresh = git.new_objects(&target, &seen)?;
+                let fresh = git.new_objects(&target, &[])?;
                 let entries = git.changed_entries(&commits)?;
                 seen.push(target);
                 (entries, Some(fresh))
@@ -157,14 +159,20 @@ fn content_pass(
 ) -> Result<(), ScanError> {
     let names: Vec<Sha> = candidates.keys().cloned().collect();
     let sizes = git.blob_sizes(&names)?;
-    let kept: Vec<Sha> = names
-        .into_iter()
-        .filter(|sha| {
-            sizes
-                .get(sha)
-                .is_some_and(|&n| n <= generic::MAX_CONTENT_BYTES)
-        })
-        .collect();
+    // Every candidate is a blob git has just named, so a missing size fails closed.
+    let mut kept = Vec::with_capacity(names.len());
+    for sha in names {
+        match sizes.get(&sha) {
+            Some(&n) if n <= generic::MAX_CONTENT_BYTES => kept.push(sha),
+            Some(_) => {}
+            None => {
+                return Err(ScanError::Git(GitCmdError::Output {
+                    subcommand: "cat-file",
+                    detail: "no blob size for a candidate".to_owned(),
+                }));
+            }
+        }
+    }
     git.for_each_blob(&kept, |sha, bytes| {
         let generic_hit = generic::content_rule(bytes);
         for (ri, ei, path) in candidates.get(sha).into_iter().flatten() {

@@ -4,7 +4,7 @@
 use potluck::server::{ServerError, start};
 use serde_json::Value;
 
-use crate::common::{config_for, potluck, unix_get};
+use crate::common::{config_for, config_listening_on, create_user, potluck, unix_get};
 
 #[tokio::test]
 async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
@@ -74,22 +74,38 @@ async fn the_admin_socket_serves_the_api_and_shutdown_removes_it() {
 #[tokio::test]
 async fn shutdown_closes_the_tcp_listener_and_a_restart_reuses_the_data() {
     let dir = tempfile::tempdir().unwrap();
-    let running = start(&config_for(dir.path())).await.unwrap();
-    let addr = running.http_addr();
+    // A bound, never-listening SO_REUSEADDR socket reserves the port for this test: the kernel
+    // hands it to no other bind(0) while the guard lives, yet our own listener may share it.
+    let guard = tokio::net::TcpSocket::new_v4().unwrap();
+    guard.set_reuseaddr(true).unwrap();
+    guard.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = guard.local_addr().unwrap();
+    let config = config_listening_on(dir.path(), addr);
+    let running = start(&config).await.unwrap();
+    assert_eq!(
+        running.http_addr(),
+        addr,
+        "the server took the reserved port"
+    );
+    create_user(running.db(), "alice", "correct horse battery", false).await;
     running.shutdown().await;
     assert!(
         tokio::net::TcpStream::connect(addr).await.is_err(),
         "the port is closed"
     );
-    let again = start(&config_for(dir.path())).await.unwrap();
-    let body: Value = reqwest::get(format!("http://{}/api/v1/health", again.http_addr()))
+    let again = start(&config).await.unwrap();
+    assert_eq!(again.http_addr(), addr, "the restart binds the same port");
+    let body: Value = reqwest::get(format!("http://{addr}/api/v1/health"))
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
     assert_eq!(body["status"], "ok");
+    let alice = again.db().user_by_username("alice").await.unwrap();
+    assert!(alice.is_some(), "the restart serves the first run's data");
     again.shutdown().await;
+    drop(guard);
 }
 
 #[test]

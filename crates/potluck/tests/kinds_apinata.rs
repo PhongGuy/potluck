@@ -30,6 +30,7 @@ fn only_root_environment_yml_files_are_checked() {
         "environments/dev.yml.bak",
         "/environments/dev.yml",
         "-",
+        "/",
         "",
     ] {
         assert!(!is_environment_file(p), "{p}");
@@ -104,6 +105,7 @@ fn the_rule_follows_the_path() {
     assert_eq!(Apinata.content_rule("environments/dev.yaml", bad), None);
     assert_eq!(Apinata.content_rule("notes/dev.yml", bad), None);
     assert_eq!(Apinata.content_rule("-", bad), None);
+    assert_eq!(Apinata.content_rule("/", bad), None);
     assert_eq!(Apinata.path_rule("environments/dev.yml"), None);
     assert_eq!(Apinata.path_rule(".env"), None, "the generic set owns .env");
 }
@@ -425,4 +427,22 @@ fn a_chained_merge_cannot_hide_a_valued_secret() {
             "{name}"
         );
     }
+}
+
+#[test]
+fn content_path_is_the_environment_file_glob() {
+    assert!(Apinata.content_path("environments/dev.yml"));
+    assert!(!Apinata.content_path("notes/dev.yml"));
+    assert!(!Apinata.content_path("sub/environments/dev.yml"));
+    assert!(!Apinata.content_path("/"));
+}
+
+#[test]
+fn over_cap_rule_refuses_an_environment_file_the_hook_cannot_read() {
+    assert_eq!(
+        Apinata.over_cap_rule("environments/dev.yml"),
+        Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE))
+    );
+    assert_eq!(Apinata.over_cap_rule("notes/big.bin"), None);
+    assert_eq!(Apinata.over_cap_rule("environments/nested/dev.yml"), None);
 }

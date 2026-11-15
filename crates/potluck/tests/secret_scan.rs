@@ -204,7 +204,7 @@ fn a_ref_to_a_tree_or_a_blob_is_scanned_too() {
             )
             .unwrap()
         ),
-        ["refs/tags/blob-leak - secret_pattern aws"]
+        ["refs/tags/blob-leak / secret_pattern aws"]
     );
     assert_eq!(
         rows(
@@ -310,4 +310,268 @@ fn a_candidate_blob_with_no_size_is_an_error() {
     let git = Git::new(lossy, Some(s.bare.clone()));
     let err = scan(&env(None), &[update(&tip, "refs/heads/main")], &git).unwrap_err();
     assert!(matches!(err, ScanError::Git(_)), "{err:?}");
+}
+
+/// Potluck's own token shape: `plk_` and 43 base64url characters (generic rule `potluck`).
+fn plk() -> String {
+    format!("plk_{}", "0".repeat(43))
+}
+
+#[test]
+fn a_token_in_a_commit_message_is_refused_at_slash_after_the_content_hits() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let clean = s.stage_commit("a clean message");
+    assert!(scan_main(&s, &env(Some("apinata")), &clean).is_empty());
+    s.write(".env", b"x\n");
+    let tip = s.stage_commit(&format!("token {}", plk()));
+    assert_eq!(
+        scan_main(&s, &env(None), &tip),
+        [
+            "refs/heads/main .env secret_env_file env_file",
+            "refs/heads/main / secret_pattern potluck",
+        ]
+    );
+    assert_eq!(
+        scan_main(&s, &HookEnv::new(None, true, None), &tip),
+        ["refs/heads/main .env secret_env_file env_file"],
+        "import mode scans the tip tree only, no message"
+    );
+}
+
+#[test]
+fn a_token_in_an_annotated_tag_message_is_refused_under_the_tag() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    s.commit("seed");
+    s.publish("main");
+    s.tag_message("v1", "main", &format!("release {}", plk()));
+    let tag = s.stage("refs/tags/v1");
+    let git = git_for(&s);
+    assert_eq!(
+        rows(&scan(&env(None), &[update(&tag, "refs/tags/v1")], &git).unwrap()),
+        ["refs/tags/v1 / secret_pattern potluck"],
+        "the tagged commit is old; the tag is what is new"
+    );
+    s.tag_message("v1-copy", "refs/tags/v1", "clean outer tag");
+    let outer = s.stage("refs/tags/v1-copy");
+    assert_eq!(
+        rows(
+            &scan(
+                &env(None),
+                &[
+                    update(&outer, "refs/tags/v1-copy"),
+                    update(&tag, "refs/tags/v1"),
+                ],
+                &git,
+            )
+            .unwrap()
+        ),
+        ["refs/tags/v1-copy / secret_pattern potluck"],
+        "a nested tag's inner message is scanned once, under the first ref that brings it"
+    );
+}
+
+#[test]
+fn a_tag_of_a_blob_reports_its_target_and_its_message_both_at_slash() {
+    let s = Scratch::new();
+    s.write("creds.txt", AWS);
+    s.commit("source");
+    let blob = s.blob("main", "creds.txt");
+    s.tag_message("leak", &blob, &format!("see {}", plk()));
+    let tag = s.stage("refs/tags/leak");
+    assert_eq!(
+        rows(&scan(&env(None), &[update(&tag, "refs/tags/leak")], &git_for(&s)).unwrap()),
+        [
+            "refs/tags/leak / secret_pattern aws",
+            "refs/tags/leak / secret_pattern potluck",
+        ],
+        "the content hit first, then the message"
+    );
+}
+
+#[test]
+fn a_message_over_the_cap_is_skipped_like_a_blob() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    s.commit("seed");
+    let big = s.dir.path().join("big-message");
+    let mut text = vec![b'a'; 1024 * 1024];
+    text.extend_from_slice(format!("\n{}\n", plk()).as_bytes());
+    std::fs::write(&big, &text).unwrap();
+    s.git(
+        Some(&s.work),
+        &["commit", "-q", "--allow-empty", "-F", big.to_str().unwrap()],
+    );
+    let tip = s.stage("main");
+    assert!(scan_main(&s, &env(None), &tip).is_empty());
+}
+
+/// An isolated git that appends every name fed to `cat-file --batch` to `log`, so a test can
+/// say which blobs were read.
+fn logging_git(s: &Scratch, log: &std::path::Path) -> Git {
+    let iso = s.isolated_git();
+    let script = s.script(
+        "logging-git",
+        &format!(
+            "if [ \"$1\" = cat-file ] && [ \"$2\" = --batch ]; then tee -a '{}' | '{}' \"$@\"; exit $?; fi\nexec '{}' \"$@\"\n",
+            log.display(),
+            iso.display(),
+            iso.display()
+        ),
+    );
+    Git::new(script, Some(s.bare.clone()))
+}
+
+fn logged(log: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(log)
+        .map(|t| t.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn an_old_blob_moved_under_environments_is_checked_there_and_only_there() {
+    let s = Scratch::new();
+    s.write("notes/x.txt", ENV_YML);
+    s.write("README", b"seed\n");
+    let first = s.stage_commit("notes");
+    assert!(
+        scan_main(&s, &env(Some("apinata")), &first).is_empty(),
+        "under notes/ only the generic set applies"
+    );
+    s.publish("main");
+    // A move and a copy, both of blobs the server already has.
+    s.remove("notes/x.txt");
+    s.write("environments/dev.yml", ENV_YML);
+    s.write("docs/README", b"seed\n");
+    let tip = s.stage_commit("move");
+    let log = s.dir.path().join("batch-names");
+    let git = logging_git(&s, &log);
+    let main = update(&tip, "refs/heads/main");
+    assert_eq!(
+        rows(&scan(&env(Some("apinata")), std::slice::from_ref(&main), &git).unwrap()),
+        ["refs/heads/main environments/dev.yml secret_value secret_value"]
+    );
+    // The log also carries the commit the message pass reads, so look for the blobs by name.
+    let env_blob = s.blob("main", "environments/dev.yml");
+    let readme_blob = s.blob("main", "docs/README");
+    assert!(
+        rows(&scan(&env(None), &[main], &git).unwrap()).is_empty(),
+        "without a kind an old blob is nobody's candidate"
+    );
+    let read = logged(&log);
+    assert_eq!(
+        read.iter().filter(|name| **name == env_blob).count(),
+        1,
+        "read once, under the kind, and not without it: {read:?}"
+    );
+    assert!(
+        !read.contains(&readme_blob),
+        "the README copy under docs/ is never read: {read:?}"
+    );
+}
+
+#[test]
+fn a_rename_inside_environments_rechecks_a_clean_file_and_passes() {
+    let s = Scratch::new();
+    s.write("environments/dev.yml", b"name: dev\n");
+    s.commit("env");
+    s.publish("main");
+    s.remove("environments/dev.yml");
+    s.write("environments/prod.yml", b"name: dev\n");
+    let tip = s.stage_commit("rename");
+    let log = s.dir.path().join("batch-names");
+    let git = logging_git(&s, &log);
+    assert!(
+        rows(
+            &scan(
+                &env(Some("apinata")),
+                &[update(&tip, "refs/heads/main")],
+                &git
+            )
+            .unwrap()
+        )
+        .is_empty()
+    );
+    let read = logged(&log);
+    assert!(
+        read.contains(&s.blob("main", "environments/prod.yml")),
+        "the old blob is read under its new path: {read:?}"
+    );
+}
+
+#[test]
+fn the_same_blob_and_path_pushed_under_two_refs_is_reported_once() {
+    let s = Scratch::new();
+    s.write("README", b"seed\n");
+    s.commit("seed");
+    s.publish("main");
+    s.branch("a");
+    s.write("environments/dev.yml", ENV_YML);
+    s.commit("a");
+    s.checkout("main");
+    s.branch("b");
+    s.write("environments/dev.yml", ENV_YML);
+    s.write("b.txt", b"b\n");
+    s.commit("b");
+    let a = s.stage("a");
+    let b = s.stage("b");
+    assert_eq!(
+        rows(
+            &scan(
+                &env(Some("apinata")),
+                &[update(&a, "refs/heads/a"), update(&b, "refs/heads/b")],
+                &git_for(&s),
+            )
+            .unwrap()
+        ),
+        ["refs/heads/a environments/dev.yml secret_value secret_value"],
+        "two distinct commits, one (blob, path) pair: the first ref reports it"
+    );
+}
+
+#[test]
+fn an_environment_file_over_the_cap_is_refused_as_unparsable_and_other_big_files_pass() {
+    let s = Scratch::new();
+    let big = vec![b'a'; 1024 * 1024 + 1];
+    s.write("environments/big.yml", &big);
+    s.write("notes/big.bin", &big);
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("big");
+    assert_eq!(
+        scan_main(&s, &env(Some("apinata")), &tip),
+        ["refs/heads/main environments/big.yml secret_value env_unparsable"],
+        "the same blob at notes/ is not the kind's and stays skipped"
+    );
+    assert!(
+        scan_main(&s, &env(None), &tip).is_empty(),
+        "the generic set never reads over-cap content"
+    );
+    assert!(
+        scan_main(&s, &HookEnv::new(Some("apinata"), true, None), &tip).contains(
+            &"refs/heads/main environments/big.yml secret_value env_unparsable".to_owned()
+        ),
+        "import mode scans the tip tree and finds it too"
+    );
+}
+
+#[test]
+fn an_old_blob_over_the_cap_moved_under_environments_is_refused_as_unparsable() {
+    let s = Scratch::new();
+    let big = vec![b'a'; 1024 * 1024 + 1];
+    s.write("notes/big.bin", &big);
+    let first = s.stage_commit("big note");
+    assert!(
+        scan_main(&s, &env(Some("apinata")), &first).is_empty(),
+        "under notes/ an over-cap blob is skipped"
+    );
+    s.publish("main");
+    s.remove("notes/big.bin");
+    s.write("environments/big.yml", &big);
+    let tip = s.stage_commit("move");
+    assert_eq!(
+        scan_main(&s, &env(Some("apinata")), &tip),
+        ["refs/heads/main environments/big.yml secret_value env_unparsable"],
+        "the blob the server already holds is refused at the kind's path"
+    );
 }

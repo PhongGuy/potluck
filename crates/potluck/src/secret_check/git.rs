@@ -123,7 +123,7 @@ pub enum ObjectType {
     Commit,
     /// A bare tree: scanned whole.
     Tree,
-    /// A bare blob: one entry at path `-`.
+    /// A bare blob: one entry at path `/`.
     Blob,
 }
 
@@ -222,6 +222,21 @@ impl Git {
             .rev_list(&["--objects"], tip, exclude)?
             .into_iter()
             .collect())
+    }
+
+    /// `rev-list --objects --filter=object:type=tag --filter-provided-objects <tip> --not --all
+    /// <exclude..>`: every annotated tag new to the repository from `tip` down to its target,
+    /// `tip` itself included when it is one; empty when `tip` is a commit, tree or blob.
+    pub fn new_tags(&self, tip: &Sha, exclude: &[Sha]) -> Result<Vec<Sha>, GitCmdError> {
+        self.rev_list(
+            &[
+                "--objects",
+                "--filter=object:type=tag",
+                "--filter-provided-objects",
+            ],
+            tip,
+            exclude,
+        )
     }
 
     /// `diff-tree -r -m --root -z --stdin` over `commits`: each path a commit adds or changes
@@ -331,12 +346,46 @@ impl Git {
     /// `cat-file --batch` over `shas`, calling `f(sha, bytes)` once per blob in the order
     /// given as the stream arrives; non-blobs and missing names are skipped. One blob is in
     /// memory at a time, and callers pass only names at or under
-    /// [`MAX_CONTENT_BYTES`](crate::kinds::generic::MAX_CONTENT_BYTES). A reply for another
-    /// name, a larger blob or an unreadable reply is `GitCmdError::Output`, with none of git's
-    /// output in it.
+    /// [`MAX_CONTENT_BYTES`](crate::kinds::generic::MAX_CONTENT_BYTES): content scanning is
+    /// capped there to bound the hook's cost per push, so a larger blob gets path rules only and
+    /// is never read. A reply for another name, a larger blob or an unreadable reply is
+    /// `GitCmdError::Output`, with none of git's output in it.
     pub fn for_each_blob(
         &self,
         shas: &[Sha],
+        f: impl FnMut(&Sha, &[u8]),
+    ) -> Result<(), GitCmdError> {
+        self.for_each_object(shas, Keep::Blobs, f)
+    }
+
+    /// `cat-file --batch` over `shas`, calling `f(sha, message)` once per commit or tag object
+    /// in the order given: `message` is everything after the object's header block (the first
+    /// blank line), empty when the object has none. Blobs, trees, missing names and objects
+    /// whose size as `cat-file` reports it exceeds
+    /// [`MAX_CONTENT_BYTES`](crate::kinds::generic::MAX_CONTENT_BYTES) are read past and
+    /// skipped: content scanning is capped there to bound the hook's cost per push, so an
+    /// over-cap message is deliberately left unscanned. A reply for another name or an
+    /// unreadable reply is `GitCmdError::Output`, with none of git's output in it. Empty input
+    /// yields no call and runs no git.
+    pub fn for_each_message(
+        &self,
+        shas: &[Sha],
+        mut f: impl FnMut(&Sha, &[u8]),
+    ) -> Result<(), GitCmdError> {
+        self.for_each_object(shas, Keep::Messages, |sha, body| {
+            let message = body
+                .windows(2)
+                .position(|w| w == b"\n\n")
+                .map_or(&[][..], |at| &body[at + 2..]);
+            f(sha, message);
+        })
+    }
+
+    /// The shared `cat-file --batch` stream: `f` sees each object `keep` admits, in order.
+    fn for_each_object(
+        &self,
+        shas: &[Sha],
+        keep: Keep,
         mut f: impl FnMut(&Sha, &[u8]),
     ) -> Result<(), GitCmdError> {
         const SUB: &str = "cat-file";
@@ -355,11 +404,11 @@ impl Git {
         let mut header = Vec::new();
         let mut body = Vec::new();
         // One reply per name, in order: a header, then for a found object exactly `size`
-        // bytes and a newline. A non-blob's body is read into the sink, never kept.
+        // bytes and a newline. A body `keep` does not admit is read into the sink, never kept.
         for sha in shas {
             header.clear();
-            match read_reply(&mut reader, sha, &mut header, &mut body) {
-                Ok(Reply::Blob) => f(sha, &body),
+            match read_reply(&mut reader, sha, keep, &mut header, &mut body) {
+                Ok(Reply::Kept) => f(sha, &body),
                 Ok(Reply::Skipped) => {}
                 Ok(Reply::Eof) => {
                     drop(reader);
@@ -521,11 +570,20 @@ fn parse_header(line: &[u8]) -> Option<Header<'_>> {
     }
 }
 
+/// Which `cat-file --batch` bodies a stream keeps.
+#[derive(Clone, Copy)]
+enum Keep {
+    /// Blobs; one over the content cap is an error, since callers pre-filter by size.
+    Blobs,
+    /// Commits and tags at or under the content cap; larger ones are skipped unscanned.
+    Messages,
+}
+
 /// What one `cat-file --batch` reply was.
 enum Reply {
-    /// A blob, now in the body buffer.
-    Blob,
-    /// A missing name or a non-blob, whose body was discarded.
+    /// An object `Keep` admits, now in the body buffer.
+    Kept,
+    /// A missing name or an object `Keep` does not admit, whose body was discarded.
     Skipped,
     /// stdout closed before the reply's header.
     Eof,
@@ -534,12 +592,13 @@ enum Reply {
 /// Longest `cat-file --batch` header read: a 64-hex name, a type and a size fit well inside.
 const HEADER_MAX: u64 = 256;
 
-/// Reads the `cat-file --batch` reply for `wanted`: the header into `header`, a blob's body
-/// into `body`. Once framing is in doubt the bytes may be blob content, so errors carry a
-/// fixed detail and never git's output.
+/// Reads the `cat-file --batch` reply for `wanted`: the header into `header`, an admitted
+/// object's body into `body`. Once framing is in doubt the bytes may be blob content, so errors
+/// carry a fixed detail and never git's output.
 fn read_reply(
     reader: &mut impl BufRead,
     wanted: &Sha,
+    keep: Keep,
     header: &mut Vec<u8>,
     body: &mut Vec<u8>,
 ) -> Result<Reply, GitCmdError> {
@@ -563,19 +622,24 @@ fn read_reply(
     let Some(line) = header.strip_suffix(b"\n") else {
         return Err(unexpected("unreadable batch header"));
     };
-    let (is_blob, size) = match parse_header(line) {
+    let (kind, size) = match parse_header(line) {
         Some(Header::Missing { name }) if name == wanted.as_str().as_bytes() => {
             return Ok(Reply::Skipped);
         }
-        Some(Header::Found { sha, kind, size }) if sha == *wanted => (kind == b"blob", size),
+        Some(Header::Found { sha, kind, size }) if sha == *wanted => (kind, size),
         Some(_) => return Err(unexpected("batch reply for another object")),
         None => return Err(unexpected("unreadable batch header")),
     };
-    if is_blob && size > crate::kinds::generic::MAX_CONTENT_BYTES {
-        return Err(unexpected("blob over the content cap"));
-    }
+    let under_cap = size <= crate::kinds::generic::MAX_CONTENT_BYTES;
+    let kept = match keep {
+        Keep::Blobs if kind == b"blob" && !under_cap => {
+            return Err(unexpected("blob over the content cap"));
+        }
+        Keep::Blobs => kind == b"blob",
+        Keep::Messages => under_cap && (kind == b"commit" || kind == b"tag"),
+    };
     let mut limited = reader.take(size);
-    let read = if is_blob {
+    let read = if kept {
         body.clear();
         limited.read_to_end(body).map_err(io)? as u64
     } else {
@@ -585,7 +649,7 @@ fn read_reply(
     if read != size || reader.read_exact(&mut newline).is_err() || newline != *b"\n" {
         return Err(unexpected("truncated object body"));
     }
-    Ok(if is_blob { Reply::Blob } else { Reply::Skipped })
+    Ok(if kept { Reply::Kept } else { Reply::Skipped })
 }
 
 /// A git child with its two helper threads; `finish` joins them and checks the exit status.

@@ -252,3 +252,80 @@ async fn a_missing_hook_file_fails_the_push_with_500() {
         &["push", "-q", &url, "main"],
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blob_moved_into_environments_is_refused_under_its_new_path() {
+    let (server, home, url) = apinata_server(&[]).await;
+    let work = work_tree(&home, "work");
+    std::fs::create_dir_all(work.join("notes")).unwrap();
+    std::fs::write(work.join("notes").join("x.txt"), ENV_YML).unwrap();
+    commit_all(&home, &work, "notes");
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main"],
+    ));
+    let landed = work_head(&home, &work);
+    assert_eq!(server_main(&server, &home), Some(landed.clone()));
+    std::fs::remove_file(work.join("notes").join("x.txt")).unwrap();
+    std::fs::create_dir_all(work.join("environments")).unwrap();
+    std::fs::write(work.join("environments").join("dev.yml"), ENV_YML).unwrap();
+    commit_all(&home, &work, "move");
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", &url, "main"],
+    ));
+    assert!(
+        output.contains(
+            "remote: potluck-reject secret_value refs/heads/main environments/dev.yml secret_value"
+        ),
+        "{output}"
+    );
+    assert_eq!(
+        server_main(&server, &home),
+        Some(landed),
+        "the ref did not move"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_environment_file_over_the_cap_is_refused_but_a_big_note_lands() {
+    let (server, home, url) = apinata_server(&[]).await;
+    let work = work_tree(&home, "work");
+    let big = vec![b'a'; 1024 * 1024 + 1];
+    std::fs::create_dir_all(work.join("environments")).unwrap();
+    std::fs::write(work.join("environments").join("big.yml"), &big).unwrap();
+    commit_all(&home, &work, "big env");
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", &url, "main"],
+    ));
+    assert!(
+        output.contains(
+            "remote: potluck-reject secret_value refs/heads/main environments/big.yml env_unparsable"
+        ),
+        "{output}"
+    );
+    assert_eq!(server_main(&server, &home), None, "nothing landed");
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["reset", "-q", "--hard", "HEAD~1"],
+    ));
+    std::fs::create_dir_all(work.join("notes")).unwrap();
+    std::fs::write(work.join("notes").join("big.bin"), &big).unwrap();
+    commit_all(&home, &work, "big note");
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main"],
+    ));
+    assert_eq!(server_main(&server, &home), Some(work_head(&home, &work)));
+}

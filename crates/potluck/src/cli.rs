@@ -31,7 +31,7 @@ pub enum Command {
     // Boxed: the serve flags would otherwise size every variant.
     /// Run the server.
     Serve(Box<ServeArgs>),
-    /// Exit 0 if the server on this data directory answers its health check.
+    /// Exit 0 if the server on this data directory answers its health check within 3 s.
     HealthCheck(HealthArgs),
     /// Run by git from `<data>/hooks/pre-receive`; not for people.
     #[command(hide = true)]

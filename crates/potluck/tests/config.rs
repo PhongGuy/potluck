@@ -8,7 +8,7 @@ use std::path::Path;
 use clap::Parser;
 use potluck::config::ConfigError;
 
-use crate::common::parse_config;
+use crate::common::{config_for, config_listening_on, parse_config};
 
 #[test]
 fn defaults_match_the_spec() {
@@ -323,4 +323,14 @@ fn oidc_flags_parse_but_are_refused_while_unimplemented() {
         );
         assert!(err.to_string().contains("--oidc-issuer"), "{err}");
     }
+}
+
+#[test]
+fn config_listening_on_takes_the_address_and_config_for_asks_for_port_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let addr: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+    let config = config_listening_on(dir.path(), addr);
+    assert_eq!(config.listen(), addr);
+    assert_eq!(config.db_path(), dir.path().join("server.db"));
+    assert_eq!(config_for(dir.path()).listen().port(), 0);
 }

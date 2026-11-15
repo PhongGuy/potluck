@@ -164,3 +164,25 @@ fn the_seed_collection_passes_the_kind_rule() {
         None
     );
 }
+
+#[test]
+fn a_tagged_mapping_cannot_hide_a_valued_secret() {
+    let bytes = b"name: dev\nv: !custom {secret: true, value: fixture-tagged}\n";
+    assert_eq!(
+        Apinata.content_rule("environments/x.yml", bytes),
+        hit(),
+        "the walk descends through a custom tag"
+    );
+}
+
+#[test]
+fn every_seed_file_passes_the_yaml_walk() {
+    for file in Apinata.seed() {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", file.bytes()),
+            None,
+            "{} under an environment path",
+            file.path()
+        );
+    }
+}

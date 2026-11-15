@@ -36,7 +36,7 @@ pub(super) struct CreatedToken {
     token_meta: TokenJson,
 }
 
-/// `GET /me` (self): `{user, identity, workspaces: []}`; sub-plan 5 fills the list.
+/// `GET /me` (self): `{user, identity, workspaces: []}`; the workspace list stays empty until workspaces exist.
 pub(super) async fn me(
     State(state): State<AppState>,
     auth: Authenticated,

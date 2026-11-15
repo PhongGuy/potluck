@@ -110,6 +110,7 @@ async fn rpc(
             encoding,
             access.hook_env(),
             body,
+            None,
         )
         .await?;
     Ok(git_response(service.result_type(), out))

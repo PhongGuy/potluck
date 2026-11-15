@@ -11,6 +11,7 @@ use tokio::process::{ChildStderr, Command};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::api::error::ApiError;
+use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
 use crate::git::{Repos, Service, spool};
 
 /// How many git slots exist, how long a request waits for one, and how long an upload may
@@ -45,6 +46,11 @@ impl Default for GitLimits {
         )
     }
 }
+
+/// Told the moves of one receive-pack, once, after git exits with any status: the command list
+/// against the refs before git started and as they stand after it exited (`moved`), an empty
+/// list when nothing moved. Not called only when the refs cannot be read (logged at error).
+pub(crate) type PushObserver = Box<dyn FnOnce(Vec<RefMove>) + Send + 'static>;
 
 /// Spawns git for the smart HTTP routes within the configured limits.
 #[derive(Debug)]
@@ -132,7 +138,11 @@ impl GitEngine {
     /// Serves one `POST git-upload-pack` or `git-receive-pack`: takes a slot, spools the body
     /// within `upload_timeout`, spawns git with the spool as stdin and `extra_env` in its
     /// environment, and returns its stdout as the response body. The slot is released when git
-    /// exits.
+    /// exits. A receive-pack over `MAX_COMMANDS` commands is `TooManyCommands` before git starts;
+    /// `on_push`, when given, hears the moves the push achieved once git has exited.
+    // Each argument is one facet of the request the route already holds; bundling them would
+    // only rename the list.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn rpc(
         &self,
         service: Service,
@@ -141,6 +151,7 @@ impl GitEngine {
         encoding: Option<&str>,
         extra_env: &[(String, String)],
         body: Body,
+        on_push: Option<PushObserver>,
     ) -> Result<Body, GitError> {
         if service == Service::ReceivePack {
             self.require_hook()?;
@@ -156,6 +167,19 @@ impl GitEngine {
         )
         .await
         .map_err(|_| GitError::SlowBody(self.upload_timeout))??;
+        let (stdin, commands) = if service == Service::ReceivePack {
+            read_commands(stdin).await?
+        } else {
+            (stdin, Vec::new())
+        };
+        // The refs before git starts are the baseline the reaper diffs against; nobody listening
+        // means no extra git process.
+        let watch = match on_push {
+            Some(on_push) => Some((on_push, list_refs(self.repos.git(), repo).await?)),
+            None => None,
+        };
+        let git = self.repos.git().to_path_buf();
+        let repo_path = repo.to_path_buf();
         let mut child = self
             .command(service, v2, extra_env)
             .arg(repo)
@@ -184,6 +208,14 @@ impl GitEngine {
                 ),
                 Err(err) => {
                     tracing::warn!(service = service.name(), error = %err, "waiting for git failed");
+                }
+            }
+            // Whatever the exit status, the refs are the ground truth: a client that hangs up
+            // mid-report kills git with SIGPIPE after the refs already moved.
+            if let Some((on_push, before)) = watch {
+                match list_refs(&git, &repo_path).await {
+                    Ok(after) => on_push(moved(&commands, &before, &after)),
+                    Err(err) => tracing::error!(error = %err, "cannot list refs after a push"),
                 }
             }
         });
@@ -234,6 +266,29 @@ impl GitEngine {
         cmd.envs(extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         cmd.kill_on_drop(true);
         cmd
+    }
+}
+
+/// Parses the receive-pack command list off the spool and hands the file back rewound. Over the
+/// cap is `TooManyCommands`; any other parse failure is logged and counts as no commands.
+async fn read_commands(
+    mut file: std::fs::File,
+) -> Result<(std::fs::File, Vec<RefCommand>), GitError> {
+    use std::io::Seek;
+    let (file, parsed) = tokio::task::spawn_blocking(move || {
+        let parsed = parse_commands(&mut file);
+        file.rewind().map(|()| (file, parsed))
+    })
+    .await
+    .map_err(|err| GitError::Spawn(std::io::Error::other(err)))?
+    .map_err(GitError::Spawn)?;
+    match parsed {
+        Ok(commands) => Ok((file, commands)),
+        Err(CommandError::TooMany { limit }) => Err(GitError::TooManyCommands { limit }),
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot parse the receive-pack command list");
+            Ok((file, Vec::new()))
+        }
     }
 }
 
@@ -290,6 +345,12 @@ pub enum GitError {
         /// git's stderr, trimmed.
         stderr: String,
     },
+    /// More than `limit` commands in one receive-pack request: 400 `invalid_request`.
+    #[error("receive-pack request carries more than {limit} commands")]
+    TooManyCommands {
+        /// The cap, `MAX_COMMANDS`.
+        limit: usize,
+    },
     /// `<hooks>/pre-receive` is not a regular executable file, so git would accept every push
     /// unchecked: 500 `internal`, logged.
     #[error("pre-receive hook missing or not executable at {}", path.display())]
@@ -306,9 +367,10 @@ impl From<GitError> for ApiError {
         match err {
             GitError::Busy => ApiError::unavailable("git is busy; retry shortly"),
             GitError::TooLarge { .. } => ApiError::payload_too_large(err.to_string()),
-            GitError::BadEncoding(_) | GitError::SlowBody(_) | GitError::Body(_) => {
-                ApiError::invalid_request(err.to_string())
-            }
+            GitError::BadEncoding(_)
+            | GitError::SlowBody(_)
+            | GitError::Body(_)
+            | GitError::TooManyCommands { .. } => ApiError::invalid_request(err.to_string()),
             GitError::Spawn(_) | GitError::Failed { .. } | GitError::HookMissing { .. } => {
                 tracing::error!(error = %err, "git error");
                 ApiError::internal("git failed")
@@ -445,6 +507,7 @@ mod tests {
                 None,
                 &[],
                 Body::from("0000"),
+                None,
             )
             .await
             .unwrap_err();
@@ -587,7 +650,7 @@ mod tests {
         let body = Body::from("0014command=ls-refs\n0000");
         let out = collect(
             engine
-                .rpc(Service::UploadPack, &repo, true, None, &[], body)
+                .rpc(Service::UploadPack, &repo, true, None, &[], body, None)
                 .await
                 .unwrap(),
         )
@@ -607,7 +670,7 @@ mod tests {
             Result<axum::body::Bytes, std::io::Error>,
         >());
         let err = engine
-            .rpc(Service::ReceivePack, &repo, false, None, &[], stalled)
+            .rpc(Service::ReceivePack, &repo, false, None, &[], stalled, None)
             .await
             .unwrap_err();
         assert!(
@@ -629,7 +692,15 @@ mod tests {
         let body = Body::from(enc.into_inner());
         let out = collect(
             engine
-                .rpc(Service::UploadPack, &repo, true, Some("gzip"), &[], body)
+                .rpc(
+                    Service::UploadPack,
+                    &repo,
+                    true,
+                    Some("gzip"),
+                    &[],
+                    body,
+                    None,
+                )
                 .await
                 .unwrap(),
         )
@@ -666,6 +737,7 @@ mod tests {
                 None,
                 &[],
                 Body::from(vec![0u8; 17]),
+                None,
             )
             .await
             .unwrap_err();
@@ -682,5 +754,194 @@ mod tests {
             .advertise(Service::UploadPack, &repo, false)
             .await
             .unwrap();
+    }
+
+    /// `text` at `path`, mode 0755: a hook other than the `pre-receive` `write_stub_hook` writes.
+    fn write_hook_file(path: &Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A receive-pack body creating `refs/heads/main` at the tip of a fresh work tree under
+    /// `scratch`: the command pkt-line with `report-status`, a flush, then the pack holding every
+    /// object the tip reaches. Returns the body and the tip.
+    fn push_body(scratch: &Path) -> (Vec<u8>, String) {
+        let run = |args: &[&str], cwd: &Path, stdin: &[u8]| -> Vec<u8> {
+            use std::io::Write;
+            let mut child = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("HOME", scratch)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(stdin).unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            out.stdout
+        };
+        let work = scratch.join("pushwork");
+        std::fs::create_dir_all(&work).unwrap();
+        run(&["init", "-q", "-b", "main"], &work, b"");
+        std::fs::write(work.join("README"), "push\n").unwrap();
+        run(&["add", "README"], &work, b"");
+        run(&["commit", "-q", "-m", "push"], &work, b"");
+        let tip = String::from_utf8(run(&["rev-parse", "HEAD"], &work, b""))
+            .unwrap()
+            .trim()
+            .to_owned();
+        let pack = run(
+            &["pack-objects", "--stdout", "--revs", "-q"],
+            &work,
+            format!("{tip}\n").as_bytes(),
+        );
+        let line = format!(
+            "{} {tip} refs/heads/main\0report-status\n",
+            crate::git::push::ZERO_SHA
+        );
+        let mut body = format!("{:04x}", line.len() + 4).into_bytes();
+        body.extend_from_slice(line.as_bytes());
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&pack);
+        (body, tip)
+    }
+
+    /// An observer and the receiver its moves arrive on.
+    fn observer() -> (
+        PushObserver,
+        tokio::sync::oneshot::Receiver<Vec<crate::git::push::RefMove>>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            Box::new(move |moves| {
+                let _ = tx.send(moves);
+            }),
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_observer_hears_the_moves_even_when_git_dies_after_moving_them() {
+        use crate::git::push::{RefMove, ZERO_SHA, list_refs};
+        for kill in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+            if kill {
+                // post-receive runs after the refs are updated; git runs builtins in-process and
+                // executes the hook file directly, so `$PPID` is receive-pack. Killing it is the
+                // non-zero exit with the refs already moved that a client hanging up mid-report
+                // causes through SIGPIPE.
+                write_hook_file(
+                    &dir.path().join("hooks").join("post-receive"),
+                    "#!/bin/sh\nkill -9 $PPID\n",
+                );
+            }
+            let (body, tip) = push_body(dir.path());
+            let (on_push, moved) = observer();
+            let out = engine
+                .rpc(
+                    Service::ReceivePack,
+                    &repo,
+                    false,
+                    None,
+                    &[],
+                    Body::from(body),
+                    Some(on_push),
+                )
+                .await
+                .unwrap();
+            let _ = collect(out).await;
+            let moves = tokio::time::timeout(Duration::from_secs(10), moved)
+                .await
+                .expect("the observer is called")
+                .expect("not dropped");
+            assert_eq!(
+                moves,
+                vec![RefMove::new("refs/heads/main", ZERO_SHA, &tip)],
+                "kill={kill}"
+            );
+            let refs = list_refs(engine.repos.git(), &repo).await.unwrap();
+            assert_eq!(
+                refs.get("refs/heads/main"),
+                Some(&tip),
+                "kill={kill}: the repository holds the tip"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_list_reports_no_moves_and_a_list_over_the_cap_is_refused() {
+        use crate::git::push::{MAX_COMMANDS, ZERO_SHA};
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        let (on_push, moved) = observer();
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from("0000"),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        let moves = tokio::time::timeout(Duration::from_secs(10), moved)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(moves.is_empty(), "told, with nothing: {moves:?}");
+        let mut body = Vec::new();
+        for i in 0..=MAX_COMMANDS {
+            let line = format!("{ZERO_SHA} {} refs/heads/b{i}\n", "a".repeat(40));
+            body.extend_from_slice(format!("{:04x}", line.len() + 4).as_bytes());
+            body.extend_from_slice(line.as_bytes());
+        }
+        body.extend_from_slice(b"0000");
+        let (on_push, moved) = observer();
+        let err = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitError::TooManyCommands { limit } if limit == MAX_COMMANDS),
+            "got {err:?}"
+        );
+        assert!(moved.await.is_err(), "the observer was dropped uncalled");
+        let api = ApiError::from(GitError::TooManyCommands { limit: 1 });
+        assert_eq!(
+            (api.status(), api.code().as_str()),
+            (400, "invalid_request")
+        );
+        assert_eq!(
+            engine.permits.available_permits(),
+            GitLimits::default().processes,
+            "the slot came back"
+        );
     }
 }

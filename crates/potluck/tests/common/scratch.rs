@@ -204,3 +204,19 @@ pub fn staged_history(s: &Scratch) -> History {
         root,
     }
 }
+
+impl Scratch {
+    /// Merges `name` but leaves the result staged, so the caller can add to the merge commit.
+    pub fn merge_no_commit(&self, name: &str) {
+        self.git(
+            Some(&self.work),
+            &["merge", "-q", "--no-ff", "--no-commit", name],
+        );
+    }
+
+    /// `commit` then `stage("main")`: the new main tip, on the server under no ref.
+    pub fn stage_commit(&self, message: &str) -> String {
+        self.commit(message);
+        self.stage("main")
+    }
+}

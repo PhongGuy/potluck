@@ -1,8 +1,10 @@
 //! The check over one push, and the lines the client sees.
 
+use std::collections::HashMap;
 use std::io::Write;
 
-use crate::kinds::Finding;
+use crate::kinds::{self, Finding, Kind, generic};
+use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
 
 /// What the server told the hook through its environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +86,110 @@ impl Rejection {
     pub fn finding(&self) -> &Finding {
         &self.finding
     }
+}
+
+/// The check for one push. `Ok(vec![])` accepts. An override accepts without touching git.
+/// Deletions are skipped. Per ref, in stdin order, the target is peeled: a commit yields its
+/// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
+/// kind) over every changed entry, and content rules over the entries whose blob is new to
+/// the repository; in import mode the tip tree replaces both lists. A tree target is scanned
+/// whole (every entry a candidate); a blob target is one entry at path `-`. Blobs over
+/// `MAX_CONTENT_BYTES` skip content rules. Per ref the path-rule rejections come first, then
+/// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
+/// An unknown or unset kind means generic rules only.
+pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejection>, ScanError> {
+    if env.override_id().is_some() {
+        return Ok(Vec::new());
+    }
+    let kind = env.kind().and_then(kinds::by_name);
+    // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
+    // path-rule hits first, then its content hits, each in entry order.
+    let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
+    let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
+    let mut seen: Vec<Sha> = Vec::new();
+    for (ri, update) in updates.iter().enumerate() {
+        if update.is_delete() {
+            continue;
+        }
+        let (target, object) = git.peel(update.new())?;
+        let (entries, fresh) = match object {
+            ObjectType::Commit if !env.is_import() => {
+                let commits = git.new_commits(&target, &seen)?;
+                let fresh = git.new_objects(&target, &seen)?;
+                let entries = git.changed_entries(&commits)?;
+                seen.push(target);
+                (entries, Some(fresh))
+            }
+            ObjectType::Commit | ObjectType::Tree => (git.tree_entries(&target)?, None),
+            ObjectType::Blob => (vec![Entry::new(b"-".to_vec(), target)], None),
+        };
+        for (ei, entry) in entries.into_iter().enumerate() {
+            let path = entry.path_lossy();
+            let refused =
+                generic::path_rule(&path).or_else(|| kind.and_then(|k| k.path_rule(&path)));
+            if let Some(finding) = refused {
+                hits.push((
+                    (ri, 0, ei),
+                    Rejection::new(update.name(), entry.path(), finding),
+                ));
+            } else if fresh.as_ref().is_none_or(|f| f.contains(entry.sha())) {
+                candidates.entry(entry.sha().clone()).or_default().push((
+                    ri,
+                    ei,
+                    entry.path().to_vec(),
+                ));
+            }
+        }
+    }
+    content_pass(git, kind, updates, candidates, &mut hits)?;
+    hits.sort_by_key(|(key, _)| *key);
+    Ok(hits.into_iter().map(|(_, r)| r).collect())
+}
+
+/// Streams every candidate blob at or under the cap once and runs the content rules for each
+/// path it sits at: the generic set on the bytes, then the kind's rule with the path.
+fn content_pass(
+    git: &Git,
+    kind: Option<&'static dyn Kind>,
+    updates: &[RefUpdate],
+    candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
+    hits: &mut Vec<((usize, u8, usize), Rejection)>,
+) -> Result<(), ScanError> {
+    let names: Vec<Sha> = candidates.keys().cloned().collect();
+    let sizes = git.blob_sizes(&names)?;
+    let kept: Vec<Sha> = names
+        .into_iter()
+        .filter(|sha| {
+            sizes
+                .get(sha)
+                .is_some_and(|&n| n <= generic::MAX_CONTENT_BYTES)
+        })
+        .collect();
+    git.for_each_blob(&kept, |sha, bytes| {
+        let generic_hit = generic::content_rule(bytes);
+        for (ri, ei, path) in candidates.get(sha).into_iter().flatten() {
+            let lossy = String::from_utf8_lossy(path);
+            let finding = generic_hit
+                .clone()
+                .or_else(|| kind.and_then(|k| k.content_rule(&lossy, bytes)));
+            if let Some(finding) = finding {
+                hits.push((
+                    (*ri, 1, *ei),
+                    Rejection::new(updates[*ri].name(), path, finding),
+                ));
+            }
+        }
+    })?;
+    Ok(())
+}
+
+/// Why the check could not run.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ScanError {
+    /// A plumbing call failed.
+    #[error(transparent)]
+    Git(#[from] GitCmdError),
 }
 
 /// How many `potluck-reject` lines are printed at most.

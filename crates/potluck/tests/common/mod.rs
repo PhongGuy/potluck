@@ -1,12 +1,18 @@
 //! Shared helpers. Every test reaches only 127.0.0.1 or a Unix socket under a temp dir.
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::Command;
 
 use clap::Parser;
+use potluck::api::credential::Credential;
+use potluck::api::error::ApiError;
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
+use potluck::git::access::{Access, BoxFuture, GitAccess};
+use potluck::role::Role;
+use potluck::slug::Slug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The built `potluck` binary with an empty environment, so no `POTLUCK_*` variable or
@@ -87,4 +93,68 @@ pub async fn unix_get(socket: &Path, target: &str) -> (u16, String) {
         .and_then(|s| s.parse().ok())
         .expect("status code");
     (status, body.to_string())
+}
+
+/// An in-memory resolver: known tokens, existing workspaces, grants per token and workspace,
+/// and the hook variables every grant carries.
+#[derive(Debug, Default, Clone)]
+pub struct TestAccess {
+    workspaces: HashSet<(String, String)>,
+    grants: HashMap<(String, String, String), Role>,
+    hook_env: Vec<(String, String)>,
+}
+
+impl TestAccess {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn workspace(mut self, team: &str, ws: &str) -> Self {
+        self.workspaces.insert((team.into(), ws.into()));
+        self
+    }
+    /// `token` becomes a known token with `role` on `{team}/{ws}`.
+    pub fn grant(mut self, token: &str, team: &str, ws: &str, role: Role) -> Self {
+        self.grants
+            .insert((token.into(), team.into(), ws.into()), role);
+        self
+    }
+    /// Every granted `Access` carries `key=value` for the hook.
+    pub fn hook_env(mut self, key: &str, value: &str) -> Self {
+        self.hook_env.push((key.into(), value.into()));
+        self
+    }
+}
+
+impl GitAccess for TestAccess {
+    fn resolve<'a>(
+        &'a self,
+        credential: &'a Credential,
+        team: &'a Slug,
+        ws: &'a Slug,
+    ) -> BoxFuture<'a, Result<Access, ApiError>> {
+        Box::pin(async move {
+            let known = self.grants.keys().any(|(t, _, _)| t == credential.secret());
+            if !known {
+                return Err(ApiError::unauthenticated("unknown token"));
+            }
+            if !self
+                .workspaces
+                .contains(&(team.to_string(), ws.to_string()))
+            {
+                return Err(ApiError::not_found("no such workspace"));
+            }
+            let role = self
+                .grants
+                .get(&(
+                    credential.secret().to_owned(),
+                    team.to_string(),
+                    ws.to_string(),
+                ))
+                .ok_or_else(|| ApiError::not_found("no such workspace"))?;
+            Ok(self
+                .hook_env
+                .iter()
+                .fold(Access::new(*role), |a, (k, v)| a.with_hook_env(k, v)))
+        })
+    }
 }

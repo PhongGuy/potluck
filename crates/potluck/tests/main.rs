@@ -11,6 +11,7 @@
 
 mod common;
 
+mod access;
 mod api_error;
 mod api_system;
 mod cli_version;

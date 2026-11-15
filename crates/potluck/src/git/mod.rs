@@ -1,5 +1,6 @@
 //! Git smart HTTP: the bare repositories and the git processes that serve them.
 
+pub mod access;
 pub mod engine;
 pub mod repos;
 mod spool;

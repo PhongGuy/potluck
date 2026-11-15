@@ -1,0 +1,1 @@
+Potluck tokens are plk_ followed by 43 base64url characters; plk_short is not one.

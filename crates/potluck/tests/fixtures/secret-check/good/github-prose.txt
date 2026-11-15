@@ -1,0 +1,2 @@
+Classic tokens look like ghp_ followed by 36 characters; ghp_tooshort is not one.
+Fine-grained tokens start with github_pat_ and are much longer.

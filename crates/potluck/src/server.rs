@@ -3,7 +3,8 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::future::IntoFuture;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Shutdown, SocketAddr};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use axum::{Extension, Router};
@@ -90,12 +91,13 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     let db = Db::open(&config.db_path())?;
     db.migrate().await?;
     let addr = config.listen();
-    let tcp = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|source| ServerError::Listen { addr, source })?;
-    let http_addr = tcp
-        .local_addr()
-        .map_err(|source| ServerError::Listen { addr, source })?;
+    // Keep a duplicate of the listening socket so shutdown can take it out of LISTEN itself.
+    let listen = |source| ServerError::Listen { addr, source };
+    let std_tcp = std::net::TcpListener::bind(addr).map_err(listen)?;
+    std_tcp.set_nonblocking(true).map_err(listen)?;
+    let kept_tcp = std_tcp.try_clone().map_err(listen)?;
+    let tcp = tokio::net::TcpListener::from_std(std_tcp).map_err(listen)?;
+    let http_addr = tcp.local_addr().map_err(listen)?;
     let admin_socket = config.admin_socket();
     let unix = bind_admin_socket(&admin_socket).map_err(|source| ServerError::AdminSocket {
         path: admin_socket.clone(),
@@ -129,6 +131,7 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         tasks: [http, admin],
         db,
         notices,
+        tcp: kept_tcp,
         _lock,
     })
 }
@@ -171,6 +174,7 @@ pub struct Running {
     tasks: [JoinHandle<io::Result<()>>; 2],
     db: Db,
     notices: Notices,
+    tcp: std::net::TcpListener,
     _lock: File,
 }
 
@@ -200,7 +204,8 @@ impl Running {
     }
 
     /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file,
-    /// and leaves `server.lock` in place.
+    /// and releases the lock while leaving `server.lock` in place. The port and the lock are free
+    /// when it returns, even if a child forked meanwhile still holds duplicates of their fds.
     pub async fn shutdown(self) {
         // Open streams would hold the graceful drain forever; end them before stopping.
         self.notices.close_all();
@@ -215,6 +220,15 @@ impl Running {
         self.db.close();
         // The socket may already be gone; only its absence matters.
         let _ = std::fs::remove_file(&self.admin_socket);
+        // Closing our fds is not enough: shutdown(2) and LOCK_UN act on the shared socket and
+        // open file description, so a forked child's duplicate cannot keep either alive.
+        let tcp = std::net::TcpStream::from(OwnedFd::from(self.tcp));
+        if let Err(err) = tcp.shutdown(Shutdown::Both) {
+            tracing::error!("cannot shut down the TCP listener: {err}");
+        }
+        if let Err(err) = self._lock.unlock() {
+            tracing::error!("cannot release the data directory lock: {err}");
+        }
     }
 }
 
@@ -326,6 +340,56 @@ mod tests {
             err.to_string().contains("another potluck"),
             "the message says what is wrong: {err}"
         );
+    }
+
+    /// A config serving `dir` on an ephemeral loopback port, built the way `serve` builds one.
+    fn config_for(dir: &Path) -> Config {
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            serve: crate::config::ServeArgs,
+        }
+        let data = dir.to_str().expect("utf-8 temp path");
+        let url = "http://127.0.0.1:8080";
+        let argv = [
+            "potluck",
+            "--listen",
+            "127.0.0.1:0",
+            "--data",
+            data,
+            "--public-url",
+            url,
+        ];
+        let wrap = <Wrap as clap::Parser>::try_parse_from(argv).expect("flags parse");
+        Config::try_from(wrap.serve).expect("test config")
+    }
+
+    // A second fd on the lock's open file description stands in for a child forked by another
+    // thread and caught before exec: shutdown must release the lock regardless.
+    #[tokio::test]
+    async fn shutdown_releases_the_lock_while_a_duplicate_fd_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_for(dir.path());
+        let running = start(&config).await.unwrap();
+        let duplicate = running._lock.try_clone().unwrap();
+        running.shutdown().await;
+        let again = start(&config).await;
+        drop(duplicate);
+        let again = again.expect("the restart takes the lock");
+        again.shutdown().await;
+    }
+
+    // The same stand-in for the listening socket: after shutdown nothing may accept on the port.
+    #[tokio::test]
+    async fn shutdown_closes_the_port_while_a_duplicate_fd_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = start(&config_for(dir.path())).await.unwrap();
+        let addr = running.http_addr();
+        let duplicate = running.tcp.try_clone().unwrap();
+        running.shutdown().await;
+        let connected = std::net::TcpStream::connect(addr);
+        drop(duplicate);
+        assert!(connected.is_err(), "the port still accepts after shutdown");
     }
 
     #[tokio::test]

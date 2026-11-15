@@ -619,3 +619,69 @@ pub fn jobs(workflow: &str) -> Vec<(String, String)> {
 /// The apinata seed commit (`Repos::seed_commit`, the Potluck identity, message
 /// `Seed apinata workspace`) on a server whose public host is `127.0.0.1`.
 pub const SEED_COMMIT: &str = "1f7fbc63392e202f4f1eae88ba7e2509cd732d33";
+
+/// A reader over an open SSE response, block by block, through `Response::chunk`.
+pub struct SseReader {
+    response: reqwest::Response,
+    buf: Vec<u8>,
+}
+
+impl SseReader {
+    /// `GET url` with `token`; the reader on 200, else the status.
+    pub async fn open(url: &str, token: &str) -> Result<SseReader, u16> {
+        let r = client()
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .expect("request");
+        if r.status().as_u16() != 200 {
+            return Err(r.status().as_u16());
+        }
+        assert!(
+            r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        Ok(SseReader {
+            response: r,
+            buf: Vec::new(),
+        })
+    }
+
+    /// The lines of the next block that is not a comment-only keep-alive; `None` once the
+    /// server closed the stream.
+    pub async fn next_block(&mut self) -> Option<Vec<String>> {
+        loop {
+            if let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
+                let block: Vec<u8> = self.buf.drain(..end + 2).collect();
+                let lines: Vec<String> = String::from_utf8(block)
+                    .expect("utf-8")
+                    .lines()
+                    .filter(|l| !l.is_empty() && !l.starts_with(':'))
+                    .map(str::to_owned)
+                    .collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                return Some(lines);
+            }
+            match self.response.chunk().await.expect("read") {
+                Some(bytes) => self.buf.extend_from_slice(&bytes),
+                None => return None,
+            }
+        }
+    }
+}
+
+/// `(ref, sha)` of a `ref` event block.
+pub fn ref_event(block: &[String]) -> (String, String) {
+    assert_eq!(block[0], "event: ref", "{block:?}");
+    let data = block[1].strip_prefix("data: ").expect("data line");
+    let v: serde_json::Value = serde_json::from_str(data).expect("json");
+    (
+        v["ref"].as_str().unwrap().to_owned(),
+        v["sha"].as_str().unwrap().to_owned(),
+    )
+}

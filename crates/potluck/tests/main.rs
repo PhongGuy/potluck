@@ -60,6 +60,7 @@ mod serve;
 mod session;
 mod session_proxies;
 mod slug;
+mod sse_reader;
 mod teams;
 mod token;
 mod tokens;

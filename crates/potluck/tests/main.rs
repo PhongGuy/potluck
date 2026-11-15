@@ -15,6 +15,7 @@ mod api_error;
 mod api_system;
 mod cli_version;
 mod config;
+mod credential;
 mod db;
 mod health_check;
 mod measurements;

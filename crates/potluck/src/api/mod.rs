@@ -9,6 +9,7 @@ use crate::config::Config;
 use crate::db::Db;
 
 mod actor;
+pub mod credential;
 pub mod error;
 mod system;
 

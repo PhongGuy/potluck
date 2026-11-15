@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing_subscriber::EnvFilter;
 
+use crate::admin::AdminArgs;
 use crate::config::{Config, ServeArgs};
 use crate::health_check::HealthArgs;
 
@@ -33,6 +34,8 @@ pub enum Command {
     Serve(Box<ServeArgs>),
     /// Exit 0 if the server on this data directory answers its health check within 3 s.
     HealthCheck(HealthArgs),
+    /// Manage users, tokens, teams, workspaces, grants and overrides on the running server, over its admin socket.
+    Admin(Box<AdminArgs>),
     /// Run by git from `<data>/hooks/pre-receive`; not for people.
     #[command(hide = true)]
     Hook(HookArgs),
@@ -56,14 +59,21 @@ pub enum HookKind {
 }
 
 /// Runs the parsed command to completion. `serve` returns after SIGTERM or Ctrl-C;
-/// `health-check` prints `ok` when the server is healthy; both give `ExitCode::SUCCESS` on
-/// `Ok`. `hook pre-receive` returns the hook's exit code, so a refusal prints only its lines.
+/// `health-check` prints `ok` when the server is healthy; `admin` prints its verb's answer;
+/// all give `ExitCode::SUCCESS` on `Ok`. `hook pre-receive` returns the hook's exit code, so
+/// a refusal prints only its lines.
 pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Serve(args) => serve(*args).await.map(|()| ExitCode::SUCCESS),
         Command::HealthCheck(args) => {
             crate::health_check::run(args).await?;
             println!("ok");
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Admin(args) => {
+            let mut stdin = std::io::stdin().lock();
+            let mut stdout = std::io::stdout().lock();
+            crate::admin::run(*args, &mut stdin, &mut stdout).await?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Hook(args) => Ok(match args.hook {

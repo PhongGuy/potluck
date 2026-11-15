@@ -114,7 +114,6 @@ impl ApiResponse {
 
     /// The body parsed as JSON; `None` when empty or not JSON. Crate-private: serde_json
     /// stays out of the public surface.
-    #[expect(dead_code, reason = "the admin verbs parse error bodies with it")]
     pub(crate) fn json(&self) -> Option<serde_json::Value> {
         serde_json::from_str(&self.text).ok()
     }

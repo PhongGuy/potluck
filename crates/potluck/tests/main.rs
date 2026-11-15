@@ -14,6 +14,7 @@ mod common;
 mod access;
 mod actor;
 mod admin_client;
+mod admin_users;
 mod api_error;
 mod api_json;
 mod api_system;

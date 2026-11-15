@@ -9,11 +9,13 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use clap::Parser;
+use potluck::admin::AdminError;
 use potluck::api::credential::Credential;
 use potluck::api::error::ApiError;
 use potluck::api::{AppState, router};
 use potluck::auth::password::Passwords;
 use potluck::auth::token::MintedToken;
+use potluck::cli::{Cli, Command as CliCommand};
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
 use potluck::db::accounts::{NewToken, NewUser, UserRecord};
@@ -536,6 +538,39 @@ pub async fn full_server() -> FullServer {
     // potluck; these tests are about roles, so an accepting stub stands in for the check.
     write_hook(&server.hooks_dir(), "exit 0");
     server
+}
+
+/// A real server on a fresh temp data dir, as `full_server` starts it; the dir keeps it alive.
+/// Hashing runs at the production argon2 cost, so create as few users as a test needs.
+pub async fn admin_server() -> (tempfile::TempDir, Running) {
+    let FullServer { dir, running } = full_server().await;
+    (dir, running)
+}
+
+/// `potluck admin --data <data> <args..>` through the real command tree, run in process with
+/// `stdin` as its input; returns the result and what it wrote to stdout.
+pub async fn admin(data: &Path, args: &[&str], stdin: &str) -> (Result<(), AdminError>, String) {
+    let data = data.to_str().expect("utf-8 temp path");
+    let argv = ["potluck", "admin", "--data", data]
+        .into_iter()
+        .chain(args.iter().copied());
+    let cli = Cli::try_parse_from(argv).expect("admin flags parse");
+    let CliCommand::Admin(args) = cli.command else {
+        panic!("not the admin command")
+    };
+    let mut input = std::io::Cursor::new(stdin.as_bytes().to_vec());
+    let mut out = Vec::new();
+    let result = potluck::admin::run(*args, &mut input, &mut out).await;
+    (result, String::from_utf8(out).expect("utf-8 output"))
+}
+
+/// A table line's cells: split on the two-space gutter, so a header reads the same however
+/// wide its columns were padded.
+pub fn columns(line: &str) -> Vec<&str> {
+    line.split("  ")
+        .map(str::trim)
+        .filter(|cell| !cell.is_empty())
+        .collect()
 }
 
 /// A served API over a migrated database with fast hashing; the dir and the task live as long as it.

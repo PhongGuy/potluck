@@ -29,6 +29,7 @@ mod git_http;
 mod git_requests;
 mod health_check;
 mod hooks;
+mod kinds_generic;
 mod measurements;
 mod password;
 mod release_notes;

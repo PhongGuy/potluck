@@ -125,15 +125,38 @@ impl Scratch {
     /// A sh wrapper that runs the system git with the same isolation as `common::git`, for
     /// code under test that takes a git binary and passes its own environment through.
     pub fn isolated_git(&self) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = self.dir.path().join("isolated-git");
         let home = self.dir.path().to_str().unwrap();
-        let script = format!(
-            "#!/bin/sh\nHOME='{home}' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 exec git \"$@\"\n"
-        );
-        std::fs::write(&path, script).unwrap();
+        self.script(
+            "isolated-git",
+            &format!(
+                "HOME='{home}' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 exec git \"$@\"\n"
+            ),
+        )
+    }
+
+    /// An executable sh script `name` in the temp dir with `body`, returned only once it runs.
+    /// A child another test thread forks while the file is open for writing keeps that fd until
+    /// its exec, and running the script meanwhile fails with ETXTBSY; one probe run waits it out.
+    pub fn script(&self, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let path = self.dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        for _ in 0..500 {
+            let probe = Command::new(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            match probe {
+                Err(e) if e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
+                _ => return path,
+            }
+        }
+        panic!("{} stayed busy", path.display());
     }
 
     /// An annotated tag `name` on any object `target` (a commit, tree, blob or tag).

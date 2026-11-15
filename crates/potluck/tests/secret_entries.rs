@@ -201,3 +201,96 @@ fn six_thousand_commits_do_not_deadlock_diff_tree() {
         "deduplicated to one copy"
     );
 }
+
+#[test]
+fn a_path_with_a_newline_and_a_space_survives_and_a_gitlink_is_skipped() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let root = s.commit("seed");
+    s.write("a\nb c.txt", b"x\n");
+    s.git(
+        Some(&s.work),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{root},sub"),
+        ],
+    );
+    let tip = s.commit("odd names");
+    s.stage("main");
+    let git = git_for(&s);
+    let tree = git.tree_entries(&sha(&tip)).unwrap();
+    assert_eq!(
+        paths(&tree),
+        ["README", "a\nb c.txt"],
+        "the gitlink is no blob"
+    );
+    assert_eq!(
+        paths(&git.changed_entries(&[sha(&tip)]).unwrap()),
+        ["a\nb c.txt"]
+    );
+}
+
+/// A git stand-in for `cat-file --batch` that swallows stdin and prints `reply` verbatim.
+fn fake_batch(s: &Scratch, name: &str, reply: &str) -> Git {
+    Git::new(s.script(name, &format!("cat >/dev/null\n{reply}\n")), None)
+}
+
+const MARKER: &str = "AKIAIOSFODNN7MARKER";
+
+#[test]
+fn a_desynced_batch_fails_closed_without_echoing_its_output() {
+    let s = Scratch::new();
+    let wanted = "1".repeat(40);
+    let other = "2".repeat(40);
+    let cases = [
+        format!("printf '{MARKER} {MARKER}\\n'"),
+        format!("printf '{other} blob 20\\n{MARKER}\\n\\n'"),
+        format!("printf '{other} missing\\n'"),
+    ];
+    for (i, reply) in cases.iter().enumerate() {
+        let mut calls = 0;
+        let err = fake_batch(&s, &format!("fake-git-{i}"), reply)
+            .for_each_blob(&[sha(&wanted)], |_, _| calls += 1)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GitCmdError::Output {
+                    subcommand: "cat-file",
+                    ..
+                }
+            ),
+            "{reply}: {err}"
+        );
+        assert!(
+            !err.to_string().contains(MARKER),
+            "{reply}: output echoed: {err}"
+        );
+        assert_eq!(calls, 0, "{reply}: no blob handed on after a desync");
+    }
+}
+
+#[test]
+fn a_blob_over_the_content_cap_fails_closed_before_its_body_is_read() {
+    let s = Scratch::new();
+    let wanted = "1".repeat(40);
+    let size = potluck::kinds::generic::MAX_CONTENT_BYTES + 1;
+    let reply = format!("printf '{wanted} blob {size}\\n'; head -c {size} /dev/zero; printf '\\n'");
+    let mut calls = 0;
+    let err = fake_batch(&s, "fake-git", &reply)
+        .for_each_blob(&[sha(&wanted)], |_, _| calls += 1)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            GitCmdError::Output {
+                subcommand: "cat-file",
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(calls, 0, "an oversized blob is never handed on");
+}

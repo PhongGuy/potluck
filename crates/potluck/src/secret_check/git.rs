@@ -316,7 +316,7 @@ impl Git {
                         sizes.insert(sha, size);
                     }
                 }
-                Some(Header::Missing) => {}
+                Some(Header::Missing { .. }) => {}
                 None => {
                     return Err(GitCmdError::Output {
                         subcommand: SUB,
@@ -331,7 +331,9 @@ impl Git {
     /// `cat-file --batch` over `shas`, calling `f(sha, bytes)` once per blob in the order
     /// given as the stream arrives; non-blobs and missing names are skipped. One blob is in
     /// memory at a time, and callers pass only names at or under
-    /// [`MAX_CONTENT_BYTES`](crate::kinds::generic::MAX_CONTENT_BYTES).
+    /// [`MAX_CONTENT_BYTES`](crate::kinds::generic::MAX_CONTENT_BYTES). A reply for another
+    /// name, a larger blob or an unreadable reply is `GitCmdError::Output`, with none of git's
+    /// output in it.
     pub fn for_each_blob(
         &self,
         shas: &[Sha],
@@ -356,7 +358,7 @@ impl Git {
         // bytes and a newline. A non-blob's body is read into the sink, never kept.
         for sha in shas {
             header.clear();
-            match read_reply(&mut reader, &mut header, &mut body) {
+            match read_reply(&mut reader, sha, &mut header, &mut body) {
                 Ok(Reply::Blob) => f(sha, &body),
                 Ok(Reply::Skipped) => {}
                 Ok(Reply::Eof) => {
@@ -369,6 +371,9 @@ impl Git {
                     });
                 }
                 Err(err) => {
+                    // Close stdout first: a wrapper's grandchild blocked writing to it would
+                    // otherwise keep stderr open past the kill and hang the drain.
+                    drop(reader);
                     running.abort();
                     return Err(err);
                 }
@@ -499,14 +504,14 @@ fn parse_sha(bytes: &[u8]) -> Option<Sha> {
 /// A `cat-file --batch-check` or `--batch` header line.
 enum Header<'a> {
     Found { sha: Sha, kind: &'a [u8], size: u64 },
-    Missing,
+    Missing { name: &'a [u8] },
 }
 
 /// `<sha> <type> <size>` or `<name> missing`; anything else is `None`.
 fn parse_header(line: &[u8]) -> Option<Header<'_>> {
     let fields: Vec<&[u8]> = line.split(|&b| b == b' ').collect();
     match fields[..] {
-        [_name, b"missing"] => Some(Header::Missing),
+        [name, b"missing"] => Some(Header::Missing { name }),
         [sha, kind, size] => Some(Header::Found {
             sha: parse_sha(sha)?,
             kind,
@@ -526,9 +531,15 @@ enum Reply {
     Eof,
 }
 
-/// Reads one `cat-file --batch` reply: the header into `header`, a blob's body into `body`.
+/// Longest `cat-file --batch` header read: a 64-hex name, a type and a size fit well inside.
+const HEADER_MAX: u64 = 256;
+
+/// Reads the `cat-file --batch` reply for `wanted`: the header into `header`, a blob's body
+/// into `body`. Once framing is in doubt the bytes may be blob content, so errors carry a
+/// fixed detail and never git's output.
 fn read_reply(
     reader: &mut impl BufRead,
+    wanted: &Sha,
     header: &mut Vec<u8>,
     body: &mut Vec<u8>,
 ) -> Result<Reply, GitCmdError> {
@@ -537,19 +548,32 @@ fn read_reply(
         subcommand: SUB,
         source,
     };
-    let unexpected = |detail: String| GitCmdError::Output {
+    let unexpected = |detail: &str| GitCmdError::Output {
         subcommand: SUB,
-        detail,
+        detail: detail.to_owned(),
     };
-    if reader.read_until(b'\n', header).map_err(io)? == 0 {
+    if (&mut *reader)
+        .take(HEADER_MAX)
+        .read_until(b'\n', header)
+        .map_err(io)?
+        == 0
+    {
         return Ok(Reply::Eof);
     }
-    let line = header.strip_suffix(b"\n").unwrap_or(header);
-    let (is_blob, size) = match parse_header(line) {
-        Some(Header::Missing) => return Ok(Reply::Skipped),
-        Some(Header::Found { kind, size, .. }) => (kind == b"blob", size),
-        None => return Err(unexpected(format!("{:?}", String::from_utf8_lossy(line)))),
+    let Some(line) = header.strip_suffix(b"\n") else {
+        return Err(unexpected("unreadable batch header"));
     };
+    let (is_blob, size) = match parse_header(line) {
+        Some(Header::Missing { name }) if name == wanted.as_str().as_bytes() => {
+            return Ok(Reply::Skipped);
+        }
+        Some(Header::Found { sha, kind, size }) if sha == *wanted => (kind == b"blob", size),
+        Some(_) => return Err(unexpected("batch reply for another object")),
+        None => return Err(unexpected("unreadable batch header")),
+    };
+    if is_blob && size > crate::kinds::generic::MAX_CONTENT_BYTES {
+        return Err(unexpected("blob over the content cap"));
+    }
     let mut limited = reader.take(size);
     let read = if is_blob {
         body.clear();
@@ -559,7 +583,7 @@ fn read_reply(
     };
     let mut newline = [0u8; 1];
     if read != size || reader.read_exact(&mut newline).is_err() || newline != *b"\n" {
-        return Err(unexpected("truncated object body".to_owned()));
+        return Err(unexpected("truncated object body"));
     }
     Ok(if is_blob { Reply::Blob } else { Reply::Skipped })
 }

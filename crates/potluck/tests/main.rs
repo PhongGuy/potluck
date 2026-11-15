@@ -24,6 +24,7 @@ mod git_requests;
 mod health_check;
 mod hooks;
 mod measurements;
+mod password;
 mod repos;
 mod serve;
 mod slug;

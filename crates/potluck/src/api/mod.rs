@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
+use crate::notices::Notices;
 
 mod actor;
 pub mod auth;
@@ -41,6 +42,7 @@ pub struct AppState {
     git: Arc<GitEngine>,
     passwords: Passwords,
     session_limits: Arc<SessionLimits>,
+    notices: Notices,
 }
 
 impl AppState {
@@ -57,6 +59,7 @@ impl AppState {
             git,
             passwords: Passwords::new(),
             session_limits: Arc::new(SessionLimits::default()),
+            notices: Notices::new(),
         }
     }
 
@@ -104,6 +107,11 @@ impl AppState {
     /// The database handle.
     pub fn db(&self) -> &Db {
         &self.db
+    }
+
+    /// The ref notice registry, shared by every clone of the state.
+    pub fn notices(&self) -> &Notices {
+        &self.notices
     }
 
     /// The validated server configuration.

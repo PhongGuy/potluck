@@ -41,6 +41,7 @@ mod hooks;
 mod kinds_apinata;
 mod kinds_generic;
 mod measurements;
+mod notices;
 mod objects;
 mod password;
 mod push_refs;

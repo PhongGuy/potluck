@@ -11,11 +11,19 @@
 
 mod common;
 
+mod access;
 mod api_error;
 mod api_system;
 mod cli_version;
 mod config;
+mod credential;
 mod db;
+mod git_denials;
+mod git_http;
+mod git_requests;
 mod health_check;
+mod hooks;
 mod measurements;
+mod repos;
 mod serve;
+mod slug;

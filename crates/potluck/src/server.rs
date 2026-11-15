@@ -44,21 +44,37 @@ pub enum ServerError {
         #[source]
         source: io::Error,
     },
+    /// The pre-receive hook could not be written.
+    #[error("cannot write the pre-receive hook under {path}: {source}")]
+    Hooks {
+        /// The hooks directory under `--data`.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: io::Error,
+    },
     /// Opening or migrating `server.db` failed.
     #[error(transparent)]
     Db(#[from] DbError),
 }
 
-/// Creates `<data>`, `<data>/repos` and `<data>/hooks`, opens and migrates the database,
-/// binds `config.listen()` and the admin socket, and serves the API on both.
+/// Creates `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, installs the pre-receive
+/// hook, opens and migrates the database, binds `config.listen()` and the admin socket, and
+/// serves the API on both.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
     for path in [
         config.data().to_path_buf(),
         config.repos_dir(),
         config.hooks_dir(),
+        config.tmp_dir(),
     ] {
         std::fs::create_dir_all(&path).map_err(|source| ServerError::DataDir { path, source })?;
     }
+    let hooks_dir = config.hooks_dir();
+    crate::hooks::install(&hooks_dir).map_err(|source| ServerError::Hooks {
+        path: hooks_dir,
+        source,
+    })?;
     let db = Db::open(&config.db_path())?;
     db.migrate().await?;
     let addr = config.listen();

@@ -247,6 +247,14 @@ async fn roles_decide_who_fetches_and_pushes() {
     );
 }
 
+/// The test hook's one `remote: kind=` line, without the padding git appends to remote lines,
+/// so a value can be compared to its end and a stray `override=999` cannot pass.
+fn hook_line(out: &str) -> &str {
+    out.lines()
+        .find(|line| line.starts_with("remote: kind="))
+        .map_or("", str::trim_end)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_hook_sees_kind_pusher_token_and_flags() {
     let a = arena(false).await;
@@ -270,10 +278,9 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
         Some(&a.bob),
         &["push", "--porcelain", &a.url, "main"],
     ));
-    assert!(
-        out.contains(&format!(
-            "remote: kind=apinata pusher=bob token={token_id} import=1 override="
-        )),
+    assert_eq!(
+        hook_line(&out),
+        format!("remote: kind=apinata pusher=bob token={token_id} import=1 override="),
         "{out}"
     );
     let ws = a
@@ -295,8 +302,9 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
         Some(&a.bob),
         &["push", "--porcelain", &a.url, "main"],
     ));
-    assert!(
-        out.contains(&format!("import=1 override={id}")),
+    assert_eq!(
+        hook_line(&out),
+        format!("remote: kind=apinata pusher=bob token={token_id} import=1 override={id}"),
         "an armed override reaches the hook: {out}"
     );
     api_workspace(&a.server.api(""), &a.root, "core", "docs", true).await;
@@ -308,11 +316,10 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
         Some(&a.bob),
         &["push", "--porcelain", &docs, "main:refs/heads/extra"],
     ));
-    assert!(
-        out.contains(&format!(
-            "remote: kind=apinata pusher=bob token={token_id} import= override="
-        )),
-        "a seeded workspace has no import flag: {out}"
+    assert_eq!(
+        hook_line(&out),
+        format!("remote: kind=apinata pusher=bob token={token_id} import= override="),
+        "a seeded workspace has no import or override flag: {out}"
     );
     assert_eq!(
         ok(git(

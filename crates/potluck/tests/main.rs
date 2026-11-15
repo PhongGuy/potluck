@@ -27,3 +27,4 @@ mod measurements;
 mod repos;
 mod serve;
 mod slug;
+mod workflows;

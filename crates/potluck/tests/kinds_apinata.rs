@@ -1,6 +1,8 @@
 //! The apinata kind: environment files, the YAML walk and the seed.
 
-use potluck::kinds::apinata::{Apinata, ENV_UNPARSABLE, SECRET_VALUE, is_environment_file, seed};
+use potluck::kinds::apinata::{
+    Apinata, ENV_UNPARSABLE, NODE_CAP, SECRET_VALUE, environment_rule, is_environment_file, seed,
+};
 use potluck::kinds::generic;
 use potluck::kinds::{Code, Finding, Kind, by_name};
 
@@ -223,4 +225,85 @@ fn every_seed_file_passes_the_yaml_walk() {
             file.path()
         );
     }
+}
+
+#[test]
+fn the_node_cap_is_two_million() {
+    assert_eq!(NODE_CAP, 2_000_000);
+}
+
+#[test]
+fn nodes_are_counted_after_alias_expansion_keys_included() {
+    // sequence + 3 scalars
+    assert_eq!(environment_rule(b"[1, 2, 3]", 4), None);
+    assert_eq!(environment_rule(b"[1, 2, 3]", 3), unparsable());
+    // root map, key a, sequence of 3 (4), key b, the alias copy (4)
+    let aliased = b"a: &a [1, 2, 3]\nb: *a\n";
+    assert_eq!(environment_rule(aliased, 11), None);
+    assert_eq!(environment_rule(aliased, 10), unparsable());
+    // a tag wrapper is free: root map, key v, scalar
+    assert_eq!(environment_rule(b"v: !t 1\n", 3), None);
+    assert_eq!(environment_rule(b"v: !t 1\n", 2), unparsable());
+    // an empty document is one null node
+    assert_eq!(environment_rule(b"", 1), None);
+    assert_eq!(environment_rule(b"", 0), unparsable());
+}
+
+#[test]
+fn a_valued_secret_under_the_cap_is_still_secret_value() {
+    let bad = fixture!("bad", "env-secret-valued.yml");
+    assert_eq!(environment_rule(bad, NODE_CAP), hit());
+    assert_eq!(
+        environment_rule(bad, 5),
+        unparsable(),
+        "the cap is checked first"
+    );
+}
+
+fn wide(aliases: usize) -> Vec<u8> {
+    let mut s = String::from("a: &a [");
+    s.push_str(&vec!["x"; 4000].join(", "));
+    s.push_str("]\nb: [");
+    s.push_str(&vec!["*a"; aliases].join(", "));
+    s.push_str("]\n");
+    s.into_bytes()
+}
+
+// The one test at the real cap: 0.67 s in a release build, slower in the unoptimised test
+// profile. Every other cap test uses a small `node_cap` through `environment_rule`.
+#[test]
+fn the_real_cap_refuses_a_wide_alias_fan_out() {
+    // 1 + 1 + 4001 + 1 + 1 + 501 * 4001 = 2_008_506 nodes, 501 jumps: yaml_serde accepts it.
+    assert_eq!(
+        Apinata.content_rule("environments/x.yml", &wide(501)),
+        unparsable()
+    );
+    // The accepted side of the real cap is deliberately untested: the small-cap boundary
+    // tests cover it, and a 1,996,503-node document costs as much as the refused one.
+}
+
+#[test]
+fn the_counted_parse_keeps_every_refusal_of_the_plain_parse() {
+    for (name, bytes) in [
+        (
+            "env-duplicate-key-variable.yml",
+            fixture!("bad", "env-duplicate-key-variable.yml"),
+        ),
+        (
+            "env-deep-nesting.yml",
+            fixture!("bad", "env-deep-nesting.yml"),
+        ),
+        ("env-alias-bomb.yml", fixture!("bad", "env-alias-bomb.yml")),
+        ("flow duplicate", b"{a: 1, a: 2}" as &[u8]),
+    ] {
+        assert_eq!(environment_rule(bytes, NODE_CAP), unparsable(), "{name}");
+    }
+    assert_eq!(
+        environment_rule(
+            b"name: dev\nv: !custom {secret: true, value: fixture-tagged}\n",
+            NODE_CAP
+        ),
+        hit(),
+        "a tagged mapping is still walked"
+    );
 }

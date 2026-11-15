@@ -1,10 +1,18 @@
 //! The Apinata kind: Bruno-shaped collections whose `environments/*.yml` must not carry a
 //! value for a `secret: true` variable.
 
+use std::cell::Cell;
+use std::fmt;
 use std::sync::LazyLock;
 
 use globset::{GlobBuilder, GlobMatcher};
-use yaml_serde::Value;
+use serde::de::{
+    DeserializeSeed, Deserializer, EnumAccess, Error as _, MapAccess, SeqAccess, VariantAccess,
+    Visitor,
+};
+use yaml_serde::mapping::Entry;
+use yaml_serde::value::{Tag, TaggedValue};
+use yaml_serde::{Mapping, Value};
 
 use super::{Code, Finding, Kind, SeedFile};
 
@@ -28,24 +36,157 @@ impl Kind for Apinata {
     }
 
     /// For an environment file only: `env_unparsable` when the blob is not exactly one YAML
-    /// document yaml_serde accepts, `secret_value` when that document holds, at any depth, a
-    /// mapping with `secret: true` (the boolean) and a non-null `value`.
+    /// document yaml_serde accepts within `NODE_CAP` nodes, `secret_value` when that document
+    /// holds, at any depth, a mapping with `secret: true` (the boolean) and a non-null `value`.
     fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding> {
-        if !is_environment_file(path) {
-            return None;
-        }
-        // Fail closed: Apinata reads with the same parser, so a file it refuses is one no
-        // honest user relies on, and passing it would hide whatever it holds from the walk.
-        let doc = match yaml_serde::from_slice::<Value>(blob) {
-            Ok(doc) => doc,
-            Err(_) => return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
-        };
-        has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE))
+        is_environment_file(path)
+            .then(|| environment_rule(blob, NODE_CAP))
+            .flatten()
     }
 
     fn seed(&self) -> Vec<SeedFile> {
         seed()
     }
+}
+
+/// Nodes one document may hold after alias expansion: every scalar, sequence and mapping
+/// built, keys included, each alias expansion counted again. Above it the file is
+/// `env_unparsable`, as Apinata's loader refuses it.
+pub const NODE_CAP: usize = 2_000_000;
+
+/// The environment-file rule on `blob` alone with an explicit `node_cap`: `env_unparsable`
+/// when the bytes are not one YAML document or hold more than `node_cap` nodes,
+/// `secret_value` for a valued secret, else `None`. `content_rule` applies it with
+/// `NODE_CAP` to every path `is_environment_file` accepts.
+pub fn environment_rule(blob: &[u8], node_cap: usize) -> Option<Finding> {
+    // Fail closed: Apinata reads with the same parser, so a file it refuses is one no
+    // honest user relies on, and passing it would hide whatever it holds from the walk.
+    match parse_environment(blob, node_cap) {
+        Ok(doc) => has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE)),
+        Err(_) => Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
+    }
+}
+
+// Builds the same `Value` yaml_serde would, spending one unit of budget per node, so an alias
+// fan-out stops at the cap instead of filling memory first.
+struct Counted<'a> {
+    budget: &'a Cell<usize>,
+}
+
+impl Counted<'_> {
+    fn spend<E: serde::de::Error>(&self) -> Result<(), E> {
+        match self.budget.get().checked_sub(1) {
+            Some(left) => {
+                self.budget.set(left);
+                Ok(())
+            }
+            None => Err(E::custom("node cap exceeded")),
+        }
+    }
+
+    fn child(&self) -> Counted<'_> {
+        Counted {
+            budget: self.budget,
+        }
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for Counted<'_> {
+    type Value = Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Counted<'_> {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("any YAML value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, b: bool) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::Bool(b))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, i: i64) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::Number(i.into()))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, u: u64) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::Number(u.into()))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, f: f64) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::Number(f.into()))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::String(s.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, s: String) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::String(s))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::Null)
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Value, E> {
+        self.spend()?;
+        Ok(Value::Null)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        self.spend()?;
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(self.child())? {
+            items.push(item);
+        }
+        Ok(Value::Sequence(items))
+    }
+
+    // Duplicate keys are refused here, as yaml_serde's own Mapping visitor refuses them.
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        self.spend()?;
+        let mut mapping = Mapping::new();
+        while let Some(key) = map.next_key_seed(self.child())? {
+            match mapping.entry(key) {
+                Entry::Occupied(_) => return Err(A::Error::custom("duplicate key")),
+                Entry::Vacant(slot) => {
+                    slot.insert(map.next_value_seed(self.child())?);
+                }
+            }
+        }
+        Ok(Value::Mapping(mapping))
+    }
+
+    // The tag wrapper is not a node; only what it wraps is counted.
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Value, A::Error> {
+        let (tag, contents) = data.variant::<String>()?;
+        if tag.is_empty() {
+            return Err(A::Error::custom("empty tag"));
+        }
+        let value = contents.newtype_variant_seed(self.child())?;
+        Ok(Value::Tagged(Box::new(TaggedValue {
+            tag: Tag::new(tag),
+            value,
+        })))
+    }
+}
+
+fn parse_environment(blob: &[u8], node_cap: usize) -> Result<Value, yaml_serde::Error> {
+    let budget = Cell::new(node_cap);
+    Counted { budget: &budget }.deserialize(yaml_serde::Deserializer::from_slice(blob))
 }
 
 // Depth-first through mappings, sequences and tags. Only `null` means "no value", so an

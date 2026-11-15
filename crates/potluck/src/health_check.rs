@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::admin::client::get_once;
+
 /// The whole check, connect to last byte, must finish inside this; the image's
 /// HEALTHCHECK kills the probe at 5 s (Containerfile), so this stays well below.
 const HEALTH_BUDGET: Duration = Duration::from_secs(3);
@@ -48,10 +50,7 @@ pub enum HealthError {
 /// `GET /api/v1/health` over `<data>/admin.sock` within `HEALTH_BUDGET`; `Ok` only on HTTP 200.
 pub async fn run(args: HealthArgs) -> Result<(), HealthError> {
     let path = args.data.join("admin.sock");
-    let answer = tokio::time::timeout(
-        HEALTH_BUDGET,
-        crate::unix_http::get(&path, "/api/v1/health"),
-    );
+    let answer = tokio::time::timeout(HEALTH_BUDGET, get_once(&path, "/api/v1/health"));
     match answer.await {
         Err(_) => Err(HealthError::TimedOut {
             path,

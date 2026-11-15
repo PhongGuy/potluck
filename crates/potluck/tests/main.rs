@@ -13,6 +13,7 @@ mod common;
 
 mod access;
 mod actor;
+mod admin_client;
 mod api_error;
 mod api_json;
 mod api_system;

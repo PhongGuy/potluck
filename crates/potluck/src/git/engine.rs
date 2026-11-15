@@ -99,6 +99,9 @@ impl GitEngine {
         repo: &Path,
         v2: bool,
     ) -> Result<Vec<u8>, GitError> {
+        if service == Service::ReceivePack {
+            self.require_hook()?;
+        }
         let _permit = self.acquire().await?;
         let output = self
             .command(service, v2, &[])
@@ -139,6 +142,9 @@ impl GitEngine {
         extra_env: &[(String, String)],
         body: Body,
     ) -> Result<Body, GitError> {
+        if service == Service::ReceivePack {
+            self.require_hook()?;
+        }
         // The slot covers the spool too, so the disk holds at most `processes` bodies at once; the
         // upload timeout keeps a trickling client from parking on a slot.
         let permit = self.acquire().await?;
@@ -182,6 +188,17 @@ impl GitEngine {
             }
         });
         Ok(Body::from_stream(tokio_util::io::ReaderStream::new(stdout)))
+    }
+
+    /// `Ok` when `<hooks_dir>/pre-receive` is a regular file with any execute bit. git accepts a
+    /// push unchecked when the hook is absent, so receive-pack is refused before it takes a slot.
+    fn require_hook(&self) -> Result<(), GitError> {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.hooks_dir.join("pre-receive");
+        match std::fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.permissions().mode() & 0o111 != 0 => Ok(()),
+            _ => Err(GitError::HookMissing { path }),
+        }
     }
 
     /// A process slot, or `Busy` once `queue_wait` has passed without one.
@@ -273,6 +290,13 @@ pub enum GitError {
         /// git's stderr, trimmed.
         stderr: String,
     },
+    /// `<hooks>/pre-receive` is not a regular executable file, so git would accept every push
+    /// unchecked: 500 `internal`, logged.
+    #[error("pre-receive hook missing or not executable at {}", path.display())]
+    HookMissing {
+        /// The hook path.
+        path: PathBuf,
+    },
 }
 
 impl From<GitError> for ApiError {
@@ -285,7 +309,7 @@ impl From<GitError> for ApiError {
             GitError::BadEncoding(_) | GitError::SlowBody(_) | GitError::Body(_) => {
                 ApiError::invalid_request(err.to_string())
             }
-            GitError::Spawn(_) | GitError::Failed { .. } => {
+            GitError::Spawn(_) | GitError::Failed { .. } | GitError::HookMissing { .. } => {
                 tracing::error!(error = %err, "git error");
                 ApiError::internal("git failed")
             }
@@ -320,6 +344,7 @@ mod tests {
             .await
             .unwrap();
         std::fs::create_dir_all(dir.join("tmp")).unwrap();
+        write_stub_hook(&dir.join("hooks"), 0o755);
         (
             GitEngine::new(
                 repos,
@@ -330,6 +355,15 @@ mod tests {
             ),
             repo,
         )
+    }
+
+    /// A `pre-receive` that accepts everything, with `mode`, so receive-pack may run.
+    fn write_stub_hook(hooks: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(hooks).unwrap();
+        let hook = hooks.join("pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
     fn has(hay: &[u8], needle: &[u8]) -> bool {
@@ -391,6 +425,53 @@ mod tests {
                 "v2={v2}: receive-pack capabilities"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn receive_pack_is_refused_without_an_executable_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        std::fs::remove_file(dir.path().join("hooks").join("pre-receive")).unwrap();
+        let err = engine
+            .advertise(Service::ReceivePack, &repo, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::HookMissing { .. }), "got {err:?}");
+        let err = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from("0000"),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::HookMissing { .. }), "got {err:?}");
+        engine
+            .advertise(Service::UploadPack, &repo, false)
+            .await
+            .unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o644);
+        let err = engine
+            .advertise(Service::ReceivePack, &repo, false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitError::HookMissing { .. }),
+            "not executable: {err:?}"
+        );
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
+        engine
+            .advertise(Service::ReceivePack, &repo, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.permits.available_permits(),
+            GitLimits::default().processes,
+            "no slot was taken for a refused push"
+        );
     }
 
     #[tokio::test]
@@ -569,6 +650,7 @@ mod tests {
             .await
             .unwrap();
         std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
         let engine = GitEngine::new(
             repos,
             dir.path().join("hooks"),

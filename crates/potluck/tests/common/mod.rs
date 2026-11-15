@@ -50,10 +50,16 @@ pub fn parse_config(args: &[&str]) -> Result<Config, ConfigError> {
 
 /// A `Config` for a server on an ephemeral loopback port with `dir` as its data directory.
 pub fn config_for(dir: &Path) -> Config {
+    config_listening_on(dir, "127.0.0.1:0".parse().expect("loopback"))
+}
+
+/// A `Config` for a server on `listen` with `dir` as its data directory.
+pub fn config_listening_on(dir: &Path, listen: SocketAddr) -> Config {
     let data = dir.to_str().expect("utf-8 temp path");
+    let listen = listen.to_string();
     parse_config(&[
         "--listen",
-        "127.0.0.1:0",
+        &listen,
         "--data",
         data,
         "--public-url",

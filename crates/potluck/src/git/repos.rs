@@ -2,9 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::slug::Slug;
+
+/// The author and committer date of every seed commit, `GIT_*_DATE` form: 2026-01-01T00:00:00Z.
+/// The same seed on the same host is the same commit on every server.
+pub const SEED_DATE: &str = "1767225600 +0000";
 
 /// Bare repositories under `<data>/repos/{team}/{ws}.git`.
 #[derive(Debug, Clone)]
@@ -93,9 +98,136 @@ impl Repos {
             Err(source) => Err(RepoError::Io { path, source }),
         }
     }
+
+    /// One root commit on `refs/heads/<branch>` of the bare repository at `repo`, holding
+    /// exactly `files` (root-level `(name, bytes)` pairs, mode 100644) as `author <email>`,
+    /// dated `SEED_DATE`, with `message`. Refuses a name that is empty, `.` or `..`, or
+    /// carries `/`, `\n` or `\t` (`SeedPath`) before spawning anything, and a branch that
+    /// already exists (`Seed` at step `update-ref`). Returns the commit sha.
+    pub async fn seed_commit(
+        &self,
+        repo: &Path,
+        branch: &str,
+        files: &[(&str, &[u8])],
+        author: &str,
+        email: &str,
+        message: &str,
+    ) -> Result<String, RepoError> {
+        // `mktree` input is tab- and line-delimited and takes no nesting, so a bad name is
+        // refused up front rather than half-way through the plumbing.
+        if let Some((name, _)) = files.iter().find(|(name, _)| {
+            name.is_empty() || *name == "." || *name == ".." || name.contains(['/', '\n', '\t'])
+        }) {
+            return Err(RepoError::SeedPath {
+                name: (*name).to_owned(),
+            });
+        }
+        let mut tree = String::new();
+        for (name, bytes) in files {
+            let blob = self
+                .plumb(
+                    repo,
+                    "hash-object",
+                    &["hash-object", "-w", "--stdin"],
+                    bytes,
+                    &[],
+                )
+                .await?;
+            tree.push_str(&format!("100644 blob {blob}\t{name}\n"));
+        }
+        let tree = self
+            .plumb(repo, "mktree", &["mktree"], tree.as_bytes(), &[])
+            .await?;
+        let mut message = message.to_owned();
+        if !message.ends_with('\n') {
+            message.push('\n');
+        }
+        // A fixed identity and date make the commit a pure function of files, host and kind.
+        let identity = [
+            ("GIT_AUTHOR_NAME", author),
+            ("GIT_AUTHOR_EMAIL", email),
+            ("GIT_AUTHOR_DATE", SEED_DATE),
+            ("GIT_COMMITTER_NAME", author),
+            ("GIT_COMMITTER_EMAIL", email),
+            ("GIT_COMMITTER_DATE", SEED_DATE),
+        ];
+        let commit = self
+            .plumb(
+                repo,
+                "commit-tree",
+                &["commit-tree", &tree],
+                message.as_bytes(),
+                &identity,
+            )
+            .await?;
+        // The all-zero old value makes git refuse when the branch already exists.
+        let reference = format!("refs/heads/{branch}");
+        self.plumb(
+            repo,
+            "update-ref",
+            &[
+                "update-ref",
+                &reference,
+                &commit,
+                "0000000000000000000000000000000000000000",
+            ],
+            &[],
+            &[],
+        )
+        .await?;
+        Ok(commit)
+    }
+
+    /// Runs `git --git-dir=<repo> <args>` in the clean environment `init` uses, feeding it
+    /// `stdin`; returns trimmed stdout, or `Seed { step, .. }` on a non-zero exit.
+    async fn plumb(
+        &self,
+        repo: &Path,
+        step: &'static str,
+        args: &[&str],
+        stdin: &[u8],
+        env: &[(&str, &str)],
+    ) -> Result<String, RepoError> {
+        let io = |source| RepoError::Io {
+            path: repo.to_path_buf(),
+            source,
+        };
+        let mut command = Command::new(&self.git);
+        command
+            .env_clear()
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .envs(env.iter().copied())
+            .arg(format!("--git-dir={}", repo.display()))
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        if let Some(search) = std::env::var_os("PATH") {
+            command.env("PATH", search);
+        }
+        let mut child = command.spawn().map_err(io)?;
+        // Seeds are small, so writing all of stdin before reading output cannot fill a pipe. A git
+        // that already exited closes the pipe early; its exit status then tells what went wrong.
+        if let Some(mut input) = child.stdin.take() {
+            match input.write_all(stdin).await {
+                Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(io(e)),
+                _ => {}
+            }
+        }
+        let output = child.wait_with_output().await.map_err(io)?;
+        if !output.status.success() {
+            return Err(RepoError::Seed {
+                path: repo.to_path_buf(),
+                step,
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
 }
 
-/// Why a repository could not be created.
+/// Why creating, seeding or removing a repository failed.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum RepoError {
@@ -105,8 +237,8 @@ pub enum RepoError {
         /// The repository path.
         path: PathBuf,
     },
-    /// Creating the parent directory or spawning git failed.
-    #[error("cannot create {path}: {source}")]
+    /// A filesystem step on the repository, or spawning or feeding git, failed.
+    #[error("i/o on repository {path} failed: {source}")]
     Io {
         /// The repository path.
         path: PathBuf,
@@ -121,5 +253,21 @@ pub enum RepoError {
         path: PathBuf,
         /// git's stderr, trimmed.
         stderr: String,
+    },
+    /// A plumbing step of `seed_commit` exited non-zero.
+    #[error("seeding {path} failed at `git {step}`: {stderr}")]
+    Seed {
+        /// The repository path.
+        path: PathBuf,
+        /// `hash-object`, `mktree`, `commit-tree` or `update-ref`.
+        step: &'static str,
+        /// git's stderr, trimmed.
+        stderr: String,
+    },
+    /// A seed file name is empty, `.`, `..`, or carries `/`, a newline or a tab.
+    #[error("seed file name {name:?} must be a plain root-level file name")]
+    SeedPath {
+        /// The offending name.
+        name: String,
     },
 }

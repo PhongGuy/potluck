@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use potluck::git::{RepoError, Repos};
 use potluck::slug::Slug;
 
+use crate::common::{SEED_COMMIT, git, ok};
+
 fn repos(root: &Path) -> Repos {
     Repos::new(root.to_path_buf(), PathBuf::from("git"))
 }
@@ -124,4 +126,174 @@ async fn remove_deletes_the_repository_and_reports_absence() {
     );
     r.init(&slug("core"), &slug("api"), "main").await.unwrap();
     assert!(path.join("HEAD").is_file(), "the slug is free again");
+}
+
+const SEED_COLLECTION: &[u8] = b"opencollection: 1.0.0\n\ninfo:\n  name: Workspace\nbundled: false\nextensions:\n  bruno:\n    ignore:\n      - node_modules\n      - .git\n";
+
+fn apinata_seed() -> [(&'static str, &'static [u8]); 2] {
+    [
+        (".gitignore", b".env\n"),
+        ("opencollection.yml", SEED_COLLECTION),
+    ]
+}
+
+/// `git --git-dir=<repo> <args>` through the isolated runner; panics with stderr on failure.
+fn in_repo(home: &Path, repo: &Path, args: &[&str]) -> String {
+    let mut full = vec!["--git-dir", repo.to_str().unwrap()];
+    full.extend_from_slice(args);
+    ok(git(home, None, None, &full))
+}
+
+#[tokio::test]
+async fn seed_commit_is_the_same_sha_on_two_repositories() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = repos(dir.path());
+    let mut shas = Vec::new();
+    for ws in ["one", "two"] {
+        let repo = r.init(&slug("core"), &slug(ws), "main").await.unwrap();
+        let sha = r
+            .seed_commit(
+                &repo,
+                "main",
+                &apinata_seed(),
+                "Potluck",
+                "potluck@users.noreply.127.0.0.1",
+                "Seed apinata workspace",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            in_repo(
+                dir.path(),
+                &repo,
+                &["rev-parse", "--verify", "refs/heads/main"]
+            )
+            .trim(),
+            sha
+        );
+        shas.push(sha);
+    }
+    assert_eq!(
+        shas[0], shas[1],
+        "same files, identity, message and date: same commit"
+    );
+    assert_eq!(
+        shas[0], SEED_COMMIT,
+        "measured on git 2.56.1; a change here changes what every server seeds"
+    );
+    let repo = r.path(&slug("core"), &slug("one"));
+    assert_eq!(
+        in_repo(dir.path(), &repo, &["ls-tree", "-r", "refs/heads/main"]),
+        "100644 blob 4c49bd78f1d08f2bc09fa0bd8191ed38b7dce5e3\t.gitignore\n100644 blob f232e666589f142205abdb96ad168c970b218c9e\topencollection.yml\n"
+    );
+    assert_eq!(
+        in_repo(
+            dir.path(),
+            &repo,
+            &[
+                "log",
+                "--date=iso-strict",
+                "--format=%an <%ae> %ad|%cn <%ce> %cd|%P|%s",
+                "refs/heads/main"
+            ]
+        ),
+        "Potluck <potluck@users.noreply.127.0.0.1> 2026-01-01T00:00:00Z|Potluck <potluck@users.noreply.127.0.0.1> 2026-01-01T00:00:00Z||Seed apinata workspace\n",
+        "one root commit, the Potluck identity, the fixed date"
+    );
+    assert_eq!(
+        in_repo(
+            dir.path(),
+            &repo,
+            &[
+                "cat-file",
+                "blob",
+                "f232e666589f142205abdb96ad168c970b218c9e"
+            ]
+        )
+        .as_bytes(),
+        SEED_COLLECTION
+    );
+    let other = r
+        .seed_commit(
+            &r.init(&slug("core"), &slug("three"), "main").await.unwrap(),
+            "main",
+            &apinata_seed(),
+            "Potluck",
+            "potluck@users.noreply.team.example.com",
+            "Seed apinata workspace",
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        other, SEED_COMMIT,
+        "another host is another identity, so another commit"
+    );
+}
+
+#[tokio::test]
+async fn seed_commit_refuses_nested_paths_and_an_existing_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let r = repos(dir.path());
+    let repo = r.init(&slug("core"), &slug("api"), "main").await.unwrap();
+    for bad in ["sub/x", "", "/x", ".", "..", "a\nb", "a\tb"] {
+        let err = r
+            .seed_commit(&repo, "main", &[(bad, b"1")], "P", "p@h", "m")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, RepoError::SeedPath { .. }),
+            "{bad:?}: got {err:?}"
+        );
+    }
+    assert_eq!(
+        in_repo(dir.path(), &repo, &["for-each-ref"]),
+        "",
+        "nothing was written"
+    );
+    r.seed_commit(&repo, "main", &apinata_seed(), "P", "p@h", "m")
+        .await
+        .unwrap();
+    let err = r
+        .seed_commit(&repo, "main", &[("other", b"2")], "P", "p@h", "m")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RepoError::Seed {
+                step: "update-ref",
+                ..
+            }
+        ),
+        "an existing branch is never overwritten: {err:?}"
+    );
+    assert_eq!(
+        in_repo(
+            dir.path(),
+            &repo,
+            &["ls-tree", "--name-only", "refs/heads/main"]
+        ),
+        ".gitignore\nopencollection.yml\n"
+    );
+    let err = r
+        .seed_commit(
+            &dir.path().join("nope.git"),
+            "main",
+            &apinata_seed(),
+            "P",
+            "p@h",
+            "m",
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RepoError::Seed {
+                step: "hash-object",
+                ..
+            }
+        ),
+        "a missing repository fails at the first step: {err:?}"
+    );
 }

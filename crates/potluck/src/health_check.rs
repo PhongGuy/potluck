@@ -16,7 +16,7 @@ pub struct HealthArgs {
 #[non_exhaustive]
 pub enum HealthError {
     /// No server answers on the socket (missing file, refused connection, bad response).
-    #[error("cannot reach the admin socket {path}: {source}")]
+    #[error("cannot reach the admin socket {path}")]
     Unreachable {
         /// The socket that was tried.
         path: PathBuf,

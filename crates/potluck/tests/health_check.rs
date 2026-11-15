@@ -87,6 +87,11 @@ fn health_check_fails_when_no_server_runs() {
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("admin.sock"), "{stderr}");
+    assert_eq!(
+        stderr.matches("No such file").count(),
+        1,
+        "the cause is printed once: {stderr}"
+    );
 }
 
 #[test]

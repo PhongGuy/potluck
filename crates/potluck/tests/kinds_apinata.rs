@@ -9,20 +9,26 @@ use potluck::kinds::{Code, Finding, Kind, by_name};
 const SEED_COLLECTION: &[u8] = b"opencollection: 1.0.0\n\ninfo:\n  name: Workspace\nbundled: false\nextensions:\n  bruno:\n    ignore:\n      - node_modules\n      - .git\n";
 
 #[test]
-fn environment_files_at_any_depth_are_checked_and_nothing_else_is() {
+fn only_root_environment_yml_files_are_checked() {
     for p in [
         "environments/dev.yml",
-        "collections/api/environments/dev.yml",
+        "environments/Dev.yml",
+        "environments/a-b_c.yml",
     ] {
         assert!(is_environment_file(p), "{p}");
     }
     for p in [
-        "environments/nested/dev.yml",
+        "Environments/dev.yml",
+        "sub/environments/dev.yml",
+        "collections/api/environments/dev.yml",
         "environments/dev.yaml",
+        "environments/dev.YML",
+        "environments/nested/dev.yml",
         "my-environments/dev.yml",
         "dev.yml",
         "environments.yml",
         "environments/dev.yml.bak",
+        "/environments/dev.yml",
         "-",
         "",
     ] {
@@ -89,7 +95,13 @@ fn by_name_knows_apinata_only() {
 fn the_rule_follows_the_path() {
     let bad = fixture!("bad", "env-secret-valued.yml");
     assert_eq!(Apinata.content_rule("environments/dev.yml", bad), hit());
-    assert_eq!(Apinata.content_rule("api/environments/dev.yml", bad), hit());
+    assert_eq!(
+        Apinata.content_rule("api/environments/dev.yml", bad),
+        None,
+        "Apinata reads only the root directory"
+    );
+    assert_eq!(Apinata.content_rule("Environments/dev.yml", bad), None);
+    assert_eq!(Apinata.content_rule("environments/dev.yaml", bad), None);
     assert_eq!(Apinata.content_rule("notes/dev.yml", bad), None);
     assert_eq!(Apinata.content_rule("-", bad), None);
     assert_eq!(Apinata.path_rule("environments/dev.yml"), None);

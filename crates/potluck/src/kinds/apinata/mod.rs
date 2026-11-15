@@ -1,4 +1,4 @@
-//! The Apinata kind: Bruno-shaped collections whose `environments/*.yml` must not carry a
+//! The Apinata kind: Bruno-shaped collections whose root `environments/*.yml` must not carry a
 //! value for a `secret: true` variable.
 
 use std::cell::Cell;
@@ -238,8 +238,8 @@ fn has_valued_secret(node: &Value) -> bool {
     }
 }
 
-/// `**/environments/*.yml` with literal separators: the directory at any depth, the file
-/// directly inside it, extension `.yml` only.
+/// `environments/*.yml` at the repository root, as Apinata reads them: the literal directory,
+/// case-sensitive, the file directly inside it, `.yml` only.
 pub fn is_environment_file(path: &str) -> bool {
     ENVIRONMENT_FILE.is_match(path)
 }
@@ -262,7 +262,7 @@ pub fn seed() -> Vec<SeedFile> {
     reason = "the glob is a constant; a bad pattern is a build defect the tests catch on first use"
 )]
 static ENVIRONMENT_FILE: LazyLock<GlobMatcher> = LazyLock::new(|| {
-    GlobBuilder::new("**/environments/*.yml")
+    GlobBuilder::new("environments/*.yml")
         .literal_separator(true)
         .build()
         .expect("the environment file glob compiles")

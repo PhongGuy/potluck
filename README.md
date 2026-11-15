@@ -99,10 +99,11 @@ With nginx, inside the `server` block that already holds your certificate:
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
-    # Live change notices and large pushes stream through unbuffered.
+    # With HTTP/1.1 to the server, live change notices and large pushes stream through unbuffered.
     proxy_buffering off;
     proxy_request_buffering off;
     proxy_read_timeout 1h;
@@ -146,9 +147,9 @@ docker compose up -d
 
 ## Backups
 
-Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. Stop the server so the copy is consistent, export the volume, then start it again.
+Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. The one-liners, `compose.yaml` and the Quadlet unit all use that same volume name. Stop the server so the copy is consistent, export the volume, then start it again.
 
-With podman:
+With podman, for a container started with `podman run` or `podman compose`:
 
 ```sh
 podman stop potluck
@@ -162,6 +163,14 @@ With docker, which has no volume export, copy it out through a throwaway contain
 docker stop potluck
 docker run --rm -v potluck-data:/data -v "$PWD":/backup debian:trixie-slim tar -C /data -cf /backup/potluck-data.tar .
 docker start potluck
+```
+
+With the Quadlet unit, stop and start the service through systemd instead, because a plain `podman stop` lets the unit restart the container in the middle of the copy:
+
+```sh
+systemctl --user stop potluck
+podman volume export potluck-data > potluck-data.tar
+systemctl --user start potluck
 ```
 
 To restore with podman, stop the server and run `podman volume import potluck-data potluck-data.tar`.

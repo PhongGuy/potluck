@@ -27,3 +27,5 @@ services:
 
 volumes:
   potluck-data:
+    # Fixed so compose does not prefix it with the project name; backups name it directly.
+    name: potluck-data

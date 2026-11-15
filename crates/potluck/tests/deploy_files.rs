@@ -54,6 +54,7 @@ fn compose_hardens_the_container() {
         "- ALL",
         "- /tmp",
         "restart: unless-stopped",
+        "name: potluck-data",
     ] {
         assert!(text.contains(needle), "compose lacks {needle:?}");
     }

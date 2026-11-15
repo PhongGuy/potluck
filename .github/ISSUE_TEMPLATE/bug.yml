@@ -1,0 +1,77 @@
+name: Bug
+description: Something is broken or gives a wrong result.
+title: "Bug: "
+labels: [bug]
+assignees: [PhongGuy]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Remove tokens, passwords and other secrets from anything you paste; server logs may contain them.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where
+      options:
+        - Pushing or pulling a workspace
+        - The push check (secret rules)
+        - Accounts, tokens or roles
+        - Change notices
+        - The JSON API
+        - The CLI (potluck)
+        - The container or deployment
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, including any error text.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run the container with ...
+        2. Push ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From `potluck --version` or the image tag.
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: How it runs
+      options:
+        - podman
+        - docker
+        - A plain binary
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client and version
+      description: The app that talked to the server, for example Apinata 0.4.0 or git 2.50.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or output
+      description: Server or client output with secrets removed.
+      render: text

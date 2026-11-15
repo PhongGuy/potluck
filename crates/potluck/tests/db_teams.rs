@@ -1,5 +1,6 @@
 //! Team and membership rows.
 
+use potluck::api::error::{ApiError, ErrorCode};
 use potluck::db::DbError;
 use potluck::db::accounts::NewUser;
 use potluck::db::teams::TeamRecord;
@@ -62,5 +63,29 @@ async fn membership_is_idempotent_and_sorted() {
     assert!(
         matches!(err, DbError::Sqlite(_)),
         "an unknown user is a foreign key failure: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_team_create_that_loses_the_race_is_a_conflict() {
+    let (dir, db) = migrated_db().await;
+    // A second writer on the same file claims the slug just before our insert lands.
+    rusqlite::Connection::open(dir.path().join("server.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER racer BEFORE INSERT ON teams WHEN NEW.name <> 'racer' \
+             BEGIN INSERT INTO teams (slug, name) VALUES (NEW.slug, 'racer'); END",
+        )
+        .unwrap();
+    let err = db.create_team(&slug("core"), "Core").await.unwrap_err();
+    match &err {
+        DbError::Conflict { what } => assert_eq!(what, "team slug core is taken"),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    let api = ApiError::from(err);
+    assert_eq!((api.status(), api.code()), (409, ErrorCode::Conflict));
+    assert!(
+        db.list_teams().await.unwrap().is_empty(),
+        "the failed statement left no row"
     );
 }

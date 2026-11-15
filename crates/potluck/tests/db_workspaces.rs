@@ -1,5 +1,6 @@
 //! Workspace rows: creation, lookup, listing and deletion.
 
+use potluck::api::error::{ApiError, ErrorCode};
 use potluck::db::DbError;
 use potluck::db::workspaces::NewWorkspace;
 use potluck::slug::Slug;
@@ -113,4 +114,41 @@ async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
         "the foreign key holds: {err:?}"
     );
     assert!(db.list_workspaces().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_workspace_create_that_loses_the_race_is_a_conflict() {
+    let (dir, db) = migrated_db().await;
+    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    // A second writer on the same file claims (team, slug) just before our insert lands.
+    rusqlite::Connection::open(dir.path().join("server.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER racer BEFORE INSERT ON workspaces WHEN NEW.name <> 'racer' \
+             BEGIN INSERT INTO workspaces \
+             (team_id, slug, name, kind, default_branch, import_pending, created_at) \
+             VALUES (NEW.team_id, NEW.slug, 'racer', NEW.kind, NEW.default_branch, \
+             NEW.import_pending, NEW.created_at); END",
+        )
+        .unwrap();
+    let err = db
+        .create_workspace(NewWorkspace::new(
+            core.id(),
+            &slug("api"),
+            "API",
+            "apinata",
+            "main",
+        ))
+        .await
+        .unwrap_err();
+    match &err {
+        DbError::Conflict { what } => assert_eq!(what, "workspace api exists in this team"),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    let api = ApiError::from(err);
+    assert_eq!((api.status(), api.code()), (409, ErrorCode::Conflict));
+    assert!(
+        db.list_workspaces().await.unwrap().is_empty(),
+        "the failed statement left no row"
+    );
 }

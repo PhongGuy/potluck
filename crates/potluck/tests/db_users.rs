@@ -156,3 +156,31 @@ async fn debug_redacts_the_password_hash_everywhere() {
         "UserRecord leaked: {shown}"
     );
 }
+
+#[tokio::test]
+async fn a_user_create_that_loses_the_race_is_a_conflict() {
+    let (dir, db) = migrated_db().await;
+    // A second writer on the same file claims the username just before our insert lands.
+    rusqlite::Connection::open(dir.path().join("server.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER racer BEFORE INSERT ON users WHEN NEW.display_name <> 'racer' \
+             BEGIN INSERT INTO users (username, display_name, created_at) \
+             VALUES (NEW.username, 'racer', NEW.created_at); END",
+        )
+        .unwrap();
+    let err = db
+        .create_user(NewUser::new("bob", "Bob"))
+        .await
+        .unwrap_err();
+    match &err {
+        DbError::Conflict { what } => assert_eq!(what, "username bob is taken"),
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    let api = ApiError::from(err);
+    assert_eq!((api.status(), api.code()), (409, ErrorCode::Conflict));
+    assert!(
+        db.list_users().await.unwrap().is_empty(),
+        "the failed statement left no row"
+    );
+}

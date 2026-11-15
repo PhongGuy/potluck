@@ -24,6 +24,7 @@ mod db;
 mod db_teams;
 mod db_tokens;
 mod db_users;
+mod db_workspaces;
 mod deploy_files;
 mod git_denials;
 mod git_http;

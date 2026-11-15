@@ -12,6 +12,7 @@ use rusqlite::Connection;
 pub mod accounts;
 pub mod grants;
 mod migrations;
+pub mod overrides;
 pub mod teams;
 pub mod workspaces;
 

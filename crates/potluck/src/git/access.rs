@@ -19,6 +19,7 @@ pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T
 pub struct Access {
     role: Role,
     hook_env: Vec<(String, String)>,
+    push: Option<PushContext>,
 }
 
 impl Access {
@@ -27,6 +28,7 @@ impl Access {
         Self {
             role,
             hook_env: Vec::new(),
+            push: None,
         }
     }
 
@@ -45,6 +47,62 @@ impl Access {
     /// The variables for the hook, in insertion order.
     pub fn hook_env(&self) -> &[(String, String)] {
         &self.hook_env
+    }
+
+    /// Attaches the push context.
+    #[must_use]
+    pub fn with_push(mut self, push: PushContext) -> Self {
+        self.push = Some(push);
+        self
+    }
+
+    /// The push context, when the resolver attached one.
+    pub fn push(&self) -> Option<&PushContext> {
+        self.push.as_ref()
+    }
+}
+
+/// What bookkeeping needs about an accepted push: the workspace row, who pushed, and the override
+/// the hook was given. The resolver attaches it to a receive-pack `Access`; without it an
+/// accepted push is served but not recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PushContext {
+    workspace_id: i64,
+    pusher: String,
+    override_id: Option<i64>,
+}
+
+impl PushContext {
+    /// For `workspace_id`, pushed by `pusher` (a username), with no override.
+    pub fn new(workspace_id: i64, pusher: &str) -> Self {
+        Self {
+            workspace_id,
+            pusher: pusher.to_owned(),
+            override_id: None,
+        }
+    }
+
+    /// The override id the hook was given, if any.
+    #[must_use]
+    pub fn override_id(mut self, id: Option<i64>) -> Self {
+        self.override_id = id;
+        self
+    }
+
+    /// The workspace row id.
+    pub fn workspace_id(&self) -> i64 {
+        self.workspace_id
+    }
+
+    /// The pusher's username.
+    pub fn pusher(&self) -> &str {
+        &self.pusher
+    }
+
+    /// The override id the hook was given, if any.
+    pub fn armed_override(&self) -> Option<i64> {
+        self.override_id
     }
 }
 
@@ -135,7 +193,9 @@ impl GitAccess for DbAccess {
             if let Some(id) = armed {
                 access = access.with_hook_env("POTLUCK_OVERRIDE", &id.to_string());
             }
-            Ok(access)
+            // The same values the hook was given, so bookkeeping consumes exactly that override.
+            let push = PushContext::new(record.id(), user.user().username()).override_id(armed);
+            Ok(access.with_push(push))
         })
     }
 }

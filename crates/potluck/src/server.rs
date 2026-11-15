@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use crate::api::{Actor, AppState};
 use crate::config::Config;
 use crate::db::{Db, DbError};
+use crate::notices::Notices;
 
 /// Why the server could not start.
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +104,9 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
 
     // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
-    let router = crate::api::router(AppState::new(db.clone(), config.clone()));
+    let state = AppState::new(db.clone(), config.clone());
+    let notices = state.notices().clone();
+    let router = crate::api::router(state);
     let (stop, rx) = watch::channel(false);
     let http = tokio::spawn(
         axum::serve(
@@ -125,6 +128,7 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         stop,
         tasks: [http, admin],
         db,
+        notices,
         _lock,
     })
 }
@@ -166,6 +170,7 @@ pub struct Running {
     stop: watch::Sender<bool>,
     tasks: [JoinHandle<io::Result<()>>; 2],
     db: Db,
+    notices: Notices,
     _lock: File,
 }
 
@@ -197,6 +202,8 @@ impl Running {
     /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file,
     /// and leaves `server.lock` in place.
     pub async fn shutdown(self) {
+        // Open streams would hold the graceful drain forever; end them before stopping.
+        self.notices.close_all();
         let _ = self.stop.send(true);
         for task in self.tasks {
             match task.await {

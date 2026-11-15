@@ -8,6 +8,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
+use super::events;
 use super::json::ApiJson;
 use super::objects::TeamJson;
 use crate::db::accounts::UserRecord;
@@ -72,11 +73,14 @@ pub(super) async fn remove_member(
 ) -> Result<StatusCode, ApiError> {
     auth.require_server_admin()?;
     let (team, user) = team_and_user(&state, &team, &username).await?;
-    if state.db().remove_member(team.id(), user.id()).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(ApiError::not_found("no such member"))
+    if !state.db().remove_member(team.id(), user.id()).await? {
+        return Err(ApiError::not_found("no such member"));
     }
+    // The membership is gone either way; a failed reap is logged rather than answered as 500.
+    if let Err(err) = events::reap_unreadable(&state, std::slice::from_ref(&user)).await {
+        tracing::error!(user = user.id(), error = ?err, "closing streams after a member removal failed");
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `s` as a slug, else 422 `slug`.

@@ -16,7 +16,9 @@ use axum::routing::{get, post};
 use crate::api::AppState;
 use crate::api::credential::credential_from_headers;
 use crate::api::error::ApiError;
-use crate::git::access::Access;
+use crate::git::access::{Access, PushContext};
+use crate::git::engine::PushObserver;
+use crate::git::push::RefMove;
 use crate::git::{GitError, Service};
 use crate::slug::Slug;
 
@@ -101,6 +103,12 @@ async fn rpc(
                 .map_err(|_| ApiError::invalid_request("unsupported Content-Encoding"))?,
         ),
     };
+    // Only a receive-pack the resolver tied to a workspace is watched; everything else is served
+    // without bookkeeping.
+    let on_push = match (service, access.push()) {
+        (Service::ReceivePack, Some(ctx)) => Some(observer(state, ctx.clone())),
+        _ => None,
+    };
     let out = state
         .git()
         .rpc(
@@ -110,9 +118,19 @@ async fn rpc(
             encoding,
             access.hook_env(),
             body,
+            on_push,
         )
         .await?;
     Ok(git_response(service.result_type(), out))
+}
+
+/// Hands a push's confirmed moves to the bookkeeping. It runs on the reaper task, so the
+/// record itself is spawned rather than awaited.
+fn observer(state: &AppState, ctx: PushContext) -> PushObserver {
+    let state = state.clone();
+    Box::new(move |moves: Vec<RefMove>| {
+        tokio::spawn(crate::api::pushes::record(state, ctx, moves));
+    })
 }
 
 /// The checks every route shares, in the order that leaks least: the repository name, the

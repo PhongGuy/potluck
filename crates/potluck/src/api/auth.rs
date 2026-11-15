@@ -8,18 +8,25 @@ use super::error::ApiError;
 use super::{Actor, AppState, AuthUser};
 use crate::auth::token::{digest, digests_match, prefix_of};
 use crate::clock::{now_rfc3339, shift_secs};
+use crate::db::Db;
 
 /// Resolves `credential` to its user and token: a shape check, the rows sharing its prefix, a
 /// constant-time digest match against every one, then expiry (`expires_at <= now`) and the
 /// owner's `disabled` flag. On success `last_used_at` is refreshed when older than a minute.
 /// Every refusal is 401 "invalid or expired token"; only a database failure answers otherwise.
 pub async fn authenticate(state: &AppState, credential: &Credential) -> Result<AuthUser, ApiError> {
+    authenticate_with(state.db(), credential).await
+}
+
+/// `authenticate` over the database handle alone: the same checks and the same 401s, the
+/// disabled owner included.
+pub async fn authenticate_with(db: &Db, credential: &Credential) -> Result<AuthUser, ApiError> {
     let secret = credential.secret();
     let Some(prefix) = prefix_of(secret) else {
         return Err(rejected("none", "malformed"));
     };
     let presented = digest(secret);
-    let candidates = state.db().tokens_by_prefix(prefix).await?;
+    let candidates = db.tokens_by_prefix(prefix).await?;
     // Compare against every candidate before choosing, so the time taken does not depend on
     // which row (if any) matched.
     let mut found = None;
@@ -47,7 +54,7 @@ pub async fn authenticate(state: &AppState, credential: &Credential) -> Result<A
     // `last_used_at` is advisory: the request is already authenticated, so a failed touch is
     // reported and ignored.
     if let Some(stale_before) = shift_secs(&now, -60)
-        && let Err(err) = state.db().touch_token(token_id, &now, &stale_before).await
+        && let Err(err) = db.touch_token(token_id, &now, &stale_before).await
     {
         tracing::warn!(error = %err, "could not record token use");
     }

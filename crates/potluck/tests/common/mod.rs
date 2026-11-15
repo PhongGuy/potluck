@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use potluck::db::accounts::{NewToken, NewUser, UserRecord};
 use potluck::git::access::{Access, BoxFuture, GitAccess};
 use potluck::git::{GitLimits, Repos};
 use potluck::role::Role;
+use potluck::server::{Running, start};
 use potluck::slug::Slug;
 use reqwest::Method;
 use serde_json::Value;
@@ -422,6 +424,53 @@ pub fn work_tree(home: &Path, name: &str) -> std::path::PathBuf {
 /// `<data>/repos/{team}/{ws}.git`.
 pub fn repo_path(data: &Path, team: &str, ws: &str) -> std::path::PathBuf {
     data.join("repos").join(team).join(format!("{ws}.git"))
+}
+
+/// `<dir>/pre-receive` as `#!/bin/sh` plus `body`, mode 0755, over whatever is there.
+pub fn write_hook(dir: &Path, body: &str) {
+    std::fs::create_dir_all(dir).expect("hooks dir");
+    let hook = dir.join("pre-receive");
+    std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
+}
+
+/// A server from `server::start` on a temp data dir: directories made, database migrated, TCP
+/// on an ephemeral loopback port, and an accepting `pre-receive` in place of the installed one.
+/// Dropping it stops the listeners with the runtime.
+pub struct FullServer {
+    pub dir: tempfile::TempDir,
+    pub running: Running,
+}
+
+impl FullServer {
+    pub fn db(&self) -> &Db {
+        self.running.db()
+    }
+
+    /// `http://127.0.0.1:<port>/api/v1{path}`.
+    pub fn api(&self, path: &str) -> String {
+        format!("http://{}/api/v1{path}", self.running.http_addr())
+    }
+
+    /// `http://127.0.0.1:<port>/git/{team}/{ws}.git`.
+    pub fn git_url(&self, team: &str, ws: &str) -> String {
+        format!("http://{}/git/{team}/{ws}.git", self.running.http_addr())
+    }
+
+    /// `<data>/hooks`.
+    pub fn hooks_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("hooks")
+    }
+}
+
+pub async fn full_server() -> FullServer {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&config_for(dir.path())).await.expect("start");
+    let server = FullServer { dir, running };
+    // The installed hook execs the serving binary, which inside this test binary is not
+    // potluck; these tests are about roles, so an accepting stub stands in for the check.
+    write_hook(&server.hooks_dir(), "exit 0");
+    server
 }
 
 /// A served API over a migrated database with fast hashing; the dir and the task live as long as it.

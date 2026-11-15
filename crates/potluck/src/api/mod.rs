@@ -9,7 +9,7 @@ use crate::auth::password::Passwords;
 use crate::auth::rate_limit::SessionLimits;
 use crate::config::Config;
 use crate::db::Db;
-use crate::git::access::{DenyAll, GitAccess};
+use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
 
 mod actor;
@@ -44,15 +44,16 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Bundles the handle and the config for the router, with the deny-all resolver and the
-    /// default git limits and the production hashing cost; the engine reads its paths and body
-    /// cap from `config`.
+    /// Bundles the handle and the config for the router, with the database-backed resolver,
+    /// the default git limits and the production hashing cost; the engine reads its paths and
+    /// body cap from `config`.
     pub fn new(db: Db, config: Config) -> Self {
         let git = Arc::new(git_engine(&config, GitLimits::default()));
+        let git_access = Arc::new(DbAccess::new(db.clone()));
         AppState {
             db,
             config: Arc::new(config),
-            git_access: Arc::new(DenyAll),
+            git_access,
             git,
             passwords: Passwords::new(),
             session_limits: Arc::new(SessionLimits::default()),

@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{delete, get, patch, post};
 
 use crate::auth::password::Passwords;
+use crate::auth::rate_limit::SessionLimits;
 use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DenyAll, GitAccess};
@@ -13,15 +14,21 @@ use crate::git::{GitEngine, GitLimits, Repos};
 
 mod actor;
 pub mod auth;
+pub mod client_ip;
 pub mod credential;
 pub mod error;
+pub mod json;
+pub mod objects;
+mod session;
 mod system;
+mod tokens;
+mod users;
 
 pub use actor::{Actor, AuthUser};
 use error::ApiError;
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver, the git engine and the password hasher.
+/// resolver, the git engine, the password hasher and the sign-in rate limiters.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -30,6 +37,7 @@ pub struct AppState {
     git_access: Arc<dyn GitAccess>,
     git: Arc<GitEngine>,
     passwords: Passwords,
+    session_limits: Arc<SessionLimits>,
 }
 
 impl AppState {
@@ -44,6 +52,7 @@ impl AppState {
             git_access: Arc::new(DenyAll),
             git,
             passwords: Passwords::new(),
+            session_limits: Arc::new(SessionLimits::default()),
         }
     }
 
@@ -71,6 +80,11 @@ impl AppState {
     /// The hasher.
     pub fn passwords(&self) -> &Passwords {
         &self.passwords
+    }
+
+    /// The `POST /session` limiters, shared by every clone of the state.
+    pub fn session_limits(&self) -> &SessionLimits {
+        &self.session_limits
     }
 
     /// The resolver.
@@ -110,7 +124,14 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
 pub fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/health", get(system::health))
-        .route("/server", get(system::server));
+        .route("/server", get(system::server))
+        .route("/session", post(session::create))
+        .route("/me", get(tokens::me))
+        .route("/tokens", get(tokens::list).post(tokens::create))
+        .route("/tokens/{id}", delete(tokens::revoke))
+        .route("/users", get(users::list).post(users::create))
+        .route("/users/{username}", patch(users::patch))
+        .route("/users/{username}/tokens", get(tokens::list_for_user));
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.
     Router::new()

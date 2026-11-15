@@ -936,6 +936,7 @@ dependencies = [
  "clap",
  "futures-util",
  "getrandom",
+ "ipnet",
  "jiff",
  "reqwest",
  "rusqlite",

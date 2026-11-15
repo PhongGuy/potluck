@@ -153,3 +153,26 @@ fn serve_on_a_busy_port_prints_the_cause_once() {
         "{stderr}"
     );
 }
+
+#[test]
+fn serve_refuses_oidc_flags_from_the_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = potluck()
+        .env("POTLUCK_PUBLIC_URL", "http://127.0.0.1:8080")
+        .env("POTLUCK_OIDC_CLIENT_ID", "potluck")
+        .args(["serve", "--data"])
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("OIDC"));
+    assert!(
+        !dir.path().join("server.db").exists(),
+        "nothing is created before config passes"
+    );
+}

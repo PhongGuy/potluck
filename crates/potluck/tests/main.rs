@@ -30,6 +30,7 @@ mod git_denials;
 mod git_http;
 mod git_requests;
 mod health_check;
+mod hook_cli;
 mod hooks;
 mod kinds_apinata;
 mod kinds_generic;

@@ -69,6 +69,11 @@ pub async fn serve(router: axum::Router) -> (SocketAddr, tokio::task::JoinHandle
     (addr, task)
 }
 
+/// A plain HTTP client for requests to a test server.
+pub fn client() -> reqwest::Client {
+    reqwest::Client::new()
+}
+
 /// A migrated database in its own temp dir.
 pub async fn migrated_db() -> (tempfile::TempDir, Db) {
     let dir = tempfile::tempdir().expect("temp dir");

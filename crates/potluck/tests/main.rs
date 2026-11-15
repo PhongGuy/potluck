@@ -15,6 +15,7 @@ mod access;
 mod actor;
 mod api_error;
 mod api_system;
+mod auth;
 mod authenticate;
 mod cli_version;
 mod config;

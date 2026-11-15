@@ -16,6 +16,7 @@ pub mod auth;
 pub mod client_ip;
 pub mod credential;
 pub mod error;
+pub mod json;
 mod system;
 
 pub use actor::{Actor, AuthUser};

@@ -33,6 +33,15 @@ pub struct ServeArgs {
     /// CIDRs or addresses whose `X-Forwarded-For` is believed; comma separated, none by default.
     #[arg(long, env = "POTLUCK_TRUSTED_PROXIES", value_delimiter = ',')]
     trusted_proxies: Vec<String>,
+    /// OIDC issuer URL; parsed, but refused until OIDC sign-in exists.
+    #[arg(long, env = "POTLUCK_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+    /// OIDC client id; parsed, but refused until OIDC sign-in exists.
+    #[arg(long, env = "POTLUCK_OIDC_CLIENT_ID")]
+    oidc_client_id: Option<String>,
+    /// File holding the OIDC client secret; parsed, but refused until OIDC sign-in exists.
+    #[arg(long, env = "POTLUCK_OIDC_CLIENT_SECRET_FILE")]
+    oidc_client_secret_file: Option<PathBuf>,
 }
 
 /// Validated server configuration. Built with `Config::try_from(ServeArgs)`.
@@ -171,6 +180,11 @@ pub enum ConfigError {
         /// The parser's complaint.
         reason: String,
     },
+    /// An `--oidc-*` flag is set, and OIDC is not implemented yet.
+    #[error(
+        "OIDC sign-in is not implemented in this version; unset --oidc-issuer, --oidc-client-id and --oidc-client-secret-file (POTLUCK_OIDC_*)"
+    )]
+    OidcUnsupported,
 }
 
 impl TryFrom<ServeArgs> for Config {
@@ -191,6 +205,12 @@ impl TryFrom<ServeArgs> for Config {
             reason: e.to_string(),
         })?;
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
+        if args.oidc_issuer.is_some()
+            || args.oidc_client_id.is_some()
+            || args.oidc_client_secret_file.is_some()
+        {
+            return Err(ConfigError::OidcUnsupported);
+        }
         Ok(Self {
             listen: args.listen,
             data,

@@ -306,3 +306,21 @@ fn a_bad_trusted_proxy_entry_is_refused() {
         assert!(err.to_string().contains(bad), "{err}");
     }
 }
+
+#[test]
+fn oidc_flags_parse_but_are_refused_while_unimplemented() {
+    for flags in [
+        &["--oidc-issuer", "https://issuer.example.com"][..],
+        &["--oidc-client-id", "potluck"][..],
+        &["--oidc-client-secret-file", "/run/secrets/oidc"][..],
+    ] {
+        let mut args = vec!["--public-url", "https://p.example.com"];
+        args.extend_from_slice(flags);
+        let err = parse_config(&args).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::OidcUnsupported),
+            "{flags:?}: got {err:?}"
+        );
+        assert!(err.to_string().contains("--oidc-issuer"), "{err}");
+    }
+}

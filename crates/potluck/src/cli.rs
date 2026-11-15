@@ -27,8 +27,9 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 #[non_exhaustive]
 pub enum Command {
+    // Boxed: the serve flags would otherwise size every variant.
     /// Run the server.
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
     /// Exit 0 if the server on this data directory answers its health check.
     HealthCheck(HealthArgs),
 }
@@ -37,7 +38,7 @@ pub enum Command {
 /// `health-check` prints `ok` when the server is healthy.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Serve(args) => serve(args).await,
+        Command::Serve(args) => serve(*args).await,
         Command::HealthCheck(args) => {
             crate::health_check::run(args).await?;
             println!("ok");

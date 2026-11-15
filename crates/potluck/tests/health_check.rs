@@ -1,7 +1,10 @@
-//! `potluck health-check` through the binary against a real `potluck serve` child.
+//! `potluck health-check` through the binary, against a real `potluck serve` child and
+//! against fake admin socket servers that misbehave.
 
+use std::io::{Read, Write};
+use std::os::unix::net::UnixListener;
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::common::potluck;
@@ -41,6 +44,36 @@ fn spawn_server(data: &Path) -> Server {
         std::thread::sleep(Duration::from_millis(50));
     }
     Server(child)
+}
+
+/// Runs `health-check --data <data>` with a watchdog: a child still running after `limit` is
+/// killed and the test fails, so a hang is a failure, not a stalled suite.
+fn health_check_within(data: &Path, limit: Duration) -> (Output, Duration) {
+    let started = Instant::now();
+    let mut child = potluck()
+        .args(["health-check", "--data"])
+        .arg(data)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn potluck health-check");
+    loop {
+        let failure = match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() <= limit => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Ok(None) => format!("health-check still running after {limit:?}"),
+            Err(err) => format!("cannot poll health-check: {err}"),
+        };
+        // Every failure path reaps the child, so a failed test leaves no process behind.
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("{failure}");
+    }
+    let elapsed = started.elapsed();
+    (child.wait_with_output().unwrap(), elapsed)
 }
 
 #[test]
@@ -114,4 +147,71 @@ fn health_check_fails_after_the_server_is_killed() {
         "a dead socket file is not healthy"
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("admin.sock"));
+}
+
+#[test]
+fn health_check_fails_when_the_server_stays_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(dir.path().join("admin.sock")).unwrap();
+    // Accept, read the request, then hold the connection open without a byte of reply
+    // until the client gives up and closes.
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut sink = Vec::new();
+        let _ = stream.read_to_end(&mut sink);
+    });
+    let (out, elapsed) = health_check_within(dir.path(), Duration::from_secs(5));
+    assert_eq!(out.status.code(), Some(1), "a silent socket is not healthy");
+    assert!(
+        elapsed >= Duration::from_secs(3),
+        "gave up before the 3 s budget: {elapsed:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("admin.sock"), "{stderr}");
+    assert_eq!(
+        stderr.matches("within 3 s").count(),
+        1,
+        "the timeout is named once: {stderr}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "",
+        "no `ok` on failure"
+    );
+}
+
+#[test]
+fn health_check_fails_when_the_server_streams_without_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(dir.path().join("admin.sock")).unwrap();
+    // A head with no Content-Length and `Connection: close` makes the body EOF-delimited,
+    // then the body never ends. Slow enough (4 MB/s) that a client without the cap does not
+    // eat the machine before its deadline; the write fails once the client hangs up.
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let chunk = [b'x'; 4096];
+        while stream.write_all(&chunk).is_ok() {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    let (out, elapsed) = health_check_within(dir.path(), Duration::from_secs(5));
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "an endless reply is not healthy"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the cap, not the deadline, ended the read: {elapsed:?}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("admin.sock"), "{stderr}");
+    assert_eq!(
+        stderr.matches("longer than").count(),
+        1,
+        "the cap is named once: {stderr}"
+    );
 }

@@ -40,6 +40,7 @@ mod rate_limit;
 mod release_notes;
 mod release_workflow;
 mod repos;
+mod secret_git;
 mod serve;
 mod session;
 mod session_proxies;

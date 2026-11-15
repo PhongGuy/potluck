@@ -11,6 +11,7 @@ pub mod health_check;
 pub mod hooks;
 pub mod kinds;
 pub mod role;
+pub mod secret_check;
 pub mod server;
 pub mod slug;
 mod unix_http;

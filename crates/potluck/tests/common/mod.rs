@@ -1,4 +1,5 @@
 //! Shared helpers. Every test reaches only 127.0.0.1 or a Unix socket under a temp dir.
+pub mod scratch;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;

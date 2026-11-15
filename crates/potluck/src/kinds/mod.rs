@@ -97,6 +97,10 @@ pub trait Kind: Send + Sync + std::fmt::Debug {
     /// path is a content candidate even when the repository already holds it, so a file moved
     /// or copied under the kind's paths is checked there.
     fn content_path(&self, path: &str) -> bool;
+    /// The finding for a blob at `path` that is over `MAX_CONTENT_BYTES`, which the hook never
+    /// reads: `Some` refuses it because the kind cannot vouch for a file it cannot check,
+    /// `None` skips it as the generic set does. Only asked for a path `content_path` accepts.
+    fn over_cap_rule(&self, path: &str) -> Option<Finding>;
     /// The files a new workspace of this kind starts with, in commit order.
     fn seed(&self) -> Vec<SeedFile>;
 }

@@ -49,6 +49,12 @@ impl Kind for Apinata {
         is_environment_file(path)
     }
 
+    /// An environment file over the cap is `env_unparsable`: none is that large, and an
+    /// unread file cannot be vouched for.
+    fn over_cap_rule(&self, path: &str) -> Option<Finding> {
+        is_environment_file(path).then(|| Finding::new(Code::SecretValue, ENV_UNPARSABLE))
+    }
+
     fn seed(&self) -> Vec<SeedFile> {
         seed()
     }

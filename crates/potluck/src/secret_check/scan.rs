@@ -98,7 +98,8 @@ impl Rejection {
 /// the repository or whose path the kind's `content_path` accepts, each `(blob, path)` pair
 /// once per push; in import mode the tip tree replaces both lists. A tree target is scanned
 /// whole (every entry a candidate); a blob target is one entry at path `/`. Blobs over
-/// `MAX_CONTENT_BYTES` skip content rules. Per ref the path-rule rejections come first, then
+/// `MAX_CONTENT_BYTES` are not read: the generic set skips them, and a kind refuses one at a
+/// path it owns through `over_cap_rule`. Per ref the path-rule rejections come first, then
 /// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
 /// The generic content rules also run over the message of every new commit and every new
 /// annotated tag behind the ref (the pushed tag's chain included), each object once per push
@@ -187,7 +188,8 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 }
 
 /// Streams every candidate blob at or under the cap once and runs the content rules for each
-/// path it sits at: the generic set on the bytes, then the kind's rule with the path.
+/// path it sits at: the generic set on the bytes, then the kind's rule with the path. A blob
+/// over the cap is never read; only the kind's `over_cap_rule` may refuse it, by path alone.
 fn content_pass(
     git: &Git,
     kind: Option<&'static dyn Kind>,
@@ -202,7 +204,20 @@ fn content_pass(
     for sha in names {
         match sizes.get(&sha) {
             Some(&n) if n <= generic::MAX_CONTENT_BYTES => kept.push(sha),
-            Some(_) => {}
+            Some(_) => {
+                for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
+                    let lossy = String::from_utf8_lossy(path);
+                    if let Some(finding) = kind
+                        .filter(|k| k.content_path(&lossy))
+                        .and_then(|k| k.over_cap_rule(&lossy))
+                    {
+                        hits.push((
+                            (*ri, 1, *ei),
+                            Rejection::new(updates[*ri].name(), path, finding),
+                        ));
+                    }
+                }
+            }
             None => {
                 return Err(ScanError::Git(GitCmdError::Output {
                     subcommand: "cat-file",

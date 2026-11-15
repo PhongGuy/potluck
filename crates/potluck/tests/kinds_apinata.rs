@@ -436,3 +436,13 @@ fn content_path_is_the_environment_file_glob() {
     assert!(!Apinata.content_path("sub/environments/dev.yml"));
     assert!(!Apinata.content_path("/"));
 }
+
+#[test]
+fn over_cap_rule_refuses_an_environment_file_the_hook_cannot_read() {
+    assert_eq!(
+        Apinata.over_cap_rule("environments/dev.yml"),
+        Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE))
+    );
+    assert_eq!(Apinata.over_cap_rule("notes/big.bin"), None);
+    assert_eq!(Apinata.over_cap_rule("environments/nested/dev.yml"), None);
+}

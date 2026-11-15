@@ -529,3 +529,28 @@ fn the_same_blob_and_path_pushed_under_two_refs_is_reported_once() {
         "two distinct commits, one (blob, path) pair: the first ref reports it"
     );
 }
+
+#[test]
+fn an_environment_file_over_the_cap_is_refused_as_unparsable_and_other_big_files_pass() {
+    let s = Scratch::new();
+    let big = vec![b'a'; 1024 * 1024 + 1];
+    s.write("environments/big.yml", &big);
+    s.write("notes/big.bin", &big);
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("big");
+    assert_eq!(
+        scan_main(&s, &env(Some("apinata")), &tip),
+        ["refs/heads/main environments/big.yml secret_value env_unparsable"],
+        "the same blob at notes/ is not the kind's and stays skipped"
+    );
+    assert!(
+        scan_main(&s, &env(None), &tip).is_empty(),
+        "the generic set never reads over-cap content"
+    );
+    assert!(
+        scan_main(&s, &HookEnv::new(Some("apinata"), true, None), &tip).contains(
+            &"refs/heads/main environments/big.yml secret_value env_unparsable".to_owned()
+        ),
+        "import mode scans the tip tree and finds it too"
+    );
+}

@@ -158,3 +158,49 @@ fn quadlet_generates_a_service_in_a_dry_run() {
         assert!(exec.contains(needle), "ExecStart lacks {needle:?}: {exec}");
     }
 }
+
+#[test]
+fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let headings: Vec<&str> = readme.lines().filter(|l| l.starts_with("## ")).collect();
+    assert_eq!(
+        headings,
+        [
+            "## Run it",
+            "## First admin",
+            "## Reverse proxy and TLS",
+            "## Updating",
+            "## Backups",
+            "## Verifying the image",
+            "## Bind mounts",
+            "## License",
+        ]
+    );
+    for needle in [
+        IMAGE,
+        "127.0.0.1:8080:8080",
+        "POTLUCK_PUBLIC_URL",
+        "reverse_proxy 127.0.0.1:8080",
+        "proxy_pass http://127.0.0.1:8080",
+        "client_max_body_size 110m",
+        "proxy_buffering off",
+        "gh attestation verify oci://ghcr.io/phongguy/potluck:",
+        "repository is public",
+        "podman unshare chown 65532:65532",
+        "THIRD_PARTY_NOTICES.md",
+        "login ghcr.io",
+        "POTLUCK_TRUSTED_PROXIES",
+    ] {
+        assert!(readme.contains(needle), "README lacks {needle:?}");
+    }
+    let notices = fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
+    for needle in [
+        "GPL-2.0",
+        "deb.debian.org/debian/pool/main/g/git/",
+        "apt-get source git",
+        "dpkg-query",
+        "MIT OR Apache-2.0",
+    ] {
+        assert!(notices.contains(needle), "notices lack {needle:?}");
+    }
+}

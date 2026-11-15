@@ -21,4 +21,11 @@ impl Role {
             Role::Admin => "admin",
         }
     }
+
+    /// `read`, `write` or `admin`; `None` for anything else.
+    pub fn parse(s: &str) -> Option<Role> {
+        [Role::Read, Role::Write, Role::Admin]
+            .into_iter()
+            .find(|role| role.as_str() == s)
+    }
 }

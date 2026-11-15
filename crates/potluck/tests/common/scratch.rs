@@ -164,6 +164,15 @@ impl Scratch {
         self.git(Some(&self.work), &["tag", "-a", "-m", name, name, target]);
         self.work_git(&["rev-parse", &format!("refs/tags/{name}")])
     }
+
+    /// An annotated tag `name` on `target` whose body is `message`.
+    pub fn tag_message(&self, name: &str, target: &str, message: &str) -> String {
+        self.git(
+            Some(&self.work),
+            &["tag", "-a", "-m", message, name, target],
+        );
+        self.work_git(&["rev-parse", &format!("refs/tags/{name}")])
+    }
 }
 
 /// Names from `staged_history`.

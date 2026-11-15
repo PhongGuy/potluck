@@ -1,4 +1,7 @@
 //! The check over one push, and the lines the client sees.
+//!
+//! Content over `MAX_CONTENT_BYTES`, blob or commit and tag message alike, is path-ruled but
+//! never content-scanned: the cap bounds the hook's cost per push.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -96,7 +99,11 @@ impl Rejection {
 /// whole (every entry a candidate); a blob target is one entry at path `/`. Blobs over
 /// `MAX_CONTENT_BYTES` skip content rules. Per ref the path-rule rejections come first, then
 /// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
-/// An unknown or unset kind means generic rules only.
+/// The generic content rules also run over the message of every new commit and every new
+/// annotated tag behind the ref (the pushed tag's chain included), each object once per push
+/// under the first ref that lists it, reported at path `/` after the ref's content hits; import
+/// mode scans no message. A commit or tag object over `MAX_CONTENT_BYTES` is skipped like a
+/// blob. An unknown or unset kind means generic rules only.
 pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejection>, ScanError> {
     if env.override_id().is_some() {
         return Ok(Vec::new());
@@ -107,12 +114,21 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
     let mut seen: Vec<Sha> = Vec::new();
+    // Message candidates in queue order; the map both finds a streamed object's (ref, index)
+    // and keeps each object to the first ref that lists it.
+    let mut messages: Vec<Sha> = Vec::new();
+    let mut message_slots: HashMap<Sha, (usize, usize)> = HashMap::new();
     for (ri, update) in updates.iter().enumerate() {
         if update.is_delete() {
             continue;
         }
         let (target, object) = git.peel(update.new())?;
-        let (entries, fresh) = match object {
+        let tags = if env.is_import() {
+            Vec::new()
+        } else {
+            git.new_tags(update.new(), &seen)?
+        };
+        let (entries, fresh, commits) = match object {
             ObjectType::Commit if !env.is_import() => {
                 // Commits shared with an earlier ref are listed once, under that ref; a blob
                 // counts as new under every ref, since the kind's content rule depends on path.
@@ -120,11 +136,17 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
                 let fresh = git.new_objects(&target, &[])?;
                 let entries = git.changed_entries(&commits)?;
                 seen.push(target);
-                (entries, Some(fresh))
+                (entries, Some(fresh), commits)
             }
-            ObjectType::Commit | ObjectType::Tree => (git.tree_entries(&target)?, None),
-            ObjectType::Blob => (vec![Entry::new(b"/".to_vec(), target)], None),
+            ObjectType::Commit | ObjectType::Tree => (git.tree_entries(&target)?, None, Vec::new()),
+            ObjectType::Blob => (vec![Entry::new(b"/".to_vec(), target)], None, Vec::new()),
         };
+        for sha in commits.into_iter().chain(tags) {
+            if !message_slots.contains_key(&sha) {
+                message_slots.insert(sha.clone(), (ri, messages.len()));
+                messages.push(sha);
+            }
+        }
         for (ei, entry) in entries.into_iter().enumerate() {
             let path = entry.path_lossy();
             let refused =
@@ -144,6 +166,16 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
         }
     }
     content_pass(git, kind, updates, candidates, &mut hits)?;
+    git.for_each_message(&messages, |sha, message| {
+        if let (Some(&(ri, mi)), Some(finding)) =
+            (message_slots.get(sha), generic::content_rule(message))
+        {
+            hits.push((
+                (ri, 2, mi),
+                Rejection::new(updates[ri].name(), b"/", finding),
+            ));
+        }
+    })?;
     hits.sort_by_key(|(key, _)| *key);
     Ok(hits.into_iter().map(|(_, r)| r).collect())
 }
@@ -207,8 +239,9 @@ pub const MAX_LINES: usize = 20;
 /// `potluck-reject-more <n>\n` when `n` remain. The path and the ref are percent-encoded:
 /// `%`, space, bytes below 0x20, 0x7f and every byte of an invalid UTF-8 sequence become
 /// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
-/// exactly five fields. A finding without a tree path (a tag whose target is a blob) carries
-/// the path `/`, which the encoding leaves as is and which no git tree path can start with.
+/// exactly five fields. A finding without a tree path (a commit or tag message, or a tag whose
+/// target is a blob) carries the path `/`, which the encoding leaves as is and which no git
+/// tree path can start with.
 pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result<()> {
     for r in rejections.iter().take(MAX_LINES) {
         writeln!(

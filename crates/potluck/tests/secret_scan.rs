@@ -311,3 +311,98 @@ fn a_candidate_blob_with_no_size_is_an_error() {
     let err = scan(&env(None), &[update(&tip, "refs/heads/main")], &git).unwrap_err();
     assert!(matches!(err, ScanError::Git(_)), "{err:?}");
 }
+
+/// Potluck's own token shape: `plk_` and 43 base64url characters (generic rule `potluck`).
+fn plk() -> String {
+    format!("plk_{}", "0".repeat(43))
+}
+
+#[test]
+fn a_token_in_a_commit_message_is_refused_at_slash_after_the_content_hits() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let clean = s.stage_commit("a clean message");
+    assert!(scan_main(&s, &env(Some("apinata")), &clean).is_empty());
+    s.write(".env", b"x\n");
+    let tip = s.stage_commit(&format!("token {}", plk()));
+    assert_eq!(
+        scan_main(&s, &env(None), &tip),
+        [
+            "refs/heads/main .env secret_env_file env_file",
+            "refs/heads/main / secret_pattern potluck",
+        ]
+    );
+    assert_eq!(
+        scan_main(&s, &HookEnv::new(None, true, None), &tip),
+        ["refs/heads/main .env secret_env_file env_file"],
+        "import mode scans the tip tree only, no message"
+    );
+}
+
+#[test]
+fn a_token_in_an_annotated_tag_message_is_refused_under_the_tag() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    s.commit("seed");
+    s.publish("main");
+    s.tag_message("v1", "main", &format!("release {}", plk()));
+    let tag = s.stage("refs/tags/v1");
+    let git = git_for(&s);
+    assert_eq!(
+        rows(&scan(&env(None), &[update(&tag, "refs/tags/v1")], &git).unwrap()),
+        ["refs/tags/v1 / secret_pattern potluck"],
+        "the tagged commit is old; the tag is what is new"
+    );
+    s.tag_message("v1-copy", "refs/tags/v1", "clean outer tag");
+    let outer = s.stage("refs/tags/v1-copy");
+    assert_eq!(
+        rows(
+            &scan(
+                &env(None),
+                &[
+                    update(&outer, "refs/tags/v1-copy"),
+                    update(&tag, "refs/tags/v1"),
+                ],
+                &git,
+            )
+            .unwrap()
+        ),
+        ["refs/tags/v1-copy / secret_pattern potluck"],
+        "a nested tag's inner message is scanned once, under the first ref that brings it"
+    );
+}
+
+#[test]
+fn a_tag_of_a_blob_reports_its_target_and_its_message_both_at_slash() {
+    let s = Scratch::new();
+    s.write("creds.txt", AWS);
+    s.commit("source");
+    let blob = s.blob("main", "creds.txt");
+    s.tag_message("leak", &blob, &format!("see {}", plk()));
+    let tag = s.stage("refs/tags/leak");
+    assert_eq!(
+        rows(&scan(&env(None), &[update(&tag, "refs/tags/leak")], &git_for(&s)).unwrap()),
+        [
+            "refs/tags/leak / secret_pattern aws",
+            "refs/tags/leak / secret_pattern potluck",
+        ],
+        "the content hit first, then the message"
+    );
+}
+
+#[test]
+fn a_message_over_the_cap_is_skipped_like_a_blob() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    s.commit("seed");
+    let big = s.dir.path().join("big-message");
+    let mut text = vec![b'a'; 1024 * 1024];
+    text.extend_from_slice(format!("\n{}\n", plk()).as_bytes());
+    std::fs::write(&big, &text).unwrap();
+    s.git(
+        Some(&s.work),
+        &["commit", "-q", "--allow-empty", "-F", big.to_str().unwrap()],
+    );
+    let tip = s.stage("main");
+    assert!(scan_main(&s, &env(None), &tip).is_empty());
+}

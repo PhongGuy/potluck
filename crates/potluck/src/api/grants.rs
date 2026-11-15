@@ -83,7 +83,10 @@ pub(super) async fn delete(
     for name in names {
         users.extend(state.db().user_by_username(&name).await?);
     }
-    events::reap_unreadable(&state, &users).await?;
+    // The grant is gone either way; a failed reap is logged rather than answered as 500.
+    if let Err(err) = events::reap_unreadable(&state, &users).await {
+        tracing::error!(id = ws.id(), error = ?err, "closing streams after a grant delete failed");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

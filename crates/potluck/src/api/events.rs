@@ -12,7 +12,7 @@ use futures_util::stream;
 use super::AppState;
 use super::auth::Authenticated;
 use super::error::ApiError;
-use super::workspaces::{WsPath, load, workspace_role};
+use super::workspaces::{WsPath, load};
 use crate::db::accounts::UserRecord;
 use crate::git::push::list_refs;
 use crate::slug::Slug;
@@ -23,7 +23,8 @@ use crate::slug::Slug;
 /// Order inside: `load` (401/404/403 as usual), `subscribe`, then the `list_refs` snapshot, then
 /// a re-check that drops the subscription and answers as `load` would when it fails: the token
 /// row still exists (`token_by_id`, else 401), its owner is not disabled (`user_by_username`,
-/// else 401), and `workspace_role` still grants read (else 404). Only then is the stream built.
+/// else 401), the workspace row still exists and the re-read owner is a server admin or holds a
+/// grant (else 404). Only then is the stream built.
 pub(super) async fn stream(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -51,14 +52,24 @@ pub(super) async fn stream(
     if state.db().token_by_id(user.token_id()).await?.is_none() {
         return Err(signed_out());
     }
-    let owner = state.db().user_by_username(user.user().username()).await?;
-    if owner.is_none_or(|owner| owner.disabled()) {
-        return Err(signed_out());
-    }
-    if workspace_role(state.db(), auth.actor(), &ws)
+    let Some(owner) = state
+        .db()
+        .user_by_username(user.user().username())
         .await?
-        .is_none()
-    {
+        .filter(|owner| !owner.disabled())
+    else {
+        return Err(signed_out());
+    };
+    // Admin-ness and the row come from the database now, not from the request-time actor, so
+    // a dropped flag or a deleted workspace that closed streams before `subscribe` still counts.
+    let still_there = state
+        .db()
+        .workspace_by_slugs(ws.team_slug(), ws.slug())
+        .await?
+        .is_some_and(|now| now.id() == ws.id());
+    let readable =
+        owner.server_admin() || state.db().role_for(ws.id(), owner.id()).await?.is_some();
+    if !(still_there && readable) {
         return Err(ApiError::not_found("no such workspace"));
     }
     let first: Vec<Result<Event, Infallible>> =

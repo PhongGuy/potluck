@@ -76,7 +76,10 @@ pub(super) async fn remove_member(
     if !state.db().remove_member(team.id(), user.id()).await? {
         return Err(ApiError::not_found("no such member"));
     }
-    events::reap_unreadable(&state, std::slice::from_ref(&user)).await?;
+    // The membership is gone either way; a failed reap is logged rather than answered as 500.
+    if let Err(err) = events::reap_unreadable(&state, std::slice::from_ref(&user)).await {
+        tracing::error!(user = user.id(), error = ?err, "closing streams after a member removal failed");
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

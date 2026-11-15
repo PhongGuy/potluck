@@ -189,8 +189,11 @@ pub(super) async fn patch(
         state.notices().close_user(user.id());
     }
     // The implicit admin role was never a grant row, so streams that relied on it close.
-    if body.server_admin == Some(false) {
-        events::reap_unreadable(&state, std::slice::from_ref(&user)).await?;
+    // The patch is committed either way; a failed reap is logged rather than answered as 500.
+    if body.server_admin == Some(false)
+        && let Err(err) = events::reap_unreadable(&state, std::slice::from_ref(&user)).await
+    {
+        tracing::error!(user = user.id(), error = ?err, "closing streams after an admin drop failed");
     }
     Ok(Json(UserJson::from(&user)))
 }

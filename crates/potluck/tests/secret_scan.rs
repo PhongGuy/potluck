@@ -204,7 +204,7 @@ fn a_ref_to_a_tree_or_a_blob_is_scanned_too() {
             )
             .unwrap()
         ),
-        ["refs/tags/blob-leak - secret_pattern aws"]
+        ["refs/tags/blob-leak / secret_pattern aws"]
     );
     assert_eq!(
         rows(

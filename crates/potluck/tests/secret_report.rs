@@ -115,7 +115,11 @@ fn report_percent_encodes_paths_and_ref_names() {
         text(&[odd_ref]),
         "potluck-reject secret_env_file refs/heads/a%0Ab .env env_file\n"
     );
-    assert_eq!(percent_encode(b"-"), "-");
+    assert_eq!(
+        percent_encode(b"/"),
+        "/",
+        "the no-path marker is written as is"
+    );
     for line in text(&[env_file(b"a b"), env_file(b"x\xffy")]).lines() {
         assert_eq!(line.split(' ').count(), 5, "{line}");
     }

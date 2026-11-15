@@ -77,7 +77,7 @@ impl Rejection {
         &self.ref_name
     }
 
-    /// The refused path, as git stores it.
+    /// The refused path, as git stores it; `/` for a finding that has no tree path.
     pub fn path(&self) -> &[u8] {
         &self.path
     }
@@ -93,7 +93,7 @@ impl Rejection {
 /// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
 /// kind) over every changed entry, and content rules over the entries whose blob is new to
 /// the repository; in import mode the tip tree replaces both lists. A tree target is scanned
-/// whole (every entry a candidate); a blob target is one entry at path `-`. Blobs over
+/// whole (every entry a candidate); a blob target is one entry at path `/`. Blobs over
 /// `MAX_CONTENT_BYTES` skip content rules. Per ref the path-rule rejections come first, then
 /// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
 /// An unknown or unset kind means generic rules only.
@@ -123,7 +123,7 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
                 (entries, Some(fresh))
             }
             ObjectType::Commit | ObjectType::Tree => (git.tree_entries(&target)?, None),
-            ObjectType::Blob => (vec![Entry::new(b"-".to_vec(), target)], None),
+            ObjectType::Blob => (vec![Entry::new(b"/".to_vec(), target)], None),
         };
         for (ei, entry) in entries.into_iter().enumerate() {
             let path = entry.path_lossy();
@@ -207,7 +207,8 @@ pub const MAX_LINES: usize = 20;
 /// `potluck-reject-more <n>\n` when `n` remain. The path and the ref are percent-encoded:
 /// `%`, space, bytes below 0x20, 0x7f and every byte of an invalid UTF-8 sequence become
 /// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
-/// exactly five fields.
+/// exactly five fields. A finding without a tree path (a tag whose target is a blob) carries
+/// the path `/`, which the encoding leaves as is and which no git tree path can start with.
 pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result<()> {
     for r in rejections.iter().take(MAX_LINES) {
         writeln!(

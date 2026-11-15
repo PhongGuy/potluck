@@ -123,7 +123,7 @@ pub enum ObjectType {
     Commit,
     /// A bare tree: scanned whole.
     Tree,
-    /// A bare blob: one entry at path `-`.
+    /// A bare blob: one entry at path `/`.
     Blob,
 }
 

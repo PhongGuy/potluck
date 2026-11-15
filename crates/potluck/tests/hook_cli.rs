@@ -175,7 +175,7 @@ fn import_mode_scans_the_tip_tree_only() {
 }
 
 #[test]
-fn a_ref_to_a_blob_is_scanned_and_reported_at_a_dash() {
+fn a_ref_to_a_blob_is_scanned_and_reported_at_a_slash() {
     let s = Scratch::new();
     s.write("creds.txt", AWS);
     s.commit("source");
@@ -185,6 +185,6 @@ fn a_ref_to_a_blob_is_scanned_and_reported_at_a_dash() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(
         stderr(&out),
-        "potluck-reject secret_pattern refs/tags/leak - aws\n"
+        "potluck-reject secret_pattern refs/tags/leak / aws\n"
     );
 }

@@ -47,6 +47,7 @@ mod serve;
 mod session;
 mod session_proxies;
 mod slug;
+mod teams;
 mod token;
 mod tokens;
 mod users;

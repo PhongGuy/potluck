@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 
 use crate::auth::password::Passwords;
 use crate::auth::rate_limit::SessionLimits;
@@ -21,6 +21,7 @@ pub mod json;
 pub mod objects;
 mod session;
 mod system;
+mod teams;
 mod tokens;
 mod users;
 
@@ -127,6 +128,11 @@ pub fn router(state: AppState) -> Router {
         .route("/server", get(system::server))
         .route("/session", post(session::create))
         .route("/me", get(tokens::me))
+        .route("/teams", get(teams::list).post(teams::create))
+        .route(
+            "/teams/{team}/members/{username}",
+            put(teams::add_member).delete(teams::remove_member),
+        )
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", delete(tokens::revoke))
         .route("/users", get(users::list).post(users::create))

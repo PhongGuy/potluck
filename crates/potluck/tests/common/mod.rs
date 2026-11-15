@@ -19,6 +19,8 @@ use potluck::git::access::{Access, BoxFuture, GitAccess};
 use potluck::git::{GitLimits, Repos};
 use potluck::role::Role;
 use potluck::slug::Slug;
+use reqwest::Method;
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The built `potluck` binary with an empty environment, so no `POTLUCK_*` variable or
@@ -129,6 +131,57 @@ pub async fn mint_token(
     .await
     .expect("create token");
     minted.secret().to_owned()
+}
+
+/// One request to an absolute URL: `token` as Bearer, `body` as JSON. Returns the status and the
+/// body (`Null` when empty).
+pub async fn call(
+    url: &str,
+    method: Method,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut req = client().request(method, url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.expect("request");
+    let status = r.status().as_u16();
+    let text = r.text().await.expect("body");
+    let value = if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).expect("json body")
+    };
+    (status, value)
+}
+
+/// The server admin `root` with a token.
+pub async fn api_admin(db: &Db) -> String {
+    let root = create_user(db, "root", "pw-123456", true).await;
+    mint_token(db, &root, "root", None).await
+}
+
+/// A plain user with a token.
+pub async fn api_user(db: &Db, name: &str) -> (UserRecord, String) {
+    let user = create_user(db, name, "pw-123456", false).await;
+    let token = mint_token(db, &user, "laptop", None).await;
+    (user, token)
+}
+
+/// `POST {api}/teams` as `token`; asserts 201. `api` is the `/api/v1` root, such as `app.url("")`.
+pub async fn api_team(api: &str, token: &str, slug: &str) {
+    let (status, body) = call(
+        &format!("{api}/teams"),
+        Method::POST,
+        Some(token),
+        Some(serde_json::json!({"slug": slug, "name": slug})),
+    )
+    .await;
+    assert_eq!(status, 201, "team {slug}: {body}");
 }
 
 /// One HTTP/1.1 GET over a Unix socket; returns the status code and the body.

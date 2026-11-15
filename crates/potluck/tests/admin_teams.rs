@@ -221,6 +221,17 @@ async fn a_team_or_member_that_is_not_one_path_segment_is_refused_before_any_req
             "team",
             "t?x=1",
         ),
+        // The kind filter goes into the query string, where `#`, `&` and `=` change it.
+        (
+            &["workspace", "list", "--kind", "apinata#x"],
+            "kind",
+            "apinata#x",
+        ),
+        (
+            &["workspace", "list", "--kind", "x&kind=apinata"],
+            "kind",
+            "x&kind=apinata",
+        ),
     ] {
         let err = admin(dir.path(), args, "").await.0.unwrap_err();
         assert!(

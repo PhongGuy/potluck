@@ -145,9 +145,10 @@ pub(crate) async fn run_workspace(
 ) -> Result<(), AdminError> {
     match cmd {
         WorkspaceCmd::List { kind } => {
-            // Kinds are slugs and the server filters without validating, so it goes verbatim.
+            // Kinds are slugs, so a checked one needs no encoding; `#`, `&` or `=` would
+            // otherwise change the filter the server sees.
             let target = match kind {
-                Some(kind) => format!("/api/v1/workspaces?kind={kind}"),
+                Some(kind) => format!("/api/v1/workspaces?kind={}", segment("kind", &kind)?),
                 None => "/api/v1/workspaces".to_owned(),
             };
             cx.call(Verb::Get, &target, None, &[200], |v| {

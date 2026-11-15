@@ -3,6 +3,7 @@ pub mod scratch;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -19,7 +20,10 @@ use potluck::db::accounts::{NewToken, NewUser, UserRecord};
 use potluck::git::access::{Access, BoxFuture, GitAccess};
 use potluck::git::{GitLimits, Repos};
 use potluck::role::Role;
+use potluck::server::{Running, start};
 use potluck::slug::Slug;
+use reqwest::Method;
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// The built `potluck` binary with an empty environment, so no `POTLUCK_*` variable or
@@ -130,6 +134,72 @@ pub async fn mint_token(
     .await
     .expect("create token");
     minted.secret().to_owned()
+}
+
+/// One request to an absolute URL: `token` as Bearer, `body` as JSON. Returns the status and the
+/// body (`Null` when empty).
+pub async fn call(
+    url: &str,
+    method: Method,
+    token: Option<&str>,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let mut req = client().request(method, url);
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    if let Some(b) = body {
+        req = req.json(&b);
+    }
+    let r = req.send().await.expect("request");
+    let status = r.status().as_u16();
+    let text = r.text().await.expect("body");
+    let value = if text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).expect("json body")
+    };
+    (status, value)
+}
+
+/// The server admin `root` with a token.
+pub async fn api_admin(db: &Db) -> String {
+    let root = create_user(db, "root", "pw-123456", true).await;
+    mint_token(db, &root, "root", None).await
+}
+
+/// A plain user with a token.
+pub async fn api_user(db: &Db, name: &str) -> (UserRecord, String) {
+    let user = create_user(db, name, "pw-123456", false).await;
+    let token = mint_token(db, &user, "laptop", None).await;
+    (user, token)
+}
+
+/// `POST {api}/teams` as `token`; asserts 201. `api` is the `/api/v1` root, such as `app.url("")`.
+pub async fn api_team(api: &str, token: &str, slug: &str) {
+    let (status, body) = call(
+        &format!("{api}/teams"),
+        Method::POST,
+        Some(token),
+        Some(serde_json::json!({"slug": slug, "name": slug})),
+    )
+    .await;
+    assert_eq!(status, 201, "team {slug}: {body}");
+}
+
+/// `POST {api}/teams/{team}/workspaces` for an apinata workspace on `main` as `token`; asserts
+/// 201 and returns the Workspace object.
+pub async fn api_workspace(api: &str, token: &str, team: &str, slug: &str, seed: bool) -> Value {
+    let body = serde_json::json!({"slug": slug, "name": slug, "kind": "apinata", "default_branch": "main", "seed": seed});
+    let (status, ws) = call(
+        &format!("{api}/teams/{team}/workspaces"),
+        Method::POST,
+        Some(token),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, 201, "workspace {team}/{slug}: {ws}");
+    ws
 }
 
 /// One HTTP/1.1 GET over a Unix socket; returns the status code and the body.
@@ -356,6 +426,58 @@ pub fn work_tree(home: &Path, name: &str) -> std::path::PathBuf {
     ok(git(home, Some(&work), None, &["add", "README"]));
     ok(git(home, Some(&work), None, &["commit", "-q", "-m", "one"]));
     work
+}
+
+/// `<data>/repos/{team}/{ws}.git`.
+pub fn repo_path(data: &Path, team: &str, ws: &str) -> std::path::PathBuf {
+    data.join("repos").join(team).join(format!("{ws}.git"))
+}
+
+/// `<dir>/pre-receive` as `#!/bin/sh` plus `body`, mode 0755, over whatever is there.
+pub fn write_hook(dir: &Path, body: &str) {
+    std::fs::create_dir_all(dir).expect("hooks dir");
+    let hook = dir.join("pre-receive");
+    std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write hook");
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
+}
+
+/// A server from `server::start` on a temp data dir: directories made, database migrated, TCP
+/// on an ephemeral loopback port, and an accepting `pre-receive` in place of the installed one.
+/// Dropping it stops the listeners with the runtime.
+pub struct FullServer {
+    pub dir: tempfile::TempDir,
+    pub running: Running,
+}
+
+impl FullServer {
+    pub fn db(&self) -> &Db {
+        self.running.db()
+    }
+
+    /// `http://127.0.0.1:<port>/api/v1{path}`.
+    pub fn api(&self, path: &str) -> String {
+        format!("http://{}/api/v1{path}", self.running.http_addr())
+    }
+
+    /// `http://127.0.0.1:<port>/git/{team}/{ws}.git`.
+    pub fn git_url(&self, team: &str, ws: &str) -> String {
+        format!("http://{}/git/{team}/{ws}.git", self.running.http_addr())
+    }
+
+    /// `<data>/hooks`.
+    pub fn hooks_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("hooks")
+    }
+}
+
+pub async fn full_server() -> FullServer {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let running = start(&config_for(dir.path())).await.expect("start");
+    let server = FullServer { dir, running };
+    // The installed hook execs the serving binary, which inside this test binary is not
+    // potluck; these tests are about roles, so an accepting stub stands in for the check.
+    write_hook(&server.hooks_dir(), "exit 0");
+    server
 }
 
 /// A served API over a migrated database with fast hashing; the dir and the task live as long as it.

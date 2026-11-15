@@ -1,8 +1,12 @@
-//! The contract's JSON objects: `User`, `Token`, `Identity`.
+//! The contract's JSON objects: `User`, `Token`, `Identity`, `Team`, `Workspace`, `Grant`.
 
 use serde::Serialize;
 
 use crate::db::accounts::{TokenRecord, UserRecord};
+use crate::db::grants::{GrantRecord, Subject};
+use crate::db::teams::TeamRecord;
+use crate::db::workspaces::WorkspaceRecord;
+use crate::role::Role;
 
 /// The `User` object: `{username, display_name, email|null, server_admin, disabled, created_at}`.
 /// The password hash is never part of it.
@@ -73,20 +77,114 @@ pub fn identity(user: &UserRecord, public_url: &str) -> IdentityJson {
     } else {
         display
     };
-    // The public URL is validated at startup; the fallback host only guards against a panic.
     let email = user.email().map_or_else(
         || {
-            let parsed = url::Url::parse(public_url).ok();
-            let host = parsed
-                .as_ref()
-                .and_then(url::Url::host_str)
-                .unwrap_or("localhost");
-            format!("{}@users.noreply.{host}", user.username())
+            format!(
+                "{}@users.noreply.{}",
+                user.username(),
+                noreply_host(public_url)
+            )
         },
         str::to_owned,
     );
     IdentityJson {
         name: name.to_owned(),
         email,
+    }
+}
+
+/// The host of `public_url` for `@users.noreply.{host}` addresses; `localhost` if it cannot be
+/// read.
+pub fn noreply_host(public_url: &str) -> String {
+    // The public URL is validated at startup; the fallback host only guards against a panic.
+    url::Url::parse(public_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// The `Team` object: `{slug, name, members: [username]}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct TeamJson {
+    slug: String,
+    name: String,
+    members: Vec<String>,
+}
+
+impl TeamJson {
+    /// `team` with its members' usernames, sorted as the database lists them.
+    pub fn new(team: &TeamRecord, members: Vec<String>) -> Self {
+        TeamJson {
+            slug: team.slug().to_owned(),
+            name: team.name().to_owned(),
+            members,
+        }
+    }
+}
+
+/// The `Workspace` object: `{team, slug, name, kind, default_branch, role, git_url, events_url}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct WorkspaceJson {
+    team: String,
+    slug: String,
+    name: String,
+    kind: String,
+    default_branch: String,
+    role: &'static str,
+    git_url: String,
+    events_url: String,
+}
+
+impl WorkspaceJson {
+    /// `git_url` is `{public_url}/git/{team}/{ws}.git` and `events_url` is
+    /// `{public_url}/api/v1/workspaces/{team}/{ws}/events`.
+    pub fn new(ws: &WorkspaceRecord, role: Role, public_url: &str) -> Self {
+        let (team, slug) = (ws.team_slug(), ws.slug());
+        WorkspaceJson {
+            team: team.to_owned(),
+            slug: slug.to_owned(),
+            name: ws.name().to_owned(),
+            kind: ws.kind().to_owned(),
+            default_branch: ws.default_branch().to_owned(),
+            role: role.as_str(),
+            git_url: format!("{public_url}/git/{team}/{slug}.git"),
+            events_url: format!("{public_url}/api/v1/workspaces/{team}/{slug}/events"),
+        }
+    }
+}
+
+/// A grant's subject: `{kind: "user"|"team", name}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct SubjectJson {
+    kind: &'static str,
+    name: String,
+}
+
+impl From<&Subject> for SubjectJson {
+    fn from(subject: &Subject) -> Self {
+        SubjectJson {
+            kind: subject.kind(),
+            name: subject.name().to_owned(),
+        }
+    }
+}
+
+/// The `Grant` object: `{subject: {kind, name}, role}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct GrantJson {
+    subject: SubjectJson,
+    role: &'static str,
+}
+
+impl From<&GrantRecord> for GrantJson {
+    fn from(grant: &GrantRecord) -> Self {
+        GrantJson {
+            subject: SubjectJson::from(grant.subject()),
+            role: grant.role().as_str(),
+        }
     }
 }

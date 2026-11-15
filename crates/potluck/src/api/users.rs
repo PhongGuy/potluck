@@ -12,6 +12,7 @@ use super::error::ApiError;
 use super::json::ApiJson;
 use super::objects::UserJson;
 use crate::db::accounts::{NewUser, UserPatch};
+use crate::slug::Slug;
 
 /// The `POST /users` body. No `Debug`, so the password cannot reach a log by formatting.
 #[derive(Deserialize)]
@@ -188,14 +189,7 @@ pub(super) async fn patch(
 
 /// `^[a-z0-9][a-z0-9-]{0,62}$` and not the reserved `system`.
 pub(super) fn check_username(s: &str) -> Result<(), ApiError> {
-    let bytes = s.as_bytes();
-    let valid = matches!(bytes.first(), Some(b) if b.is_ascii_lowercase() || b.is_ascii_digit())
-        && bytes.len() <= 63
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
-        && s != "system";
-    if valid {
+    if Slug::parse(s).is_ok() && s != "system" {
         Ok(())
     } else {
         Err(ApiError::invalid_value(

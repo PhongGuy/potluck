@@ -155,6 +155,11 @@ impl Running {
         &self.admin_socket
     }
 
+    /// The database handle the server runs on; tests seed rows through it.
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+
     /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file.
     pub async fn shutdown(self) {
         let _ = self.stop.send(true);

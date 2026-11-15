@@ -32,6 +32,7 @@ mod deploy_files;
 mod git_denials;
 mod git_http;
 mod git_requests;
+mod grants;
 mod health_check;
 mod hooks;
 mod kinds_apinata;

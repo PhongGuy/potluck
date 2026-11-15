@@ -17,6 +17,7 @@ pub mod auth;
 pub mod client_ip;
 pub mod credential;
 pub mod error;
+mod grants;
 pub mod json;
 pub mod objects;
 mod session;
@@ -141,7 +142,15 @@ pub fn router(state: AppState) -> Router {
         .route("/users/{username}", patch(users::patch))
         .route("/users/{username}/tokens", get(tokens::list_for_user))
         .route("/workspaces", get(workspaces::list))
-        .route("/workspaces/{team}/{ws}", get(workspaces::get));
+        .route(
+            "/workspaces/{team}/{ws}",
+            get(workspaces::get).delete(workspaces::delete),
+        )
+        .route("/workspaces/{team}/{ws}/grants", get(grants::list))
+        .route(
+            "/workspaces/{team}/{ws}/grants/{kind}/{name}",
+            put(grants::put).delete(grants::delete),
+        );
     // The method fallback is set after nesting so it reaches the nested routes too; a wrong
     // method is answered like an unknown path rather than with a bare 405.
     Router::new()

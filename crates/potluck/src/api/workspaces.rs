@@ -156,6 +156,41 @@ pub(super) async fn get(
     )))
 }
 
+/// `DELETE /workspaces/{team}/{ws}` (admin): in one spawned task the handler awaits, the row
+/// goes first (grants and overrides cascade), then the repository directory; 204. A directory
+/// already gone is fine; a removal failure is logged and 500, with the workspace already gone
+/// from the API.
+pub(super) async fn delete(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    path: WsPath,
+) -> Result<StatusCode, ApiError> {
+    let (ws, role) = load(&state, &auth, path).await?;
+    require(role, Role::Admin, "delete")?;
+    let (Ok(team_slug), Ok(slug)) = (Slug::parse(ws.team_slug()), Slug::parse(ws.slug())) else {
+        tracing::error!(id = ws.id(), "a stored workspace slug does not parse");
+        return Err(ApiError::internal("workspace could not be deleted"));
+    };
+    let repos = state.git().repos().clone();
+    let db = state.db().clone();
+    // Row first, so a git request never meets a live workspace without its repository; the
+    // spawned task finishes both steps even when axum drops this future on a disconnect.
+    let task = tokio::spawn(async move {
+        if !db.delete_workspace(ws.id()).await? {
+            return Err(ApiError::not_found("no such workspace"));
+        }
+        if let Err(err) = repos.remove(&team_slug, &slug).await {
+            tracing::error!(error = %err, "removing a deleted workspace's repository failed");
+            return Err(ApiError::internal("repository could not be removed"));
+        }
+        Ok(StatusCode::NO_CONTENT)
+    });
+    task.await.map_err(|err| {
+        tracing::error!(error = %err, "workspace deletion task failed");
+        ApiError::internal("workspace deletion failed")
+    })?
+}
+
 /// The one place a role is decided: `System` and a `server_admin` user are `Admin` on every
 /// workspace; any other user is the highest grant (`Db::role_for`), `None` without one;
 /// `Anonymous` is `None`. A disabled user never gets here (`authenticate` refuses the token).

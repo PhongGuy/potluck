@@ -184,6 +184,9 @@ pub(super) async fn patch(
     let Some(user) = state.db().update_user(&username, patch).await? else {
         return Err(ApiError::not_found("no such user"));
     };
+    if body.disabled == Some(true) {
+        state.notices().close_user(user.id());
+    }
     Ok(Json(UserJson::from(&user)))
 }
 

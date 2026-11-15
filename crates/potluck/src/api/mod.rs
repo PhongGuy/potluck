@@ -18,6 +18,7 @@ pub mod auth;
 pub mod client_ip;
 pub mod credential;
 pub mod error;
+mod events;
 mod grants;
 pub mod json;
 pub mod objects;
@@ -157,6 +158,7 @@ pub fn router(state: AppState) -> Router {
             "/workspaces/{team}/{ws}",
             get(workspaces::get).delete(workspaces::delete),
         )
+        .route("/workspaces/{team}/{ws}/events", get(events::stream))
         .route("/workspaces/{team}/{ws}/grants", get(grants::list))
         .route(
             "/workspaces/{team}/{ws}/grants/{kind}/{name}",

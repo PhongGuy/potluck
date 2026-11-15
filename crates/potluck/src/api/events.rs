@@ -1,0 +1,101 @@
+//! `GET W/events`: the SSE stream of ref moves on one workspace.
+
+use std::convert::Infallible;
+use std::time::Duration;
+
+use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use futures_util::StreamExt;
+use futures_util::stream;
+
+use super::AppState;
+use super::auth::Authenticated;
+use super::error::ApiError;
+use super::workspaces::{WsPath, load, workspace_role};
+use crate::git::push::list_refs;
+use crate::slug::Slug;
+
+/// `GET /workspaces/{team}/{ws}/events` (read; a user, so `System` is 403): `retry: 2000`, then
+/// one `ref` event per branch as the repository stands, then one per moved ref as pushes land,
+/// with the keep-alive comment every 15 s. Ends when the server closes it or the client lags.
+/// Order inside: `load` (401/404/403 as usual), `subscribe`, then the `list_refs` snapshot, then
+/// a re-check that drops the subscription and answers as `load` would when it fails: the token
+/// row still exists (`token_by_id`, else 401), its owner is not disabled (`user_by_username`,
+/// else 401), and `workspace_role` still grants read (else 404). Only then is the stream built.
+pub(super) async fn stream(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    path: WsPath,
+) -> Result<Response, ApiError> {
+    let (ws, _role) = load(&state, &auth, path).await?;
+    let user = auth.require_user()?;
+    let (Ok(team_slug), Ok(slug)) = (Slug::parse(ws.team_slug()), Slug::parse(ws.slug())) else {
+        tracing::error!(id = ws.id(), "a stored workspace slug does not parse");
+        return Err(ApiError::internal("events could not be opened"));
+    };
+    // Subscribe before the snapshot so a push landing in between still arrives live.
+    let subscription = state
+        .notices()
+        .subscribe(ws.id(), user.user().id(), user.token_id());
+    let repos = state.git().repos();
+    let refs = list_refs(repos.git(), &repos.path(&team_slug, &slug))
+        .await
+        .map_err(|err| {
+            tracing::error!(id = ws.id(), error = %err, "listing a workspace's refs failed");
+            ApiError::internal("events could not be opened")
+        })?;
+    // A close that ran before `subscribe` missed this stream, so the access is checked again.
+    let signed_out = || ApiError::unauthenticated("invalid or expired token");
+    if state.db().token_by_id(user.token_id()).await?.is_none() {
+        return Err(signed_out());
+    }
+    let owner = state.db().user_by_username(user.user().username()).await?;
+    if owner.is_none_or(|owner| owner.disabled()) {
+        return Err(signed_out());
+    }
+    if workspace_role(state.db(), auth.actor(), &ws)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found("no such workspace"));
+    }
+    let first: Vec<Result<Event, Infallible>> =
+        std::iter::once(Event::default().retry(Duration::from_secs(2)))
+            .chain(
+                refs.iter()
+                    .filter(|(name, _)| name.starts_with("refs/heads/"))
+                    .map(|(name, sha)| ref_event(name, sha)),
+            )
+            .map(Ok)
+            .collect();
+    // The subscription lives in the unfold state, so a client hanging up unregisters it.
+    let live = stream::unfold(subscription, |mut sub| async move {
+        sub.next()
+            .await
+            .map(|m| (Ok(ref_event(m.ref_name(), m.new_sha())), sub))
+    });
+    Ok(Sse::new(stream::iter(first).chain(live))
+        .keep_alive(keep_alive())
+        .into_response())
+}
+
+/// `event: ref` with `data: {"ref": <ref>, "sha": <sha>}`.
+fn ref_event(ref_name: &str, sha: &str) -> Event {
+    let data = serde_json::json!({"ref": ref_name, "sha": sha});
+    Event::default().event("ref").data(data.to_string())
+}
+
+/// The stream's keep-alive: a comment every 15 s (measurement 1).
+pub(crate) fn keep_alive() -> KeepAlive {
+    KeepAlive::new().interval(Duration::from_secs(15))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_keep_alive_is_every_15_seconds() {
+        let rendered = format!("{:?}", super::keep_alive());
+        assert!(rendered.contains("max_interval: 15s"), "{rendered}");
+    }
+}

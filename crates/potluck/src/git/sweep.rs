@@ -337,10 +337,13 @@ mod tests {
         let leaving = tokio::time::timeout(Duration::from_millis(300), killed.leave(true)).await;
         assert!(leaving.is_err(), "the sweep is stalled on the FIFO");
         let entered = tokio::time::timeout(Duration::from_millis(300), writers.enter(&repo)).await;
-        // Unstall the sweep before asserting: the runtime's shutdown waits for blocking tasks.
-        // A write-only open waits for the sweep's reader, so the bytes cannot be lost.
+        // Unstall the sweep before any assertion: the runtime's shutdown waits for blocking tasks,
+        // and a panic would drop the tempdir under the FIFO. The write-only open meets the reader.
         let fifo = keep.clone();
-        std::thread::spawn(move || std::fs::write(fifo, b"receive-pack 1 on host\n"));
+        std::thread::spawn(move || std::fs::write(fifo, b"receive-pack 1 on host\n"))
+            .join()
+            .unwrap()
+            .unwrap();
         assert!(
             entered.is_err(),
             "enter waits while the dropped leave's sweep still runs"

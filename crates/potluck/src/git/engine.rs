@@ -250,13 +250,13 @@ impl GitEngine {
         // The refs before git starts are the baseline the reaper diffs against; nobody listening
         // means no extra git process.
         let watch = match on_push {
-            Some(on_push) => match list_refs(self.repos.git(), repo).await {
+            Some(on_push) => match list_refs(&self.repos, repo).await {
                 Ok(refs) => Some((on_push, refs)),
                 Err(err) => return Err(released(writer, err).await),
             },
             None => None,
         };
-        let git = self.repos.git().to_path_buf();
+        let repos = self.repos.clone();
         let repo_path = repo.to_path_buf();
         let spawned = self
             .command(service, v2, extra_env)
@@ -331,7 +331,7 @@ impl GitEngine {
             // Whatever the exit status, the refs are the ground truth: a client that hangs up
             // mid-report kills git with SIGPIPE after the refs already moved.
             if let Some((on_push, before)) = watch {
-                match list_refs(&git, &repo_path).await {
+                match list_refs(&repos, &repo_path).await {
                     Ok(after) => on_push(moved(&commands, &before, &after)),
                     Err(err) => tracing::error!(error = %err, "cannot list refs after a push"),
                 }
@@ -611,7 +611,7 @@ pub enum GitError {
     /// git ran past `max_runtime` and its process group was killed: 500 `internal`, logged.
     #[error("git {service} ran past its {limit:?} run limit and was killed")]
     Overran {
-        /// `Service::name()` of the killed child.
+        /// `Service::name()` of the killed child, or `git-for-each-ref` for a ref listing.
         service: &'static str,
         /// The limit it ran past.
         limit: Duration,
@@ -1206,7 +1206,7 @@ mod tests {
                 vec![RefMove::new("refs/heads/main", ZERO_SHA, &tip)],
                 "kill={kill}"
             );
-            let refs = list_refs(engine.repos.git(), &repo).await.unwrap();
+            let refs = list_refs(&engine.repos, &repo).await.unwrap();
             assert_eq!(
                 refs.get("refs/heads/main"),
                 Some(&tip),
@@ -1593,7 +1593,7 @@ mod tests {
             .expect("the observer is called after a kill")
             .expect("not dropped");
         assert!(moves.is_empty(), "the hook never accepted: {moves:?}");
-        let refs = list_refs(engine.repos.git(), &repo).await.unwrap();
+        let refs = list_refs(&engine.repos, &repo).await.unwrap();
         assert!(!refs.contains_key("refs/heads/main"), "nothing was pushed");
     }
 

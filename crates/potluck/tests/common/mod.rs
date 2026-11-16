@@ -763,8 +763,8 @@ pub async fn session(addr: SocketAddr, username: &str, password: &str) -> Result
     Ok(body["token_meta"]["id"].as_i64().expect("token id"))
 }
 
-/// A git wrapper at `<dir>/hanging-git` that hangs on the first call with an argument exactly
-/// `step` (such as `init` or `hash-object`) and otherwise runs the real git from `PATH`.
+/// A git wrapper at `<dir>/hanging-git` that hangs on every call with an argument exactly `step`
+/// (such as `init` or `hash-object`), from the first on, and otherwise runs the real git from `PATH`.
 pub fn hanging_git(dir: &Path, step: &str) -> std::path::PathBuf {
     hanging_git_on_call(dir, step, 1)
 }

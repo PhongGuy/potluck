@@ -4,11 +4,11 @@
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
-use std::process::Stdio;
 
 use tokio::process::Command;
 
 use crate::git::engine::GitError;
+use crate::git::repos::{RepoError, Repos};
 
 /// Forty zeros: how a command spells "no object" for a created or deleted ref.
 pub const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
@@ -173,11 +173,12 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `git for-each-ref --format=%(objectname) %(refname)` over `repo` with `git`, as a map from
-/// ref name to sha; a non-zero exit is `GitError::Failed`.
-pub async fn list_refs(git: &Path, repo: &Path) -> Result<BTreeMap<String, String>, GitError> {
+/// `git for-each-ref --format=%(objectname) %(refname)` over `repo` with `repos`' git, as a map
+/// from ref name to sha. A non-zero exit is `GitError::Failed`; a git still running at `repos`'
+/// run limit has its process group killed and is `GitError::Overran`.
+pub async fn list_refs(repos: &Repos, repo: &Path) -> Result<BTreeMap<String, String>, GitError> {
     // A clean environment, as `Repos::init` uses, so no user git config shapes the listing.
-    let mut command = Command::new(git);
+    let mut command = Command::new(repos.git());
     command
         .env_clear()
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -185,12 +186,21 @@ pub async fn list_refs(git: &Path, repo: &Path) -> Result<BTreeMap<String, Strin
         .arg("--git-dir")
         .arg(repo)
         .arg("for-each-ref")
-        .arg("--format=%(objectname) %(refname)")
-        .stdin(Stdio::null());
+        .arg("--format=%(objectname) %(refname)");
     if let Some(search) = std::env::var_os("PATH") {
         command.env("PATH", search);
     }
-    let output = command.output().await.map_err(GitError::Spawn)?;
+    let output = repos
+        .run(command, repo, "for-each-ref", &[])
+        .await
+        .map_err(|err| match err {
+            RepoError::Overran { limit, .. } => GitError::Overran {
+                service: "git-for-each-ref",
+                limit,
+            },
+            RepoError::Io { source, .. } => GitError::Spawn(source),
+            other => GitError::Spawn(std::io::Error::other(other.to_string())),
+        })?;
     if !output.status.success() {
         return Err(GitError::Failed {
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),

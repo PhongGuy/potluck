@@ -239,12 +239,11 @@ async fn a_missing_hook_file_fails_the_push_with_500() {
         "nothing landed unchecked"
     );
     ok(git(&home, Some(&home), Some(TOKEN), &["ls-remote", &url]));
-    potluck::hooks::install(
-        hook.parent().unwrap(),
-        Path::new(env!("CARGO_BIN_EXE_potluck")),
-        Path::new("git"),
-    )
-    .unwrap();
+    crate::common::write_script(
+        &hook,
+        &potluck::hooks::script(Path::new(env!("CARGO_BIN_EXE_potluck")), Path::new("git"))
+            .unwrap(),
+    );
     ok(git(
         &home,
         Some(&work),

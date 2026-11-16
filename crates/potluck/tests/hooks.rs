@@ -103,9 +103,52 @@ async fn writer_server(limits: Option<GitLimits>) -> GitServer {
 
 fn write_hook(dir: &std::path::Path, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
-    let hook = dir.join("pre-receive");
-    std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::write_script(&dir.join("pre-receive"), &format!("#!/bin/sh\n{body}\n"));
+}
+
+#[test]
+fn a_written_script_execs_while_other_threads_fork() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let forkers: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        })
+        .collect();
+    let runs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (0..200)
+            .map(|i| {
+                let path = dir.path().join(format!("script-{i}"));
+                crate::common::write_script(&path, "#!/bin/sh\nexit 0\n");
+                std::process::Command::new(&path).status()
+            })
+            .collect::<Vec<std::io::Result<std::process::ExitStatus>>>()
+    }));
+    // Results are collected before asserting, and a panic while writing is held until the
+    // forkers are stopped and joined, so no failure leaves them running.
+    stop.store(true, Ordering::Relaxed);
+    for forker in forkers {
+        forker.join().unwrap();
+    }
+    let runs = runs.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    let busy = runs
+        .iter()
+        .filter(|run| {
+            run.as_ref()
+                .is_err_and(|err| err.kind() == std::io::ErrorKind::ExecutableFileBusy)
+        })
+        .count();
+    assert_eq!(busy, 0, "runs failed with ETXTBSY");
+    for run in runs {
+        assert!(run.unwrap().success());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

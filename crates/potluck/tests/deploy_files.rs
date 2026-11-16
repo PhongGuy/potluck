@@ -4,7 +4,6 @@
 //! container or touches user config.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -228,13 +227,11 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
 /// An engine stub that logs each call's arguments and claims the image has a HEALTHCHECK.
 fn stub_engine(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("engine");
-    fs::write(
+    crate::common::write_script(
         &path,
         "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$(dirname \"$0\")/calls\"\n\
          if [[ $1 == image ]]; then echo '[CMD potluck health-check]'; fi\n",
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 

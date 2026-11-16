@@ -3,7 +3,7 @@
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::common::{TestApp, api_admin, api_team, api_user, client, test_app};
+use crate::common::{TestApp, api_admin, api_team, api_user, client, create_user, test_app};
 
 /// One request whose body comes back as raw text, so a test can pin it byte for byte.
 async fn raw(
@@ -116,4 +116,67 @@ async fn two_hundred_characters_of_any_width_are_a_valid_name() {
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v[field], wide.as_str(), "{path} stores the trimmed value");
     }
+}
+
+#[tokio::test]
+async fn token_names_out_of_range_answer_the_same_422_bytes() {
+    let app = test_app().await;
+    let (_, bob) = api_user(&app.db, "bob").await;
+    for bad in ["   ".to_owned(), "t".repeat(101)] {
+        let (status, text) = raw(
+            &app,
+            Method::POST,
+            "/tokens",
+            Some(&bob),
+            json!({"name": bad}),
+        )
+        .await;
+        assert_eq!(
+            (status, text.as_str()),
+            (422, refusal("name", 100).as_str())
+        );
+        let (status, text) = raw(
+            &app,
+            Method::POST,
+            "/session",
+            None,
+            json!({"username": "bob", "password": "pw-123456", "token_name": bad}),
+        )
+        .await;
+        assert_eq!(
+            (status, text.as_str()),
+            (422, refusal("token_name", 100).as_str())
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_hundred_characters_of_any_width_are_a_valid_token_name() {
+    let app = test_app().await;
+    create_user(&app.db, "carol", "pw-123456", false).await;
+    let (_, bob) = api_user(&app.db, "bob").await;
+    let wide = "\u{e9}".repeat(100);
+    let padded = format!("  {wide}  ");
+    let (status, text) = raw(
+        &app,
+        Method::POST,
+        "/tokens",
+        Some(&bob),
+        json!({"name": padded}),
+    )
+    .await;
+    assert_eq!(status, 201, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["token_meta"]["name"], wide.as_str());
+    let (status, text) = raw(
+        &app,
+        Method::POST,
+        "/session",
+        None,
+        json!({"username": "carol", "password": "pw-123456", "token_name": padded}),
+    )
+    .await;
+    assert_eq!(status, 201, "{text}");
+    let v: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["token_meta"]["name"], wide.as_str());
 }

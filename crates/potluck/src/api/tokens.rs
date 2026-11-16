@@ -10,10 +10,10 @@ use super::auth::Authenticated;
 use super::error::ApiError;
 use super::json::ApiJson;
 use super::objects::{IdentityJson, TokenJson, UserJson, WorkspaceJson, identity};
-use super::workspaces;
+use super::{validate, workspaces};
 use crate::auth::token::MintedToken;
 use crate::clock::{normalize_rfc3339, now_rfc3339};
-use crate::db::accounts::NewToken;
+use crate::db::accounts::{NewToken, TokenRecord};
 
 /// The signed-in user, their commit identity and the workspaces they can reach.
 #[derive(Serialize)]
@@ -68,13 +68,7 @@ pub(super) async fn create(
     ApiJson(body): ApiJson<CreateToken>,
 ) -> Result<(StatusCode, Json<CreatedToken>), ApiError> {
     let user_id = auth.require_user()?.user().id();
-    let name = body.name.trim();
-    if name.is_empty() || name.chars().count() > 100 {
-        return Err(ApiError::invalid_value(
-            "name",
-            "name must be 1 to 100 characters",
-        ));
-    }
+    let name = validate::token_name("name", &body.name)?;
     // Normalised stamps compare chronologically as strings, so "after now" is a string compare.
     let expires_at = match body.expires_at.as_deref() {
         None => None,
@@ -88,6 +82,24 @@ pub(super) async fn create(
             }
         },
     };
+    let (token, record) = mint_and_create(&state, user_id, name, expires_at.as_deref()).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CreatedToken {
+            token,
+            token_meta: TokenJson::from(&record),
+        }),
+    ))
+}
+
+/// Mints a token for `user_id` named `name` with `expires_at`, stores its digest, and returns
+/// the secret (shown once) with the stored row; 500 "could not mint a token" if minting fails.
+pub(super) async fn mint_and_create(
+    state: &AppState,
+    user_id: i64,
+    name: &str,
+    expires_at: Option<&str>,
+) -> Result<(String, TokenRecord), ApiError> {
     let minted = MintedToken::mint().map_err(|_| ApiError::internal("could not mint a token"))?;
     let record = state
         .db()
@@ -96,16 +108,10 @@ pub(super) async fn create(
             name,
             minted.prefix(),
             *minted.digest(),
-            expires_at.as_deref(),
+            expires_at,
         ))
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CreatedToken {
-            token: minted.secret().to_owned(),
-            token_meta: TokenJson::from(&record),
-        }),
-    ))
+    Ok((minted.secret().to_owned(), record))
 }
 
 /// `DELETE /tokens/{id}`: 204 for the caller's own token, or any token for a server admin or

@@ -3,7 +3,7 @@
 //! Content over `MAX_CONTENT_BYTES`, blob or commit and tag message alike, is path-ruled but
 //! never content-scanned: the cap bounds the hook's cost per push.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Write;
 
 use crate::kinds::{self, Finding, Kind, generic};
@@ -146,8 +146,8 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
             ObjectType::Blob => (vec![Entry::new(b"/".to_vec(), target)], None, Vec::new()),
         };
         for sha in commits.into_iter().chain(tags) {
-            if !message_slots.contains_key(&sha) {
-                message_slots.insert(sha.clone(), (ri, messages.len()));
+            if let hash_map::Entry::Vacant(slot) = message_slots.entry(sha.clone()) {
+                slot.insert((ri, messages.len()));
                 messages.push(sha);
             }
         }

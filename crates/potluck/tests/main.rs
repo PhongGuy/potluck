@@ -49,6 +49,7 @@ mod hook_push;
 mod hooks;
 mod kinds_apinata;
 mod kinds_generic;
+mod logs;
 mod measurements;
 mod notices;
 mod objects;

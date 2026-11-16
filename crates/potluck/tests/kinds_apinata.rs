@@ -560,3 +560,33 @@ fn a_key_alias_fan_out_is_walked_to_its_last_key_under_the_real_cap() {
     // 2,010,013 nodes: refused by the cap before any walk.
     assert_eq!(environment_rule(&key_fan_out(501), NODE_CAP), unparsable());
 }
+
+#[test]
+fn a_merge_inside_a_mapping_key_is_unparsable() {
+    // yaml_serde's apply_merge folds values only, so a `<<` inside a key is a merge it
+    // cannot apply, valued or not.
+    for (name, bytes) in [
+        (
+            "merge brings the value into a key",
+            b"a: &a {value: x}\nv: {? {<<: *a, secret: true} : 1}\n" as &[u8],
+        ),
+        (
+            "benign merge in a key",
+            b"a: &a {name: n}\nv: {? {<<: *a} : 1}\n" as &[u8],
+        ),
+        (
+            "merge in a key of a key",
+            b"a: &a {name: n}\n? {? {<<: *a} : 1}\n: 1\n" as &[u8],
+        ),
+        (
+            "merge in a key under a tag",
+            b"a: &a {name: n}\nv: !t {? [{<<: *a}] : 1}\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            unparsable(),
+            "{name}"
+        );
+    }
+}

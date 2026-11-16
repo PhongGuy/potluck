@@ -164,7 +164,7 @@ fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 /// `PartialEq` on a digest compares it byte by byte with an early exit, so no struct in `src/`
-/// with a `digest` field may derive it.
+/// with a digest-like field may derive it.
 #[test]
 fn no_struct_with_a_digest_field_derives_partial_eq() {
     let mut files = Vec::new();
@@ -174,56 +174,21 @@ fn no_struct_with_a_digest_field_derives_partial_eq() {
     );
     let (mut seen, mut offenders) = (Vec::new(), Vec::new());
     for file in &files {
-        let text = std::fs::read_to_string(file).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        for (i, line) in lines.iter().enumerate() {
-            // A braced struct: its name, then its body up to the first closing-brace line.
-            let decl = line.trim_start();
-            let Some(rest) = ["pub struct ", "pub(crate) struct ", "struct "]
-                .iter()
-                .find_map(|p| decl.strip_prefix(p))
-            else {
-                continue;
-            };
-            if !decl.ends_with('{') {
-                continue;
-            }
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect();
-            let has_digest = lines[i + 1..]
-                .iter()
-                .take_while(|l| l.trim() != "}")
-                .any(|l| {
-                    let f = l.trim_start();
-                    let f = f
-                        .strip_prefix("pub(crate) ")
-                        .or(f.strip_prefix("pub "))
-                        .unwrap_or(f);
-                    f.starts_with("digest:")
-                });
-            if !has_digest {
-                continue;
-            }
-            seen.push(name.clone());
-            // The attributes and doc lines directly above the struct, minus the comments.
-            let attrs: String = lines[..i]
-                .iter()
-                .rev()
-                .take_while(|l| {
-                    let t = l.trim();
-                    !t.is_empty() && !t.ends_with('}') && !t.ends_with(';')
-                })
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .copied()
-                .collect();
-            if attrs.contains("PartialEq") {
-                offenders.push(format!("{name} in {}", file.display()));
-            }
-        }
+        let (s, o) = scan_source(&std::fs::read_to_string(file).unwrap());
+        seen.extend(s);
+        offenders.extend(
+            o.into_iter()
+                .map(|name| format!("{name} in {}", file.display())),
+        );
     }
-    for expected in ["NewToken", "TokenCandidate", "MintedToken"] {
+    for expected in [
+        "NewToken",
+        "TokenCandidate",
+        "MintedToken",
+        "NewUser",
+        "UserRecord",
+        "UserPatch",
+    ] {
         assert!(
             seen.iter().any(|s| s == expected),
             "the scan missed {expected}: {seen:?}"
@@ -233,4 +198,106 @@ fn no_struct_with_a_digest_field_derives_partial_eq() {
         offenders.is_empty(),
         "digest-bearing structs derive PartialEq: {offenders:?}"
     );
+}
+
+/// `decl` without a leading `pub`, `pub(crate)`, `pub(super)` or `pub(in path)` and its space.
+fn without_visibility(decl: &str) -> &str {
+    let Some(rest) = decl.strip_prefix("pub") else {
+        return decl;
+    };
+    let rest = match rest.strip_prefix('(') {
+        Some(inner) => match inner.find(')') {
+            Some(end) => &inner[end + 1..],
+            None => return decl,
+        },
+        None => rest,
+    };
+    rest.strip_prefix(' ').unwrap_or(decl)
+}
+
+/// A field line whose name holds a `digest` or `hash` word: `digest`, `token_digest`,
+/// `pub(super) hash`, `password_hash`.
+fn is_digest_field(line: &str) -> bool {
+    let Some((name, _)) = without_visibility(line.trim_start()).split_once(':') else {
+        return false;
+    };
+    let name = name.trim();
+    name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && name
+            .split('_')
+            .any(|word| word == "digest" || word == "hash")
+}
+
+/// The braced structs in `text` that hold a digest-like field, and of those the ones whose
+/// attributes derive `PartialEq`, both by name.
+fn scan_source(text: &str) -> (Vec<String>, Vec<String>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let (mut seen, mut offenders) = (Vec::new(), Vec::new());
+    for (i, line) in lines.iter().enumerate() {
+        // A struct under any visibility. Its body opens on the first header line ending in `{`,
+        // which a `where` clause pushes down; `;` or `}` first means a tuple, unit or empty struct.
+        let Some(rest) = without_visibility(line.trim_start()).strip_prefix("struct ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        let Some(open) = lines[i..]
+            .iter()
+            .map(|l| l.trim_end())
+            .position(|l| l.ends_with('{') || l.ends_with(';') || l.ends_with('}'))
+            .map(|n| i + n)
+            .filter(|&n| lines[n].trim_end().ends_with('{'))
+        else {
+            continue;
+        };
+        let has_digest = lines[open + 1..]
+            .iter()
+            .take_while(|l| l.trim() != "}")
+            .any(|l| is_digest_field(l));
+        if !has_digest {
+            continue;
+        }
+        seen.push(name.clone());
+        // The attributes and doc lines directly above the struct, minus the comments.
+        let attrs: String = lines[..i]
+            .iter()
+            .rev()
+            .take_while(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.ends_with('}') && !t.ends_with(';')
+            })
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .copied()
+            .collect();
+        if attrs.contains("PartialEq") {
+            offenders.push(name);
+        }
+    }
+    (seen, offenders)
+}
+
+#[test]
+fn the_digest_scan_reads_restricted_visibility() {
+    let text = "#[derive(Clone, PartialEq)]\npub(super) struct Hidden {\n    digest: [u8; 32],\n}\n\n#[derive(PartialEq)]\npub(in crate::db) struct Scoped {\n    digest: [u8; 32],\n}\n";
+    assert_eq!(scan_source(text).1, ["Hidden", "Scoped"]);
+}
+
+#[test]
+fn the_digest_scan_reads_a_where_clause_on_its_own_lines() {
+    let text = "#[derive(PartialEq)]\npub struct Generic<T>\nwhere\n    T: Copy,\n{\n    pub digest: T,\n}\n";
+    assert_eq!(scan_source(text).1, ["Generic"]);
+}
+
+#[test]
+fn the_digest_scan_reads_other_digest_field_names() {
+    let text = "#[derive(PartialEq)]\nstruct Named {\n    token_digest: [u8; 32],\n}\n\n#[derive(PartialEq)]\nstruct Hashed {\n    pub(super) hash: String,\n}\n";
+    assert_eq!(scan_source(text).1, ["Named", "Hashed"]);
+}
+
+#[test]
+fn the_digest_scan_skips_lookalike_fields_and_structs_without_partial_eq() {
+    let text = "#[derive(PartialEq)]\nstruct Counts {\n    hashes_seen: u32,\n    digestible: bool,\n}\n\n#[derive(Clone)]\nstruct Plain {\n    digest: [u8; 32],\n}\n\n#[derive(PartialEq)]\nstruct Tuple([u8; 32]);\n";
+    assert_eq!(scan_source(text), (vec!["Plain".to_owned()], Vec::new()));
 }

@@ -22,7 +22,7 @@ LABEL org.opencontainers.image.title="potluck" \
 
 # git serves the workspaces; the potluck user owns /data, which a new named volume inherits.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates tini \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 65532 potluck \
     && useradd --system --uid 65532 --gid 65532 --home-dir /data --no-create-home \
@@ -40,5 +40,7 @@ USER 65532:65532
 WORKDIR /data
 # health-check reads POTLUCK_DATA to find admin.sock, so it needs no flags.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD ["potluck", "health-check"]
-ENTRYPOINT ["potluck"]
+# tini is PID 1 so orphans (detached git maintenance, killed hook descendants) are reaped and
+# signals reach potluck; -s keeps that true under an engine's own --init.
+ENTRYPOINT ["tini", "-s", "--", "potluck"]
 CMD ["serve"]

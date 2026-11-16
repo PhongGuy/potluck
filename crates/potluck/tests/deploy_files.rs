@@ -369,3 +369,64 @@ fn the_readme_restores_only_into_an_emptied_volume() {
         );
     }
 }
+
+fn containerfile() -> String {
+    fs::read_to_string(repo_root().join("Containerfile")).unwrap()
+}
+
+/// tini is PID 1 and reaps orphans for every way of running the image, so the deploy files
+/// add no second init of their own.
+#[test]
+fn the_image_runs_tini_as_pid_1_in_front_of_potluck() {
+    let text = containerfile();
+    let install = text
+        .lines()
+        .find(|l| l.contains("apt-get install"))
+        .expect("an apt-get install line");
+    assert!(
+        install.split_whitespace().any(|w| w == "tini"),
+        "tini is not installed: {install}"
+    );
+    assert!(
+        text.contains(r#"ENTRYPOINT ["tini", "-s", "--", "potluck"]"#),
+        "the entrypoint does not run potluck under tini"
+    );
+    assert!(
+        text.contains(r#"CMD ["serve"]"#),
+        "serve is no longer the default"
+    );
+    assert!(
+        !compose().contains("init: true"),
+        "compose adds a second init"
+    );
+    assert!(
+        !quadlet().contains("RunInit="),
+        "the Quadlet unit adds a second init"
+    );
+}
+
+#[test]
+fn the_smoke_test_checks_reaping_and_a_graceful_stop() {
+    let script = fs::read_to_string(repo_root().join("scripts/container-smoke.sh")).unwrap();
+    for needle in ["/proc/1/comm", "zombie", "stop -t 20"] {
+        assert!(script.contains(needle), "smoke script lacks {needle:?}");
+    }
+}
+
+#[test]
+fn the_readme_and_the_notices_cover_tini() {
+    let notices = fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
+    for needle in [
+        "## tini",
+        "Expat",
+        "/usr/share/doc/tini/copyright",
+        "https://deb.debian.org/debian/pool/main/t/tini/",
+    ] {
+        assert!(notices.contains(needle), "notices lack {needle:?}");
+    }
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let run_it = &readme[readme.find("## Run it").unwrap()..readme.find("## First admin").unwrap()];
+    for needle in ["tini", "--init"] {
+        assert!(run_it.contains(needle), "Run it lacks {needle:?}");
+    }
+}

@@ -9,6 +9,7 @@ use axum::body::Body;
 use tokio::io::AsyncReadExt;
 use tokio::process::{ChildStderr, Command};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::task::TaskTracker;
 
 use crate::api::error::ApiError;
 use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
@@ -79,6 +80,7 @@ pub struct GitEngine {
     upload_timeout: Duration,
     max_runtime: Duration,
     writers: sweep::Writers,
+    tasks: TaskTracker,
 }
 
 impl GitEngine {
@@ -102,12 +104,18 @@ impl GitEngine {
             upload_timeout: limits.upload_timeout,
             max_runtime: limits.max_runtime,
             writers: sweep::Writers::default(),
+            tasks: TaskTracker::new(),
         }
     }
 
     /// Marks each of `repos` dirty, so the next push to leave it sweeps it.
     pub(crate) fn mark_dirty(&self, repos: &[PathBuf]) {
         self.writers.mark_dirty(repos);
+    }
+
+    /// The tracker every reaper and push record is spawned on, so shutdown can wait for them.
+    pub(crate) fn tasks(&self) -> &TaskTracker {
+        &self.tasks
     }
 
     /// The repository layout this engine serves.
@@ -278,7 +286,7 @@ impl GitEngine {
         let max_runtime = self.max_runtime;
         // The reaper owns the child and the slot: the slot returns when git's group is empty or is
         // killed at the run limit, and a non-zero exit is logged with the tail of stderr.
-        tokio::spawn(async move {
+        self.tasks.spawn(async move {
             let _permit = permit;
             // Wait for git's whole group inside the run limit: stderr to EOF, the leader to exit
             // (left unreaped so the group id cannot be reused), then any process still in it.

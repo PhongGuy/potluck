@@ -215,7 +215,7 @@ fn gc_live(pidfile: &Path) -> bool {
 }
 
 /// A maintenance run holds `objects/maintenance.lock` open for its whole run, so the lock is live
-/// while some process has it open. A git process whose fds cannot be read might be that holder,
+/// while a git process has it open. A git process whose fds cannot be read might be that holder,
 /// so then a lock younger than 12 hours counts as live too.
 fn maintenance_live(lock: &Path) -> bool {
     let Ok(lock) = std::fs::canonicalize(lock) else {
@@ -231,7 +231,7 @@ fn maintenance_live(lock: &Path) -> bool {
                 let held = fds
                     .filter_map(Result::ok)
                     .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|target| target == lock));
-                if held {
+                if held && is_git(pid) {
                     return true;
                 }
             }
@@ -612,9 +612,10 @@ mod tests {
         );
     }
 
-    /// A `sleep 30` in its own process group holding `path` open, as a detached `git maintenance
-    /// run` holds its lock from outside git's group. Killed and reaped on drop, so a failing
-    /// assertion never leaves it running.
+    /// A process in its own group, as a detached `git maintenance run` sits outside git's group:
+    /// `open` is a `sleep 30` holding a path open, a holder that is not git, and the `git`
+    /// constructors stand in for git. Killed and reaped on drop, so a failing assertion never
+    /// leaves it running.
     struct Holder(std::process::Child);
 
     impl Holder {
@@ -634,13 +635,24 @@ mod tests {
 
         /// A live git process (`hash-object` waiting on its open stdin) in its own group.
         fn git(cwd: &Path) -> Holder {
+            Holder::git_with(cwd, std::process::Stdio::null())
+        }
+
+        /// A live git process holding `path` open for writing, as `git maintenance run` holds
+        /// `objects/maintenance.lock`. Nothing is written: it waits on stdin until killed.
+        fn git_holding(path: &Path, cwd: &Path) -> Holder {
+            let lock = std::fs::File::options().append(true).open(path).unwrap();
+            Holder::git_with(cwd, lock.into())
+        }
+
+        fn git_with(cwd: &Path, stdout: std::process::Stdio) -> Holder {
             use std::os::unix::process::CommandExt;
             let child = std::process::Command::new("git")
                 .args(["hash-object", "--stdin"])
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
+                .stdout(stdout)
                 .stderr(std::process::Stdio::null())
                 .current_dir(cwd)
                 .process_group(0)
@@ -707,7 +719,7 @@ mod tests {
         let lock = repo.join("objects/maintenance.lock");
         put(&lock, "");
         age(&lock);
-        let holder = Holder::open(&lock, &repo);
+        let holder = Holder::git_holding(&lock, &repo);
         let writers = Writers::default();
         assert!(
             writers.enter(&repo).await.leave(true).await,
@@ -800,6 +812,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_maintenance_lock_held_open_by_a_process_that_is_not_git_does_not_keep_ref_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = ref_locked_repo(dir.path());
+        let lock = repo.join("objects/maintenance.lock");
+        put(&lock, "");
+        age(&lock);
+        // A file indexer or backup tool reading the data volume, not a maintenance run.
+        let indexer = Holder::open(&lock, &repo);
+        let swept = sweep(&repo);
+        drop(indexer);
+        assert!(!swept.deferred, "a non-git holder does not defer the sweep");
+        for path in REF_LOCKS {
+            assert!(
+                !repo.join(path).exists(),
+                "{path} goes: no git process holds the lock"
+            );
+        }
+        assert!(lock.exists(), "the maintenance lock is git's, never swept");
+    }
+
     #[tokio::test]
     async fn a_deferred_startup_sweep_leaves_the_repository_dirty_for_its_first_writer() {
         let dir = tempfile::tempdir().unwrap();
@@ -809,7 +842,7 @@ mod tests {
         let lock = repo.join("objects/maintenance.lock");
         put(&lock, "");
         age(&lock);
-        let holder = Holder::open(&lock, &repo);
+        let holder = Holder::git_holding(&lock, &repo);
         let swept = sweep_all(&root);
         assert_eq!(
             swept.deferred,

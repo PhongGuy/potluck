@@ -1,7 +1,89 @@
 //! Cleanup of the debris a SIGKILLed receive-pack leaves in a bare repository.
 
+use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+
+/// The receive-packs in flight per repository. Only the last one out of a repository that a
+/// killed push left dirty sweeps it, so a sweep never touches a live push's files.
+// Only the tests use the gate until the engine's receive-pack enters it.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct Writers {
+    entries: Mutex<HashMap<PathBuf, Arc<Entry>>>,
+}
+
+/// One repository's gate: writers hold it shared, a sweep holds it exclusive.
+#[derive(Debug)]
+struct Entry {
+    repo: PathBuf,
+    gate: Arc<RwLock<()>>,
+    dirty: AtomicBool,
+}
+
+/// One receive-pack inside a repository, from just before spawn until its reaper is done.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct Writer {
+    entry: Arc<Entry>,
+    guard: OwnedRwLockReadGuard<()>,
+}
+
+impl Writers {
+    /// Waits only while a sweep of `repo` runs.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn enter(&self, repo: &Path) -> Writer {
+        let entry = self.entry(repo);
+        let guard = Arc::clone(&entry.gate).read_owned().await;
+        Writer { entry, guard }
+    }
+
+    /// The gate for `repo`, created on first use; the map lock is never held across an await.
+    fn entry(&self, repo: &Path) -> Arc<Entry> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = entries.entry(repo.to_path_buf()).or_insert_with(|| {
+            Arc::new(Entry {
+                repo: repo.to_path_buf(),
+                gate: Arc::new(RwLock::new(())),
+                dirty: AtomicBool::new(false),
+            })
+        });
+        Arc::clone(entry)
+    }
+}
+
+impl Writer {
+    /// Leaves the repository; `killed` marks it dirty first. Sweeps when it is dirty and no
+    /// other writer is inside, and returns whether this call swept.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn leave(self, killed: bool) -> bool {
+        let Writer { entry, guard } = self;
+        // Mark before releasing, so a clean writer leaving at the same moment sees the flag.
+        if killed {
+            entry.dirty.store(true, Ordering::SeqCst);
+        }
+        drop(guard);
+        if !entry.dirty.load(Ordering::SeqCst) {
+            return false;
+        }
+        // Failing to take the gate means another writer is inside and will sweep on its way out.
+        let Ok(_sweeping) = Arc::clone(&entry.gate).try_write_owned() else {
+            return false;
+        };
+        if !entry.dirty.swap(false, Ordering::SeqCst) {
+            return false;
+        }
+        let repo = entry.repo.clone();
+        if let Err(err) = tokio::task::spawn_blocking(move || sweep(&repo)).await {
+            tracing::warn!(repo = %entry.repo.display(), error = %err, "sweep task failed");
+        }
+        true
+    }
+}
 
 /// Removes what a SIGKILLed receive-pack leaves in the bare repository `repo`: quarantine
 /// directories, ref and packed-refs locks, `HEAD.lock` and receive-pack's own pack keeps.
@@ -98,6 +180,7 @@ fn warn_unless_gone(path: &Path, err: &std::io::Error) {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
 
     use super::*;
 
@@ -164,5 +247,77 @@ mod tests {
     fn sweeping_a_missing_repository_removes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(sweep(&dir.path().join("gone.git")), 0);
+    }
+
+    fn locked_repo(dir: &Path) -> std::path::PathBuf {
+        let repo = dir.join("w.git");
+        put(&repo.join("refs/heads/main.lock"), "x");
+        repo
+    }
+
+    #[tokio::test]
+    async fn a_deferred_sweep_runs_when_the_last_writer_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        let writers = Writers::default();
+        let live = writers.enter(&repo).await;
+        let killed = writers.enter(&repo).await;
+        assert!(!killed.leave(true).await, "another writer is inside");
+        assert!(repo.join("refs/heads/main.lock").exists(), "deferred");
+        assert!(live.leave(false).await, "the last one out sweeps");
+        assert!(!repo.join("refs/heads/main.lock").exists());
+    }
+
+    #[tokio::test]
+    async fn a_clean_repository_is_never_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        let writers = Writers::default();
+        assert!(!writers.enter(&repo).await.leave(false).await);
+        assert!(
+            repo.join("refs/heads/main.lock").exists(),
+            "no kill, no sweep"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dirty_flag_is_cleared_by_its_sweep_and_repositories_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        let other = dir.path().join("o.git");
+        put(&other.join("refs/heads/main.lock"), "x");
+        let writers = Writers::default();
+        let busy_elsewhere = writers.enter(&other).await;
+        assert!(
+            writers.enter(&repo).await.leave(true).await,
+            "alone in its repository"
+        );
+        assert!(
+            other.join("refs/heads/main.lock").exists(),
+            "other repo untouched"
+        );
+        put(&repo.join("refs/heads/main.lock"), "x");
+        assert!(
+            !writers.enter(&repo).await.leave(false).await,
+            "the earlier sweep cleared the flag"
+        );
+        assert!(
+            !busy_elsewhere.leave(false).await,
+            "other repo was never dirty"
+        );
+    }
+
+    #[tokio::test]
+    async fn entering_waits_while_a_sweep_holds_the_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        let writers = Writers::default();
+        let entry = writers.entry(&repo);
+        let sweeping = Arc::clone(&entry.gate).try_write_owned().unwrap();
+        let waiting =
+            tokio::time::timeout(std::time::Duration::from_millis(200), writers.enter(&repo)).await;
+        assert!(waiting.is_err(), "enter waits for the sweep");
+        drop(sweeping);
+        writers.enter(&repo).await.leave(false).await;
     }
 }

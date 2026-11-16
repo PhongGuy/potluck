@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::common::{
     api_admin, api_team, api_workspace, config_for, config_listening_on, create_user, git, ok,
-    potluck, repo_path, unix_get, work_tree, write_hook,
+    parse_config, potluck, repo_path, unix_get, work_tree, write_hook, write_script,
 };
 
 #[tokio::test]
@@ -533,4 +533,67 @@ async fn shutdown_waits_for_the_record_of_a_push_git_already_answered() {
         !ws.import_pending(),
         "the push record landed before shutdown returned"
     );
+}
+
+// A git that stalls 1 s on `commit-tree` holds a workspace create mid-seed; the client gives up
+// and disconnects, so the listeners drain at once and only the task tracker can make shutdown
+// wait. Shutdown must leave the workspace whole: its row and its repository.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_waits_for_a_workspace_create_whose_client_disconnected() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let marker = dir.path().join("seeding");
+    let slow_git = dir.path().join("slow-git");
+    write_script(
+        &slow_git,
+        &format!(
+            "#!/bin/sh\ncase \" $* \" in *\" commit-tree \"*) : > '{}'; sleep 1;; esac\nexec git \"$@\"\n",
+            marker.display()
+        ),
+    );
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data.to_str().unwrap(),
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--git",
+        slow_git.to_str().unwrap(),
+    ])
+    .unwrap();
+    let running = start(&config).await.unwrap();
+    let root = api_admin(running.db()).await;
+    let api = format!("http://{}/api/v1", running.http_addr());
+    api_team(&api, &root, "core").await;
+    let request = tokio::spawn(async move {
+        let body = serde_json::json!({"slug": "api", "name": "API", "kind": "apinata", "default_branch": "main"});
+        reqwest::Client::new()
+            .post(format!("{api}/teams/core/workspaces"))
+            .bearer_auth(&root)
+            .json(&body)
+            .send()
+            .await
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the create never reached the seed commit"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Dropping the in-flight request closes its connection, as a client that gives up would.
+    request.abort();
+    let _ = request.await;
+    running.shutdown().await;
+    let db = potluck::db::Db::open(&config.db_path()).unwrap();
+    let row = db.workspace_by_slugs("core", "api").await.unwrap();
+    db.close();
+    let repo = repo_path(&data, "core", "api");
+    assert!(
+        row.is_some(),
+        "the create finished its row before shutdown returned"
+    );
+    assert!(repo.is_dir(), "the repository is kept with its row");
 }

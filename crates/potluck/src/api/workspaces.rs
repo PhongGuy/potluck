@@ -32,11 +32,12 @@ pub(super) struct CreateWorkspace {
 /// `POST /teams/{team}/workspaces {slug, name, kind, default_branch, seed?}` (server admin or
 /// `System`, checked before the body is read): 404 unknown team; 422 `slug`, `name` (blank or
 /// over 200 chars trimmed), `kind` (`kinds::by_name` is `None`), `default_branch`; 409 when
-/// `{team}/{slug}` exists or its directory does. Otherwise, in one spawned task the handler
-/// awaits so a dropped request cannot stop it half way: the repository is initialised, seeded
-/// with the kind's files as `Potluck <potluck@users.noreply.{host}>` (`seed` absent or true) or
-/// left empty with the import state set, and the row is inserted; a failure after the claim
-/// removes the directory. 201 Workspace with role `admin`.
+/// `{team}/{slug}` exists or its directory does. Otherwise, in one task on the engine's tracker,
+/// which the handler awaits and shutdown waits for, so a dropped request cannot stop it half
+/// way: the repository is initialised, seeded with the kind's files as
+/// `Potluck <potluck@users.noreply.{host}>` (`seed` absent or true) or left empty with the import
+/// state set, and the row is inserted; a failure after the claim removes the directory. 201
+/// Workspace with role `admin`.
 pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -80,7 +81,7 @@ pub(super) async fn create(
         NewWorkspace::new(team.id(), &slug, &name, kind.name(), &branch).import_pending(!seed);
     // A spawned task runs to its end even when axum drops this future on a disconnect, so a
     // claimed directory is always either completed with its row or removed again.
-    let task = tokio::spawn(async move {
+    let task = state.git().tasks().spawn(async move {
         let (repos, branch) = (&repos, &branch);
         claimed(repos, &team_slug, &slug, branch, |repo| async move {
             if seed {
@@ -192,10 +193,10 @@ pub(super) async fn get(
     )))
 }
 
-/// `DELETE /workspaces/{team}/{ws}` (admin): in one spawned task the handler awaits, the row
-/// goes first (grants and overrides cascade), then the repository directory; 204. A directory
-/// already gone is fine; a removal failure is logged and 500, with the workspace already gone
-/// from the API.
+/// `DELETE /workspaces/{team}/{ws}` (admin): in one task on the engine's tracker, which the
+/// handler awaits and shutdown waits for, the row goes first (grants and overrides cascade),
+/// then the repository directory; 204. A directory already gone is fine; a removal failure is
+/// logged and 500, with the workspace already gone from the API.
 pub(super) async fn delete(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -212,7 +213,7 @@ pub(super) async fn delete(
     let notices = state.notices().clone();
     // Row first, so a git request never meets a live workspace without its repository; the
     // spawned task finishes both steps even when axum drops this future on a disconnect.
-    let task = tokio::spawn(async move {
+    let task = state.git().tasks().spawn(async move {
         if !db.delete_workspace(ws.id()).await? {
             return Err(ApiError::not_found("no such workspace"));
         }

@@ -239,11 +239,11 @@ impl Running {
         &self.db
     }
 
-    /// Stops accepting, waits for in-flight requests and then for git reapers and push records,
-    /// closes the database, removes the socket file, and releases the lock while leaving
-    /// `server.lock` in place. Waiting for a hung git can take up to `--git-max-runtime`. The port,
-    /// the admin socket and the lock are free when it returns, even if a child forked meanwhile
-    /// still holds duplicates of their fds.
+    /// Stops accepting, waits for in-flight requests and then for git reapers, push records and
+    /// workspace creates and deletes, closes the database, removes the socket file, and releases
+    /// the lock while leaving `server.lock` in place. Waiting for a hung git can take up to
+    /// `--git-max-runtime`. The port, the admin socket and the lock are free when it returns, even
+    /// if a child forked meanwhile still holds duplicates of their fds.
     pub async fn shutdown(self) {
         // Open streams would hold the graceful drain forever; end them before stopping.
         self.notices.close_all();
@@ -255,7 +255,8 @@ impl Running {
                 Err(err) => tracing::error!("listener task failed: {err}"),
             }
         }
-        // The reapers and push records need the database, so they finish before it closes.
+        // Reapers, push records and workspace creates and deletes need the database, so they
+        // finish before it closes.
         self.git_tasks.close();
         self.git_tasks.wait().await;
         self.db.close();

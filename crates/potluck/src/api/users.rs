@@ -12,6 +12,7 @@ use super::error::ApiError;
 use super::events;
 use super::json::ApiJson;
 use super::objects::UserJson;
+use super::validate;
 use crate::db::accounts::{NewUser, UserPatch};
 use crate::slug::Slug;
 
@@ -70,7 +71,7 @@ pub(super) async fn create(
     auth.require_server_admin()?;
     // The whole body is checked before hashing, so a refusal costs no argon2 work.
     check_username(&body.username)?;
-    check_display_name(&body.display_name)?;
+    validate::name("display_name", &body.display_name)?;
     if let Some(email) = &body.email {
         check_email(email)?;
     }
@@ -130,7 +131,7 @@ pub(super) async fn patch(
     };
 
     if let Some(name) = &body.display_name {
-        check_display_name(name)?;
+        validate::name("display_name", name)?;
     }
     if let Some(Some(email)) = &body.email {
         check_email(email)?;
@@ -207,19 +208,6 @@ pub(super) fn check_username(s: &str) -> Result<(), ApiError> {
             "username",
             "username must be 1 to 63 lowercase letters, digits or hyphens, start with a letter \
              or digit, and not be system",
-        ))
-    }
-}
-
-/// 1 to 200 characters after trimming.
-pub(super) fn check_display_name(s: &str) -> Result<(), ApiError> {
-    let len = s.trim().chars().count();
-    if (1..=200).contains(&len) {
-        Ok(())
-    } else {
-        Err(ApiError::invalid_value(
-            "display_name",
-            "display_name must be 1 to 200 characters",
         ))
     }
 }

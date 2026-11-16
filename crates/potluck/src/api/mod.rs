@@ -29,6 +29,7 @@ mod system;
 mod teams;
 mod tokens;
 mod users;
+mod validate;
 pub(crate) mod workspaces;
 
 pub use actor::{Actor, AuthUser};

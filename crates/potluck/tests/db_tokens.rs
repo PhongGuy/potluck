@@ -150,3 +150,87 @@ async fn debug_redacts_digests() {
         "TokenCandidate leaked: {shown}"
     );
 }
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// `PartialEq` on a digest compares it byte by byte with an early exit, so no struct in `src/`
+/// with a `digest` field may derive it.
+#[test]
+fn no_struct_with_a_digest_field_derives_partial_eq() {
+    let mut files = Vec::new();
+    rust_files(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let (mut seen, mut offenders) = (Vec::new(), Vec::new());
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            // A braced struct: its name, then its body up to the first closing-brace line.
+            let decl = line.trim_start();
+            let Some(rest) = ["pub struct ", "pub(crate) struct ", "struct "]
+                .iter()
+                .find_map(|p| decl.strip_prefix(p))
+            else {
+                continue;
+            };
+            if !decl.ends_with('{') {
+                continue;
+            }
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let has_digest = lines[i + 1..]
+                .iter()
+                .take_while(|l| l.trim() != "}")
+                .any(|l| {
+                    let f = l.trim_start();
+                    let f = f
+                        .strip_prefix("pub(crate) ")
+                        .or(f.strip_prefix("pub "))
+                        .unwrap_or(f);
+                    f.starts_with("digest:")
+                });
+            if !has_digest {
+                continue;
+            }
+            seen.push(name.clone());
+            // The attributes and doc lines directly above the struct, minus the comments.
+            let attrs: String = lines[..i]
+                .iter()
+                .rev()
+                .take_while(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && !t.ends_with('}') && !t.ends_with(';')
+                })
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .copied()
+                .collect();
+            if attrs.contains("PartialEq") {
+                offenders.push(format!("{name} in {}", file.display()));
+            }
+        }
+    }
+    for expected in ["NewToken", "TokenCandidate", "MintedToken"] {
+        assert!(
+            seen.iter().any(|s| s == expected),
+            "the scan missed {expected}: {seen:?}"
+        );
+    }
+    assert!(
+        offenders.is_empty(),
+        "digest-bearing structs derive PartialEq: {offenders:?}"
+    );
+}

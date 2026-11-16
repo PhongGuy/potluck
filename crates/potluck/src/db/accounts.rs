@@ -233,7 +233,7 @@ const USER_COLUMNS: &str =
 
 /// What `create_token` inserts; `created_at` is set by the database thread. `Debug` prints the
 /// digest as `<redacted>`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct NewToken {
     user_id: i64,
@@ -326,7 +326,7 @@ impl TokenRecord {
 
 /// One token sharing a presented prefix, with its digest and owner, for the auth path. `Debug`
 /// prints the digest as `<redacted>` and the user through its own redacting `Debug`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct TokenCandidate {
     token: TokenRecord,

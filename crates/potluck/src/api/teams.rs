@@ -11,6 +11,7 @@ use super::error::ApiError;
 use super::events;
 use super::json::ApiJson;
 use super::objects::TeamJson;
+use super::validate;
 use crate::db::accounts::UserRecord;
 use crate::db::teams::TeamRecord;
 use crate::slug::Slug;
@@ -46,7 +47,7 @@ pub(super) async fn create(
     auth.require_server_admin()?;
     let ApiJson(body) = body?;
     let slug = check_slug(&body.slug)?;
-    let name = check_name(&body.name)?;
+    let name = validate::name("name", &body.name)?;
     let team = state.db().create_team(&slug, name).await?;
     Ok((StatusCode::CREATED, Json(TeamJson::new(&team, Vec::new()))))
 }
@@ -92,19 +93,6 @@ pub(super) fn check_slug(s: &str) -> Result<Slug, ApiError> {
              or digit",
         )
     })
-}
-
-/// The trimmed `name`: 1 to 200 characters after trimming, else 422 `name`.
-pub(super) fn check_name(s: &str) -> Result<&str, ApiError> {
-    let name = s.trim();
-    if (1..=200).contains(&name.chars().count()) {
-        Ok(name)
-    } else {
-        Err(ApiError::invalid_value(
-            "name",
-            "name must be 1 to 200 characters",
-        ))
-    }
 }
 
 async fn team_and_user(

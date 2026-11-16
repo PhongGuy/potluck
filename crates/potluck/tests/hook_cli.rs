@@ -224,3 +224,42 @@ fn a_ref_name_that_is_not_utf8_is_judged_on_content_and_reported_byte_exact() {
         "the reject line carries the exact ref bytes, percent-encoded"
     );
 }
+
+#[test]
+fn each_hook_failure_writes_its_own_fixed_reason() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("clean");
+    // Exits 0 with output `cat-file --batch-check` never gives; it drains stdin first so the
+    // write of the object name cannot fail.
+    let garbled = s.script("garbled-git", "cat >/dev/null\necho garbage\n");
+    let cases = [
+        ("garbage\n".to_owned(), "git", "malformed ref line"),
+        (line(&tip), "/nonexistent/git", "cannot run git cat-file"),
+        (
+            line(&tip),
+            garbled.to_str().unwrap(),
+            "unexpected git cat-file output",
+        ),
+    ];
+    for (input, git, reason) in cases {
+        let out = run_hook(&s, &[("POTLUCK_GIT", git)], &input);
+        assert_eq!(out.status.code(), Some(1), "{reason}: {}", stderr(&out));
+        assert_eq!(stderr(&out), format!("potluck-error {reason}\n"));
+    }
+    // A directory as stdin opens but cannot be read.
+    let out = potluck()
+        .args(["hook", "pre-receive"])
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", s.dir.path())
+        .env("GIT_DIR", &s.bare)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("POTLUCK_GIT", "git")
+        .current_dir(s.dir.path())
+        .stdin(std::fs::File::open(s.dir.path()).unwrap())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "potluck-error unreadable stdin\n");
+}

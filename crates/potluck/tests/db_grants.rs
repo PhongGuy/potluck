@@ -275,3 +275,107 @@ async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
     );
     assert_eq!(f.db.role_for(f.api.id(), f.bob.id()).await.unwrap(), None);
 }
+
+/// A second connection on the same file, the way an out-of-band writer would hold it.
+fn raw(dir: &tempfile::TempDir) -> rusqlite::Connection {
+    let c = rusqlite::Connection::open(dir.path().join("server.db")).unwrap();
+    c.pragma_update(None, "foreign_keys", true).unwrap();
+    c.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+    c
+}
+
+fn grant_rows(c: &rusqlite::Connection) -> i64 {
+    c.query_row("SELECT count(*) FROM grants", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn deleting_a_user_takes_their_grants_with_it() {
+    let (d, f) = fx().await;
+    f.db.put_grant(f.api.id(), user("ann"), Role::Admin)
+        .await
+        .unwrap()
+        .unwrap();
+    f.db.put_grant(f.docs.id(), user("ann"), Role::Read)
+        .await
+        .unwrap()
+        .unwrap();
+    f.db.put_grant(f.api.id(), user("bob"), Role::Write)
+        .await
+        .unwrap()
+        .unwrap();
+    let c = raw(&d);
+    c.execute("DELETE FROM users WHERE id = ?1", [f.ann.id()])
+        .unwrap();
+    assert_eq!(grant_rows(&c), 1, "only bob's grant is left");
+    assert_eq!(
+        f.db.list_grants(f.api.id()).await.unwrap(),
+        [GrantRecord::new(user("bob"), Role::Write)]
+    );
+    // SQLite gives the freed highest id to the next user, who must not inherit ann's role.
+    let cat = f.db.create_user(NewUser::new("cat", "Cat")).await.unwrap();
+    assert_eq!(cat.id(), f.ann.id(), "precondition: the id is reused");
+    assert_eq!(f.db.role_for(f.api.id(), cat.id()).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn deleting_a_team_takes_only_its_own_grants_with_it() {
+    let (d, f) = fx().await;
+    let ops = f.db.create_team(&slug("ops"), "Ops").await.unwrap();
+    assert_eq!(
+        ops.id(),
+        f.ann.id(),
+        "precondition: a team and a user share an id"
+    );
+    f.db.put_grant(f.api.id(), team("ops"), Role::Write)
+        .await
+        .unwrap()
+        .unwrap();
+    f.db.put_grant(f.api.id(), team("core"), Role::Read)
+        .await
+        .unwrap()
+        .unwrap();
+    f.db.put_grant(f.api.id(), user("ann"), Role::Read)
+        .await
+        .unwrap()
+        .unwrap();
+    let c = raw(&d);
+    c.execute("DELETE FROM teams WHERE id = ?1", [ops.id()])
+        .unwrap();
+    assert_eq!(
+        grant_rows(&c),
+        2,
+        "the user with the same id keeps their grant"
+    );
+    assert_eq!(
+        f.db.list_grants(f.api.id()).await.unwrap(),
+        [
+            GrantRecord::new(team("core"), Role::Read),
+            GrantRecord::new(user("ann"), Role::Read),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_rolled_back_delete_keeps_the_grants() {
+    let (d, f) = fx().await;
+    f.db.put_grant(f.api.id(), user("ann"), Role::Admin)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut c = raw(&d);
+    let tx = c.transaction().unwrap();
+    tx.execute("DELETE FROM users WHERE id = ?1", [f.ann.id()])
+        .unwrap();
+    assert_eq!(
+        grant_rows(&tx),
+        0,
+        "the grant goes in the delete's own transaction"
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        grant_rows(&c),
+        1,
+        "and comes back when that transaction rolls back"
+    );
+}

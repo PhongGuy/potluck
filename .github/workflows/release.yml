@@ -46,12 +46,14 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           cache-binary: false
-      # A publishing run refuses a malformed tag here, before it logs in or pushes anything.
+      # A publishing run refuses a malformed tag, or one that differs from the workspace version,
+      # here, before it logs in or pushes anything.
       - id: meta
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           if [[ $PUBLISH == true ]]; then scripts/release.sh version "$REF_NAME" > /dev/null; fi
+          if [[ $PUBLISH == true ]]; then scripts/release.sh check-version "$REF_NAME"; fi
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
       # Loaded into the local daemon for the smoke test; attestations need the registry exporter.
@@ -164,6 +166,29 @@ jobs:
           digest=$(docker buildx imagetools inspect "$IMAGE:$REF_NAME" --format '{{json .Manifest}}' |
             jq -re '.digest | select(test("^sha256:[0-9a-f]{64}$"))')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  # Writes the unsigned release manifest; it holds no secret and needs only the repository.
+  manifest:
+    needs: merge
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          REF_NAME: ${{ github.ref_name }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          scripts/release.sh manifest "$REF_NAME" "$DIGEST" "$RUNNER_TEMP/release/potluck-release.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manifest-unsigned
+          path: ${{ runner.temp }}/release/potluck-release.json
+          if-no-files-found: error
+          retention-days: 1
 
   # The only job bound to the release environment: it builds nothing and checks nothing out.
   attest:

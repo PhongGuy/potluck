@@ -73,7 +73,7 @@ fn merge_tags_the_version_moves_latest_only_on_a_final_release_and_annotates() {
 fn the_four_jobs_run_in_order_and_attest_is_the_release_job() {
     let jobs = release();
     let names: Vec<&str> = jobs.iter().map(|(n, _)| n.as_str()).collect();
-    assert_eq!(names, ["build", "merge", "attest", "draft"]);
+    assert_eq!(names, ["build", "merge", "manifest", "attest", "draft"]);
     let attest = job(&jobs, "attest");
     for needle in [
         "needs: merge",
@@ -143,6 +143,50 @@ fn build_refuses_a_bad_tag_before_it_logs_in_or_pushes() {
             "the tag check comes after {later}"
         );
     }
+}
+
+#[test]
+fn build_checks_the_tag_against_the_workspace_version_before_it_logs_in_or_pushes() {
+    let jobs = release();
+    let build = job(&jobs, "build");
+    let check =
+        "if [[ $PUBLISH == true ]]; then scripts/release.sh check-version \"$REF_NAME\"; fi";
+    let at = build
+        .find(check)
+        .unwrap_or_else(|| panic!("build lacks {check:?}"));
+    for later in ["docker/login-action", "push-by-digest=true"] {
+        assert!(
+            at < build.find(later).unwrap(),
+            "the version check comes after {later}"
+        );
+    }
+}
+
+#[test]
+fn manifest_writes_the_unsigned_file_from_the_merged_digest() {
+    let jobs = release();
+    let manifest = job(&jobs, "manifest");
+    for needle in [
+        "needs: merge",
+        "if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}",
+        "persist-credentials: false",
+        "DIGEST: ${{ needs.merge.outputs.digest }}",
+        "scripts/release.sh manifest \"$REF_NAME\" \"$DIGEST\" \"$RUNNER_TEMP/release/potluck-release.json\"",
+        "name: manifest-unsigned",
+        "if-no-files-found: error",
+    ] {
+        assert!(manifest.contains(needle), "manifest lacks {needle:?}");
+    }
+    // Line-shaped: the next job's leading comment is part of this body.
+    for forbidden in ["environment:", "permissions:"] {
+        assert!(
+            !manifest
+                .lines()
+                .any(|l| l.trim_start().starts_with(forbidden)),
+            "manifest declares {forbidden:?}"
+        );
+    }
+    assert!(!manifest.contains("secrets."), "manifest reads a secret");
 }
 
 #[test]

@@ -10,9 +10,20 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 /// The receive-packs in flight per repository. Only the last one out of a repository that a
 /// killed push left dirty sweeps it, so a sweep never touches a live push's files.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Writers {
     entries: Mutex<HashMap<PathBuf, Arc<Entry>>>,
+    /// The sweep each entry runs; always `sweep` outside tests, which stall it.
+    sweep: fn(&Path) -> usize,
+}
+
+impl Default for Writers {
+    fn default() -> Self {
+        Writers {
+            entries: Mutex::default(),
+            sweep,
+        }
+    }
 }
 
 /// One repository's gate: writers hold it shared, a sweep holds it exclusive.
@@ -21,6 +32,7 @@ struct Entry {
     repo: PathBuf,
     gate: Arc<RwLock<()>>,
     dirty: AtomicBool,
+    sweep: fn(&Path) -> usize,
 }
 
 /// One receive-pack inside a repository, from just before spawn until its reaper is done.
@@ -46,6 +58,7 @@ impl Writers {
                 repo: repo.to_path_buf(),
                 gate: Arc::new(RwLock::new(())),
                 dirty: AtomicBool::new(false),
+                sweep: self.sweep,
             })
         });
         Arc::clone(entry)
@@ -72,7 +85,7 @@ impl Writer {
         if !entry.dirty.swap(false, Ordering::SeqCst) {
             return false;
         }
-        let repo = entry.repo.clone();
+        let (repo, sweep) = (entry.repo.clone(), entry.sweep);
         // The blocking task owns the guard, so a dropped `leave` cannot open the gate early.
         let swept = tokio::task::spawn_blocking(move || {
             let _sweeping = sweeping;
@@ -107,10 +120,11 @@ pub(crate) fn sweep(repo: &Path) -> usize {
         }
     }
 
-    // receive-pack stamps its own keeps; any other keep is an operator's and stays.
+    // receive-pack stamps its own keeps; any other keep, or one that is not a regular file, stays.
     for entry in entries(&repo.join("objects/pack")) {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "keep") {
+        let regular = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if regular && path.extension().is_some_and(|ext| ext == "keep") {
             match std::fs::read(&path) {
                 Ok(text) if text.starts_with(b"receive-pack ") => removed += remove(&path, false),
                 Ok(_) => {}
@@ -336,31 +350,78 @@ mod tests {
         writers.enter(&repo).await.leave(false).await;
     }
 
+    /// Opens `fifo` read-write, which never blocks on Linux and wakes a reader stalled in its open,
+    /// every 20 ms until `done` holds or 10 s pass, so no test can hang on a FIFO it made.
+    fn unstall(fifo: &Path, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done() && std::time::Instant::now() < deadline {
+            drop(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(fifo),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn mkfifo(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo made {}", path.display());
+    }
+
+    #[test]
+    fn a_keep_that_is_not_a_regular_file_is_skipped_without_reading_it() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        let fifo = repo.join("objects/pack/pack-fifo.keep");
+        mkfifo(&fifo);
+        let swept = std::thread::spawn({
+            let repo = repo.clone();
+            move || sweep(&repo)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !swept.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stalled = !swept.is_finished();
+        // Unblock before any assertion, so a failing run still ends.
+        unstall(&fifo, || swept.is_finished());
+        assert!(!stalled, "the sweep read the FIFO keep and blocked");
+        assert_eq!(swept.join().unwrap(), 1, "only the ref lock goes");
+        assert!(fifo.exists(), "a keep that is not a regular file stays");
+    }
+
+    /// Blocks on the FIFO `<repo>/stall` until the test opens it, removes it, then sweeps.
+    fn stalling_sweep(repo: &Path) -> usize {
+        let stall = repo.join("stall");
+        let _ = std::fs::read(&stall);
+        let _ = std::fs::remove_file(&stall);
+        sweep(repo)
+    }
+
     #[tokio::test]
     async fn a_dropped_leave_keeps_the_repository_closed_until_its_sweep_ends() {
         use std::time::Duration;
         let dir = tempfile::tempdir().unwrap();
         let repo = locked_repo(dir.path());
-        // A keep that is a FIFO stalls the sweep in its read until the test writes to it.
-        let keep = repo.join("objects/pack/pack-fifo.keep");
-        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(&keep)
-            .status()
-            .unwrap();
-        assert!(made.success(), "mkfifo made the stalling keep");
-        let writers = Writers::default();
+        let stall = repo.join("stall");
+        mkfifo(&stall);
+        let writers = Writers {
+            entries: Mutex::default(),
+            sweep: stalling_sweep,
+        };
         let killed = writers.enter(&repo).await;
         let leaving = tokio::time::timeout(Duration::from_millis(300), killed.leave(true)).await;
-        assert!(leaving.is_err(), "the sweep is stalled on the FIFO");
         let entered = tokio::time::timeout(Duration::from_millis(300), writers.enter(&repo)).await;
-        // Unstall the sweep before any assertion: the runtime's shutdown waits for blocking tasks,
-        // and a panic would drop the tempdir under the FIFO. The write-only open meets the reader.
-        let fifo = keep.clone();
-        std::thread::spawn(move || std::fs::write(fifo, b"receive-pack 1 on host\n"))
-            .join()
-            .unwrap()
-            .unwrap();
+        // Unstall the sweep before any assertion: the runtime's shutdown waits for blocking tasks.
+        unstall(&stall, || !stall.exists());
+        assert!(leaving.is_err(), "the sweep is stalled on the FIFO");
         assert!(
             entered.is_err(),
             "enter waits while the dropped leave's sweep still runs"
@@ -373,7 +434,6 @@ mod tests {
             !repo.join("refs/heads/main.lock").exists(),
             "the lock is swept"
         );
-        assert!(!keep.exists(), "the stalled keep is swept");
     }
 
     #[test]

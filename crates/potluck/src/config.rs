@@ -36,7 +36,8 @@ pub struct ServeArgs {
     /// Tracing filter directive, such as `info` or `potluck=debug`.
     #[arg(long, env = "POTLUCK_LOG", default_value = "info")]
     log: String,
-    /// CIDRs or addresses whose `X-Forwarded-For` is believed; comma separated, none by default.
+    /// CIDRs or addresses whose `X-Forwarded-For` is believed; comma separated, none by default;
+    /// an IPv4-mapped IPv6 range counts as the IPv4 range it maps.
     #[arg(long, env = "POTLUCK_TRUSTED_PROXIES", value_delimiter = ',')]
     trusted_proxies: Vec<String>,
     /// OIDC issuer URL; parsed, but refused until OIDC sign-in exists.
@@ -278,7 +279,8 @@ impl TryFrom<ServeArgs> for Config {
 }
 
 /// Each entry trimmed, empty ones dropped (so a trailing comma is harmless); a bare address
-/// becomes the single-host net it names, anything else must parse as a CIDR.
+/// becomes the single-host net it names, anything else must parse as a CIDR. A net inside
+/// `::ffff:0:0/96` is returned as the IPv4 net it maps.
 fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<ipnet::IpNet>, ConfigError> {
     entries
         .iter()
@@ -295,7 +297,22 @@ fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<ipnet::IpNet>, Config
                     reason: e.to_string(),
                 })
         })
+        .map(|net| net.map(unmapped))
         .collect()
+}
+
+/// Peers reach `trusts_proxy` already unmapped, so a range wholly inside the mapped block is
+/// stored as its IPv4 net. A wider IPv6 range stays IPv6-only and never trusts IPv4 peers.
+fn unmapped(net: ipnet::IpNet) -> ipnet::IpNet {
+    let ipnet::IpNet::V6(v6) = net else {
+        return net;
+    };
+    match v6.network().to_ipv4_mapped() {
+        Some(v4) if v6.prefix_len() >= 96 => ipnet::Ipv4Net::new(v4, v6.prefix_len() - 96)
+            .map(ipnet::IpNet::V4)
+            .unwrap_or(net),
+        _ => net,
+    }
 }
 
 /// Refuses a public URL that is malformed, carries credentials, a query or a fragment, is

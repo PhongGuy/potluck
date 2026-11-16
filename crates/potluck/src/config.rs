@@ -131,6 +131,22 @@ impl Config {
         self.data.join("admin.sock")
     }
 
+    /// Refuses a `<data>/admin.sock` too long to bind as a Unix socket, with
+    /// [`ConfigError::AdminSocketPathTooLong`].
+    pub fn check_admin_socket(&self) -> Result<(), ConfigError> {
+        // Measured as given, `..` segments included, because that is the path bind sees.
+        let path = self.admin_socket();
+        let len = path.as_os_str().len();
+        if len > MAX_ADMIN_SOCKET_LEN {
+            return Err(ConfigError::AdminSocketPathTooLong {
+                path,
+                len,
+                max: MAX_ADMIN_SOCKET_LEN,
+            });
+        }
+        Ok(())
+    }
+
     /// `<data>/server.lock`: the advisory lock `serve` holds while it runs.
     pub fn lock_path(&self) -> PathBuf {
         self.data.join("server.lock")
@@ -201,7 +217,27 @@ pub enum ConfigError {
         "OIDC sign-in is not implemented in this version; unset --oidc-issuer, --oidc-client-id and --oidc-client-secret-file (POTLUCK_OIDC_*)"
     )]
     OidcUnsupported,
+    /// `<data>/admin.sock` is too long to bind as a Unix socket.
+    #[error(
+        "the admin socket {path} is {len} bytes, over the {max}-byte limit for a Unix socket path; choose a shorter --data"
+    )]
+    AdminSocketPathTooLong {
+        /// `<data>/admin.sock`, with `--data` made absolute.
+        path: PathBuf,
+        /// Its length in bytes.
+        len: usize,
+        /// The longest accepted length in bytes (103 on Linux).
+        max: usize,
+    },
 }
+
+/// Size of `sockaddr_un.sun_path` on Linux (`UNIX_PATH_MAX` in `linux/un.h`).
+const SUN_PATH_LEN: usize = 108;
+/// The extra bytes of the temporary name `server::bind_admin_socket` binds first.
+const ADMIN_SOCKET_TMP_SUFFIX_LEN: usize = ".tmp".len();
+/// The longest `<data>/admin.sock` that binds: one byte of `sun_path` is the NUL, and the
+/// temporary name must fit too.
+const MAX_ADMIN_SOCKET_LEN: usize = SUN_PATH_LEN - 1 - ADMIN_SOCKET_TMP_SUFFIX_LEN;
 
 impl TryFrom<ServeArgs> for Config {
     type Error = ConfigError;

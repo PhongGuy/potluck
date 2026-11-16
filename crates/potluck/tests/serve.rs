@@ -290,3 +290,46 @@ fn serve_exits_when_another_process_holds_the_data_dir() {
     );
     drop(held);
 }
+
+/// `base` plus one padding directory, so that `<result>/admin.sock` is exactly `len` bytes.
+fn data_dir_with_socket_len(base: &std::path::Path, len: usize) -> std::path::PathBuf {
+    let fixed = base.as_os_str().len() + "/".len() + "/admin.sock".len();
+    assert!(
+        fixed < len,
+        "temp dir {} is too long for this test",
+        base.display()
+    );
+    base.join("d".repeat(len - fixed))
+}
+
+#[tokio::test]
+async fn start_binds_the_admin_socket_at_the_longest_accepted_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_with_socket_len(dir.path(), 103);
+    let running = start(&config_for(&data)).await.unwrap();
+    assert_eq!(running.admin_socket().as_os_str().len(), 103);
+    let (status, _) = unix_get(running.admin_socket(), "/api/v1/health").await;
+    assert_eq!(status, 200);
+    running.shutdown().await;
+}
+
+#[test]
+fn serve_refuses_a_data_dir_too_long_for_the_admin_socket_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_with_socket_len(dir.path(), 104);
+    let out = potluck()
+        .args(["serve", "--public-url", "http://127.0.0.1:8080", "--data"])
+        .arg(&data)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains(&*data.join("admin.sock").to_string_lossy()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("104"), "{stderr}");
+    assert!(stderr.contains("103"), "{stderr}");
+    assert!(!stderr.contains("SUN_LEN"), "{stderr}");
+    assert!(!data.exists(), "nothing is created before config passes");
+}

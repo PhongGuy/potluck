@@ -1,25 +1,19 @@
 # Potluck
 
-A self-hosted team server for sharing workspaces of local-first desktop apps, git-style. Its first clients are Apinata and Dbento. It runs as one container under podman or docker.
+A self-hosted team server for sharing workspaces of local-first desktop apps, git-style. Its first clients are [Apinata](https://github.com/PhongGuy/apinata), a native API client, and [Dbento](https://github.com/PhongGuy/dbento), a native database client. It runs as one container under podman or docker.
 
-Work in progress.
+## Status
+
+Potluck is not ready for use yet, and may still change in ways that break existing setups. Watch the repository's releases to hear when it is ready.
 
 ## Run it
 
-The image is `ghcr.io/phongguy/potluck:latest`, built for amd64 and arm64. It runs as a non-root user (uid 65532) and keeps everything it stores in one volume mounted at `/data`.
+The image will be `ghcr.io/phongguy/potluck:latest`, built for amd64 and arm64. It runs as a non-root user (uid 65532) and keeps everything it stores in one volume mounted at `/data`.
 
-The package is private until the project is made public, so for now log in to the registry once before the first pull, with a GitHub personal access token that holds the `read:packages` scope. The command asks for your GitHub user name and, as the password, the token.
-
-With podman:
+Until the first release, build the image yourself from a checkout of this repository, under the same name so the one-command and Compose examples below find it locally:
 
 ```sh
-podman login ghcr.io
-```
-
-With docker:
-
-```sh
-docker login ghcr.io
+podman build -t ghcr.io/phongguy/potluck:latest .
 ```
 
 ### One command

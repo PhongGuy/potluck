@@ -172,6 +172,7 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
     assert_eq!(
         headings,
         [
+            "## Status",
             "## Run it",
             "## First admin",
             "## Reverse proxy and TLS",
@@ -194,15 +195,22 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
         "repository is public",
         "podman unshare chown 65532:65532",
         "THIRD_PARTY_NOTICES.md",
-        "login ghcr.io",
         "POTLUCK_TRUSTED_PROXIES",
         "debian:trixie-slim tar -C /data -xf /backup/potluck-data.tar",
         "podman exec potluck potluck admin user create alice --server-admin",
         "docker exec potluck potluck admin user create alice --server-admin",
         "--password-stdin",
+        "not ready for use yet",
+        "https://github.com/PhongGuy/apinata",
+        "https://github.com/PhongGuy/dbento",
+        "podman build -t ghcr.io/phongguy/potluck:latest .",
     ] {
         assert!(readme.contains(needle), "README lacks {needle:?}");
     }
+    assert!(
+        !readme.contains("login ghcr.io"),
+        "the image is public, so the README asks for no registry login"
+    );
     let notices = fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
     for needle in [
         "GPL-2.0",

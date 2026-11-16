@@ -5,7 +5,10 @@ use rusqlite::Connection;
 use super::DbError;
 
 /// The schema steps in order; step `n` (1-based) brings the database to version `n`.
-pub(crate) const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
+pub(crate) const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_init.sql"),
+    include_str!("migrations/0002_grant_subjects.sql"),
+];
 
 /// Applies the migrations past `PRAGMA user_version` in one transaction and sets
 /// `user_version` to `migrations.len()`. A database already past that version is refused.
@@ -90,7 +93,7 @@ mod tests {
                 err,
                 DbError::SchemaTooNew {
                     found: 99,
-                    supported: 1
+                    supported: 2
                 }
             ),
             "got {err:?}"
@@ -102,8 +105,38 @@ mod tests {
         let mut c = conn();
         assert_eq!(
             migrate_with(&mut c, MIGRATIONS).unwrap(),
-            1,
-            "schema version 1 applies cleanly"
+            2,
+            "schema version 2 applies cleanly"
+        );
+    }
+
+    #[test]
+    fn version_2_drops_grants_whose_subject_is_gone() {
+        let mut c = conn();
+        migrate_with(&mut c, &MIGRATIONS[..1]).unwrap();
+        c.execute_batch(
+            "INSERT INTO users (id, username, display_name, created_at) VALUES (1, 'bob', 'Bob', 'x');
+             INSERT INTO teams (id, slug, name) VALUES (1, 'core', 'Core');
+             INSERT INTO workspaces (id, team_id, slug, name, kind, default_branch, created_at)
+                 VALUES (1, 1, 'api', 'API', 'apinata', 'main', 'x');
+             INSERT INTO grants (workspace_id, subject_kind, subject_id, role) VALUES
+                 (1, 'user', 1, 'read'), (1, 'team', 1, 'write'),
+                 (1, 'user', 7, 'admin'), (1, 'team', 7, 'admin');",
+        )
+        .unwrap();
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 2);
+        let mut stmt = c
+            .prepare("SELECT subject_kind, subject_id FROM grants ORDER BY 1, 2")
+            .unwrap();
+        let left: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            left,
+            [("team".to_owned(), 1), ("user".to_owned(), 1)],
+            "only the grants of subjects that exist survive"
         );
     }
 }

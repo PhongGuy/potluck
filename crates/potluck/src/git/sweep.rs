@@ -472,4 +472,30 @@ mod tests {
             "no root, nothing removed"
         );
     }
+
+    #[test]
+    fn sweeping_every_repository_does_not_follow_symlinked_teams_or_workspaces() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repos");
+        let outside = dir.path().join("outside");
+        put(&outside.join("team/w.git/refs/heads/main.lock"), "x");
+        put(&outside.join("w.git/HEAD.lock"), "x");
+        put(&root.join("core/api.git/HEAD.lock"), "x");
+        symlink(outside.join("team"), root.join("linked")).unwrap();
+        symlink(outside.join("w.git"), root.join("core/linked.git")).unwrap();
+        assert_eq!(sweep_all(&root), 1, "only the real workspace is swept");
+        assert!(
+            !root.join("core/api.git/HEAD.lock").exists(),
+            "the real workspace is swept"
+        );
+        assert!(
+            outside.join("team/w.git/refs/heads/main.lock").exists(),
+            "a symlinked team is not followed"
+        );
+        assert!(
+            outside.join("w.git/HEAD.lock").exists(),
+            "a symlinked workspace is not followed"
+        );
+    }
 }

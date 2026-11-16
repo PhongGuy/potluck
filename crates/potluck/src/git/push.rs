@@ -10,7 +10,8 @@ use tokio::process::Command;
 use crate::git::engine::GitError;
 use crate::git::repos::{RepoError, Repos};
 
-/// Forty zeros: how a command spells "no object" for a created or deleted ref.
+/// Forty zeros: how a SHA-1 command spells "no object" for a created or deleted ref. A SHA-256
+/// repository spells it with 64 zeros; either width is "a null id" below.
 pub const ZERO_SHA: &str = "0000000000000000000000000000000000000000";
 
 /// The most commands one receive-pack request may carry; more is `CommandError::TooMany`.
@@ -35,12 +36,12 @@ impl RefCommand {
         }
     }
 
-    /// The sha the client believes the ref holds; `ZERO_SHA` for a creation.
+    /// The sha the client believes the ref holds; a null id for a creation.
     pub fn old(&self) -> &str {
         &self.old
     }
 
-    /// The sha asked for; `ZERO_SHA` for a deletion.
+    /// The sha asked for; a null id for a deletion.
     pub fn new_sha(&self) -> &str {
         &self.new
     }
@@ -52,7 +53,7 @@ impl RefCommand {
 }
 
 /// A ref a push moved: the SSE payload and the `consumed_refs` entry. Serialises as
-/// `{"ref", "old", "new"}`; `new` is `ZERO_SHA` for a deletion.
+/// `{"ref", "old", "new"}`; `new` is a null id for a deletion.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct RefMove {
@@ -77,12 +78,12 @@ impl RefMove {
         &self.ref_name
     }
 
-    /// The sha before the push; `ZERO_SHA` for a creation.
+    /// The sha before the push; a null id for a creation.
     pub fn old(&self) -> &str {
         &self.old
     }
 
-    /// The sha after the push; `ZERO_SHA` for a deletion.
+    /// The sha after the push; a null id for a deletion.
     pub fn new_sha(&self) -> &str {
         &self.new
     }
@@ -214,7 +215,7 @@ pub async fn list_refs(repos: &Repos, repo: &Path) -> Result<BTreeMap<String, St
 }
 
 /// The commands the repository confirms: a command is a move when the ref's sha differs between
-/// `before` and `after` and `after` holds the command's `new` (`ZERO_SHA` meaning absent).
+/// `before` and `after` and `after` holds the command's `new` (a null id meaning absent).
 /// `old == new` is never a move. A delete of a ref absent in `before`, or a create of a ref already
 /// at `new`, is a command git refused and is not a move. Order follows `commands`.
 pub fn moved(
@@ -230,9 +231,14 @@ pub fn moved(
         .filter(|cmd| {
             let was = before.get(&cmd.ref_name);
             let now = after.get(&cmd.ref_name);
-            let wanted = (cmd.new != ZERO_SHA).then_some(&cmd.new);
+            let wanted = (!is_null_id(&cmd.new)).then_some(&cmd.new);
             was != now && now == wanted
         })
         .map(|cmd| RefMove::new(&cmd.ref_name, &cmd.old, &cmd.new))
         .collect()
+}
+
+/// Whether `sha` is all zeros at a real object-id width: 40 for SHA-1, 64 for SHA-256.
+fn is_null_id(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b == b'0')
 }

@@ -1,11 +1,17 @@
 //! Real `git push` through the server against the installed hook.
 
 use std::path::Path;
+use std::time::Duration;
 
+use potluck::git::GitLimits;
 use potluck::role::Role;
+use potluck::server::start;
 use potluck::slug::Slug;
 
-use crate::common::{GitServer, TestAccess, failed, git, git_server, ok, work_tree};
+use crate::common::{
+    GitServer, TestAccess, api_admin, api_team, api_workspace, client, failed, git, git_server, ok,
+    parse_config, work_tree, write_script,
+};
 
 const TOKEN: &str = "plk_writer_token_000000000000000000000000000";
 const ENV_YML: &[u8] = include_bytes!("fixtures/secret-check/bad/env-secret-valued.yml");
@@ -327,4 +333,140 @@ async fn an_environment_file_over_the_cap_is_refused_but_a_big_note_lands() {
         &["push", "-q", &url, "main"],
     ));
     assert_eq!(server_main(&server, &home), Some(work_head(&home, &work)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_configured_git_reaches_the_installed_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("git.log");
+    let wrapper = dir.path().join("logging-git");
+    write_script(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nexec git \"$@\"\n",
+            log.display()
+        ),
+    );
+    let data = dir.path().join("data");
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data.to_str().unwrap(),
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--git",
+        wrapper.to_str().unwrap(),
+    ])
+    .unwrap();
+    let running = start(&config).await.unwrap();
+    // The installed hook execs this test binary; the potluck binary takes its place and the
+    // rest of the script, the configured git included, stays as `start` wrote it.
+    let hook = data.join("hooks").join("pre-receive");
+    let installed = std::fs::read_to_string(&hook).unwrap();
+    assert!(
+        installed.contains(&format!("POTLUCK_GIT='{}'", wrapper.display())),
+        "{installed}"
+    );
+    let this = std::env::current_exe().unwrap();
+    let swapped = installed.replace(
+        &format!("'{}'", this.display()),
+        &format!("'{}'", env!("CARGO_BIN_EXE_potluck")),
+    );
+    assert_ne!(
+        swapped, installed,
+        "the installed hook names this test binary"
+    );
+    write_script(&hook, &swapped);
+    let api = format!("http://{}/api/v1", running.http_addr());
+    let root = api_admin(running.db()).await;
+    api_team(&api, &root, "core").await;
+    api_workspace(&api, &root, "core", "api", false).await;
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    let url = format!("http://{}/git/core/api.git", running.http_addr());
+    let pushed = tokio::task::spawn_blocking(move || {
+        git(
+            &home,
+            Some(&work),
+            Some(&root),
+            &["push", "-q", &url, "main"],
+        )
+    })
+    .await
+    .unwrap();
+    ok(pushed);
+    running.shutdown().await;
+    // Only the hook's scan runs `cat-file`; receive-pack's own helpers bypass `--git`.
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert!(calls.lines().any(|l| l.starts_with("cat-file ")), "{calls}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_hook_is_refused_before_waiting_for_a_git_slot() {
+    let access =
+        TestAccess::new()
+            .workspace("core", "api")
+            .grant(TOKEN, "core", "api", Role::Write);
+    // One slot and a 300 ms queue wait: a request that waited for the held slot would get 503.
+    let limits = GitLimits::new(1, Duration::from_millis(300), Duration::from_secs(60));
+    let server = git_server(access, Some(limits), &[]).await;
+    server
+        .repos
+        .init(
+            &Slug::parse("core").unwrap(),
+            &Slug::parse("api").unwrap(),
+            "main",
+        )
+        .await
+        .unwrap();
+    let home = server.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let url = server.url("core", "api");
+    let work = work_tree(&home, "work");
+    let hook = server.dir.path().join("hooks").join("pre-receive");
+    let started = server.dir.path().join("hook-started");
+    write_script(
+        &hook,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nsleep 5\nexit 0\n",
+            started.display()
+        ),
+    );
+    let (holder_home, holder_work, holder_url) = (home.clone(), work.clone(), url.clone());
+    let holder = std::thread::spawn(move || {
+        git(
+            &holder_home,
+            Some(&holder_work),
+            Some(TOKEN),
+            &["push", "-q", &holder_url, "main"],
+        )
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the holding hook never ran"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // The running hook keeps its open script; the next receive-pack finds no hook.
+    std::fs::remove_file(&hook).unwrap();
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main:refs/heads/other"],
+    ));
+    assert!(output.contains("500"), "the advertisement: {output}");
+    let posted = client()
+        .post(format!("{url}/git-receive-pack"))
+        .bearer_auth(TOKEN)
+        .body("0000")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(posted.status().as_u16(), 500, "the receive-pack POST");
+    ok(holder.join().unwrap());
 }

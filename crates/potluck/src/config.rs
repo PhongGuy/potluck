@@ -29,7 +29,8 @@ pub struct ServeArgs {
     #[arg(long, env = "POTLUCK_MAX_PUSH_BYTES", default_value_t = 100 * 1024 * 1024)]
     max_push_bytes: u64,
     /// Longest a git process (and its hook) may run before it is killed, in seconds.
-    #[arg(long, env = "POTLUCK_GIT_MAX_RUNTIME_SECS", default_value_t = 1800,
+    #[arg(long, env = "POTLUCK_GIT_MAX_RUNTIME_SECS",
+          default_value_t = crate::git::engine::DEFAULT_MAX_RUNTIME_SECS,
           value_parser = clap::value_parser!(u64).range(1..))]
     git_max_runtime_secs: u64,
     /// Tracing filter directive, such as `info` or `potluck=debug`.

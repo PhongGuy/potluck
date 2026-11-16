@@ -14,6 +14,9 @@ use crate::api::error::ApiError;
 use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
 use crate::git::{Repos, Service, spool, sweep};
 
+/// The default for how long a git child may run from spawn: 30 min.
+pub(crate) const DEFAULT_MAX_RUNTIME_SECS: u64 = 1800;
+
 /// How many git slots exist, how long a request waits for one, how long an upload may hold one
 /// before git starts, and how long each git child may run from spawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +35,7 @@ impl GitLimits {
             processes: processes.max(1),
             queue_wait,
             upload_timeout,
-            max_runtime: Duration::from_secs(1800),
+            max_runtime: Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS),
         }
     }
 
@@ -159,19 +162,9 @@ impl GitEngine {
                 status.map_err(GitError::Spawn)?
             }
             Err(_) => {
-                kill_group(group);
-                if child.wait().await.is_ok() {
-                    guard.disarm();
-                }
-                tracing::warn!(
-                    service = service.name(),
-                    limit = ?self.max_runtime,
-                    "git ran past its run limit; killed its process group"
-                );
-                return Err(GitError::Overran {
-                    service: service.name(),
-                    limit: self.max_runtime,
-                });
+                let err = overran(&mut child, group, service, self.max_runtime).await;
+                guard.disarm();
+                return Err(err);
             }
         };
         if !status.success() {
@@ -286,15 +279,8 @@ impl GitEngine {
                     false
                 }
                 Err(_) => {
-                    // Kill the whole group, then reap the leader. The cut-off stderr tail is not
-                    // worth logging.
-                    kill_group(group);
-                    let _ = child.wait().await;
-                    tracing::warn!(
-                        service = service.name(),
-                        limit = ?max_runtime,
-                        "git ran past its run limit; killed its process group"
-                    );
+                    // The cut-off stderr tail is not worth logging.
+                    let _ = overran(&mut child, group, service, max_runtime).await;
                     true
                 }
             };
@@ -381,6 +367,31 @@ fn kill_group(group: Option<rustix::process::Pid>) {
     match kill_process_group(pid, Signal::KILL) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {}
         Err(err) => tracing::warn!(error = %err, "cannot kill the git process group"),
+    }
+}
+
+/// SIGKILLs `group`, then reaps `child`, the group's leader.
+async fn kill_and_reap(child: &mut tokio::process::Child, group: Option<rustix::process::Pid>) {
+    kill_group(group);
+    let _ = child.wait().await;
+}
+
+/// Kills and reaps git at the run limit, logs the one warning, and returns `Overran`.
+async fn overran(
+    child: &mut tokio::process::Child,
+    group: Option<rustix::process::Pid>,
+    service: Service,
+    limit: Duration,
+) -> GitError {
+    kill_and_reap(child, group).await;
+    tracing::warn!(
+        service = service.name(),
+        limit = ?limit,
+        "git ran past its run limit; killed its process group"
+    );
+    GitError::Overran {
+        service: service.name(),
+        limit,
     }
 }
 

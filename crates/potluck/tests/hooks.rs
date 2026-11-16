@@ -397,3 +397,22 @@ async fn a_hook_past_the_run_limit_fails_the_push_and_frees_the_slot() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
+
+#[test]
+fn a_failed_install_removes_its_temporary_file() {
+    let dir = tempfile::tempdir().unwrap();
+    // A non-empty directory where the hook goes fails the rename after the temp file is written.
+    let blocker = dir.path().join("pre-receive");
+    std::fs::create_dir_all(blocker.join("keep")).unwrap();
+    let err = install(
+        dir.path(),
+        Path::new("/opt/potluck/bin/potluck"),
+        Path::new("git"),
+    )
+    .unwrap_err();
+    assert!(
+        !dir.path().join("pre-receive.tmp").exists(),
+        "the temporary file is removed after: {err}"
+    );
+    assert!(blocker.join("keep").is_dir(), "the blocker is untouched");
+}

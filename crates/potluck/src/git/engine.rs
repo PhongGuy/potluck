@@ -526,7 +526,7 @@ async fn read_commands(
 ) -> Result<(std::fs::File, Vec<RefCommand>), GitError> {
     use std::io::Seek;
     let (file, parsed) = tokio::task::spawn_blocking(move || {
-        let parsed = parse_commands(&mut file);
+        let parsed = parse_commands(std::io::BufReader::new(&mut file));
         file.rewind().map(|()| (file, parsed))
     })
     .await

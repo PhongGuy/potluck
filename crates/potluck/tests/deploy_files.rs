@@ -224,6 +224,47 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
     }
 }
 
+/// The text of the README section under `heading` (`## ...` or `### ...`), up to the next
+/// heading of the same or a higher level.
+fn readme_section<'a>(readme: &'a str, heading: &str) -> &'a str {
+    let start = readme
+        .find(&format!("\n{heading}\n"))
+        .unwrap_or_else(|| panic!("README lacks {heading}"));
+    let rest = &readme[start + heading.len() + 2..];
+    let mut ends = vec![rest.find("\n## ")];
+    if heading.starts_with("### ") {
+        ends.push(rest.find("\n### "));
+    }
+    let end = ends.into_iter().flatten().min().unwrap_or(rest.len());
+    &rest[..end]
+}
+
+#[test]
+fn the_readme_covers_rootless_docker_bind_mounts_and_the_compose_volume_warning() {
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let bind = readme_section(&readme, "## Bind mounts");
+    for needle in [
+        "docker run --rm -v ~/potluck-data:/data debian:trixie-slim chown 65532:65532 /data",
+        "sudo chown 65532:65532 ~/potluck-data",
+        "rootless",
+    ] {
+        assert!(
+            bind.contains(needle),
+            "Bind mounts lacks {needle:?}: {bind}"
+        );
+    }
+    let compose = readme_section(&readme, "### Compose");
+    for needle in [
+        "already exists but was not created by Docker Compose",
+        "expected",
+    ] {
+        assert!(
+            compose.contains(needle),
+            "Compose lacks {needle:?}: {compose}"
+        );
+    }
+}
+
 /// An engine stub that logs each call's arguments and claims the image has a HEALTHCHECK.
 fn stub_engine(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("engine");

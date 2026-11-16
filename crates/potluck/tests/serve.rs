@@ -401,3 +401,89 @@ async fn a_start_sweeps_killed_push_leftovers_and_the_push_then_lands() {
     ));
     again.shutdown().await;
 }
+
+/// A `sleep` in its own process group holding `path` open, as a detached maintenance run holds
+/// its lock from outside git's group. Killed and reaped on drop, so a failed assert ends it.
+struct LockHolder(std::process::Child);
+
+impl LockHolder {
+    fn open(path: &std::path::Path) -> LockHolder {
+        use std::os::unix::process::CommandExt;
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::fs::File::open(path).unwrap())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        LockHolder(child)
+    }
+}
+
+impl Drop for LockHolder {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+// A start that meets a live maintenance run leaves the ref locks to it; once the run ends, the
+// first push fails on the stale lock, sweeps it on its way out, and the retry lands.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_deferred_by_live_maintenance_is_swept_by_the_first_push() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    let first = start(&config).await.unwrap();
+    let root = api_admin(first.db()).await;
+    let api = format!("http://{}/api/v1", first.http_addr());
+    api_team(&api, &root, "core").await;
+    api_workspace(&api, &root, "core", "api", false).await;
+    first.shutdown().await;
+
+    let repo = repo_path(dir.path(), "core", "api");
+    let stale = repo.join("refs/heads/main.lock");
+    std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+    std::fs::write(&stale, "x").unwrap();
+    // Backdated past git's 12-hour horizon, so only the holder's open fd keeps it live.
+    let lock = repo.join("objects/maintenance.lock");
+    std::fs::File::create(&lock)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(13 * 3600))
+        .unwrap();
+    let holder = LockHolder::open(&lock);
+
+    let again = start(&config).await.unwrap();
+    write_hook(&dir.path().join("hooks"), "exit 0");
+    assert!(stale.exists(), "the startup sweep defers to the live run");
+    drop(holder);
+
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    let url = format!("http://{}/git/core/api.git", again.http_addr());
+    let push = || {
+        git(
+            &home,
+            Some(&work),
+            Some(&root),
+            &["push", "-q", &url, "main"],
+        )
+    };
+    assert!(
+        !push().status.success(),
+        "the first push meets the stale lock"
+    );
+    // The push is answered before receive-pack is reaped and its writer leaves, so the sweep
+    // lands a moment after the client returns.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stale.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !stale.exists(),
+        "the first push out sweeps the deferred lock"
+    );
+    ok(push());
+    again.shutdown().await;
+}

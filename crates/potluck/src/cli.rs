@@ -86,6 +86,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
 /// stop signal and drains both listeners.
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let config = Config::try_from(args)?;
+    // Before the log or the data dir exist, so an unbindable socket path leaves nothing behind.
+    config.check_admin_socket()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(config.log())?)
         .with_writer(std::io::stderr)

@@ -110,13 +110,18 @@ impl Notices {
         let mut reg = lock(&self.inner);
         let id = reg.next_id;
         reg.next_id += 1;
-        let moves = reg
-            .topics
-            .entry(workspace_id)
-            .or_insert_with(|| broadcast::channel(CAPACITY).0)
-            .subscribe();
+        // After shutdown the stream gets a standalone receiver whose sender is already gone, so
+        // no topic outlives the shutdown waiting for this stream's guard.
+        let moves = if reg.closed {
+            broadcast::channel(1).1
+        } else {
+            reg.topics
+                .entry(workspace_id)
+                .or_insert_with(|| broadcast::channel(CAPACITY).0)
+                .subscribe()
+        };
         let (close, closed) = oneshot::channel();
-        // After shutdown the sender is dropped on the spot: the stream ends at once and is
+        // After shutdown the close sender is dropped on the spot: the stream ends at once and is
         // never registered.
         if !reg.closed {
             reg.streams.push(Entry {
@@ -205,5 +210,23 @@ impl Notices {
         let before = reg.streams.len();
         reg.streams.retain(|e| !matches(e));
         before - reg.streams.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_subscribe_after_close_all_creates_no_topic() {
+        let notices = Notices::new();
+        notices.close_all();
+        let mut sub = notices.subscribe(7, 1, 1);
+        assert!(
+            lock(&notices.inner).topics.is_empty(),
+            "a closed registry makes no topic for a stream that ends at once"
+        );
+        assert!(sub.next().await.is_none(), "the stream ends at once");
+        assert_eq!(notices.open(), 0, "and is never registered");
     }
 }

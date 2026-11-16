@@ -711,29 +711,51 @@ impl SseReader {
         })
     }
 
-    /// The lines of the next block that is not a comment-only keep-alive; `None` once the
-    /// server closed the stream.
+    /// The lines of the next block that is not a comment-only keep-alive, with LF or CRLF line
+    /// ends; `None` once the server closed the stream with only blank or comment lines left.
+    /// Panics with `stream ended mid-event` when the stream ends inside an event, since a client
+    /// discards such an event.
     pub async fn next_block(&mut self) -> Option<Vec<String>> {
         loop {
             if let Some(end) = self.buf.windows(2).position(|w| w == b"\n\n") {
                 let block: Vec<u8> = self.buf.drain(..end + 2).collect();
-                let lines: Vec<String> = String::from_utf8(block)
-                    .expect("utf-8")
-                    .lines()
-                    .filter(|l| !l.is_empty() && !l.starts_with(':'))
-                    .map(str::to_owned)
-                    .collect();
+                let lines = event_lines(&block);
                 if lines.is_empty() {
                     continue;
                 }
                 return Some(lines);
             }
             match self.response.chunk().await.expect("read") {
-                Some(bytes) => self.buf.extend_from_slice(&bytes),
-                None => return None,
+                // CRLF is folded to LF over the whole buffer, not per chunk, so a pair split
+                // across two chunks joins up first and counts as one line end.
+                Some(bytes) => {
+                    self.buf.extend_from_slice(&bytes);
+                    let buf = std::mem::take(&mut self.buf);
+                    self.buf = buf
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, &b)| b != b'\r' || buf.get(i + 1) != Some(&b'\n'))
+                        .map(|(_, &b)| b)
+                        .collect();
+                }
+                None => {
+                    let leftover = event_lines(&self.buf);
+                    assert!(leftover.is_empty(), "stream ended mid-event: {leftover:?}");
+                    return None;
+                }
             }
         }
     }
+}
+
+/// The non-empty, non-comment lines of an SSE block.
+fn event_lines(block: &[u8]) -> Vec<String> {
+    std::str::from_utf8(block)
+        .expect("utf-8")
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with(':'))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// `(ref, sha)` of a `ref` event block.

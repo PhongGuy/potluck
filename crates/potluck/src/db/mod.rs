@@ -81,9 +81,9 @@ struct Inner {
 }
 
 impl Inner {
-    // Close the channel first so the thread drains its queue and exits, then join it so the
-    // file is released before we return. A poisoned lock still yields its value, so the
-    // sender is always dropped and the join cannot hang.
+    // Close the channel so the thread drains its queue and exits, then join it so the file is
+    // released before we return, except on the database thread itself, which ends after its
+    // current job. A poisoned lock still yields its value, so the sender is always dropped.
     fn stop(&self) {
         self.tx
             .lock()
@@ -94,8 +94,7 @@ impl Inner {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        // On the database thread itself a join would deadlock; dropping the handle detaches it,
-        // and the thread ends once the current job returns to the closed channel.
+        // A self-join would deadlock, so there the handle is dropped, detaching the thread.
         if let Some(handle) = handle
             && handle.thread().id() != std::thread::current().id()
         {

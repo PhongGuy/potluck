@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use potluck::git::{RepoError, Repos};
 use potluck::slug::Slug;
 
-use crate::common::{SEED_COMMIT, git, ok};
+use crate::common::{SEED_COMMIT, git, hanging_git, ok};
 
 fn repos(root: &Path) -> Repos {
     Repos::new(root.to_path_buf(), PathBuf::from("git"))
@@ -318,4 +318,76 @@ async fn seed_commit_refuses_bad_and_duplicate_names_before_spawning_git() {
             "{files:?}: got {err:?}"
         );
     }
+}
+
+/// Whether the process `<dir>/hung.pid` names is gone; a killed but unreaped one would remain.
+fn hung_git_is_gone(dir: &Path) -> bool {
+    let pid = std::fs::read_to_string(dir.join("hung.pid")).expect("the wrapper hung");
+    !Path::new(&format!("/proc/{}", pid.trim())).exists()
+}
+
+#[tokio::test]
+async fn init_kills_a_git_that_runs_past_the_limit_and_frees_the_slug() {
+    let dir = tempfile::tempdir().unwrap();
+    let wrapper = hanging_git(dir.path(), "init");
+    let r = Repos::new(dir.path().join("repos"), wrapper)
+        .with_max_runtime(std::time::Duration::from_millis(500));
+    let began = std::time::Instant::now();
+    let err = r
+        .init(&slug("acme"), &slug("ws"), "main")
+        .await
+        .expect_err("a hung init fails");
+    assert!(
+        matches!(err, RepoError::Overran { step: "init", .. }),
+        "got {err:?}"
+    );
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        began.elapsed()
+    );
+    assert!(
+        !r.path(&slug("acme"), &slug("ws")).exists(),
+        "the claim is removed"
+    );
+    assert!(
+        hung_git_is_gone(dir.path()),
+        "the hung git is killed and reaped"
+    );
+}
+
+#[tokio::test]
+async fn seed_commit_kills_a_plumbing_git_that_runs_past_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = repos(&dir.path().join("repos"))
+        .init(&slug("acme"), &slug("ws"), "main")
+        .await
+        .unwrap();
+    let wrapper = hanging_git(dir.path(), "hash-object");
+    let r = Repos::new(dir.path().join("repos"), wrapper)
+        .with_max_runtime(std::time::Duration::from_millis(500));
+    let began = std::time::Instant::now();
+    let err = r
+        .seed_commit(&repo, "main", &apinata_seed(), "P", "p@h", "m")
+        .await
+        .expect_err("a hung hash-object fails");
+    assert!(
+        matches!(
+            err,
+            RepoError::Overran {
+                step: "hash-object",
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+    assert!(
+        began.elapsed() < std::time::Duration::from_secs(10),
+        "took {:?}",
+        began.elapsed()
+    );
+    assert!(
+        hung_git_is_gone(dir.path()),
+        "the hung git is killed and reaped"
+    );
 }

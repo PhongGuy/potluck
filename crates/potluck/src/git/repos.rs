@@ -1,10 +1,13 @@
 //! [`Repos`]: where bare repositories live, and how one is created.
 
 use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
+use std::time::Duration;
 
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::git::engine::{DEFAULT_MAX_RUNTIME_SECS, GroupKill, kill_and_reap, process_group};
 use crate::slug::Slug;
 
 /// The author and committer date of every seed commit, `GIT_*_DATE` form: 2026-01-01T00:00:00Z.
@@ -17,12 +20,26 @@ pub const SEED_DATE: &str = "1767225600 +0000";
 pub struct Repos {
     root: PathBuf,
     git: PathBuf,
+    max_runtime: Duration,
 }
 
 impl Repos {
     /// `root` is `Config::repos_dir()`, `git` is the binary from `Config::git()`.
     pub fn new(root: PathBuf, git: PathBuf) -> Self {
-        Self { root, git }
+        Self {
+            root,
+            git,
+            max_runtime: Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS),
+        }
+    }
+
+    /// The same layout with each git child allowed `max_runtime` from spawn; default 30 min.
+    #[must_use]
+    pub fn with_max_runtime(self, max_runtime: Duration) -> Self {
+        Self {
+            max_runtime,
+            ..self
+        }
     }
 
     /// The git binary this server spawns.
@@ -71,19 +88,18 @@ impl Repos {
             .arg("-q")
             .arg("--bare")
             .arg(format!("--initial-branch={default_branch}"))
-            .arg(&path)
-            .stdin(std::process::Stdio::null());
+            .arg(&path);
         if let Some(search) = std::env::var_os("PATH") {
             command.env("PATH", search);
         }
         // The directory is ours from the claim; on any failure remove it so a retry starts clean.
-        let failure = match command.output().await {
+        let failure = match self.run(command, &path, "init", &[]).await {
             Ok(output) if output.status.success() => return Ok(path),
             Ok(output) => RepoError::GitInit {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
                 path: path.clone(),
             },
-            Err(source) => io(source),
+            Err(err) => err,
         };
         let _ = tokio::fs::remove_dir_all(&path).await;
         Err(failure)
@@ -193,10 +209,6 @@ impl Repos {
         stdin: &[u8],
         env: &[(&str, &str)],
     ) -> Result<String, RepoError> {
-        let io = |source| RepoError::Io {
-            path: repo.to_path_buf(),
-            source,
-        };
         let mut command = Command::new(&self.git);
         command
             .env_clear()
@@ -204,23 +216,11 @@ impl Repos {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .envs(env.iter().copied())
             .arg(format!("--git-dir={}", repo.display()))
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .args(args);
         if let Some(search) = std::env::var_os("PATH") {
             command.env("PATH", search);
         }
-        let mut child = command.spawn().map_err(io)?;
-        // Seeds are small, so writing all of stdin before reading output cannot fill a pipe. A git
-        // that already exited closes the pipe early; its exit status then tells what went wrong.
-        if let Some(mut input) = child.stdin.take() {
-            match input.write_all(stdin).await {
-                Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(io(e)),
-                _ => {}
-            }
-        }
-        let output = child.wait_with_output().await.map_err(io)?;
+        let output = self.run(command, repo, step, stdin).await?;
         if !output.status.success() {
             return Err(RepoError::Seed {
                 path: repo.to_path_buf(),
@@ -229,6 +229,73 @@ impl Repos {
             });
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    /// Spawns `command` in its own process group, feeds it `stdin` and collects its output. A git
+    /// still running `max_runtime` after spawn has its whole group killed and reaped: `Overran`.
+    async fn run(
+        &self,
+        mut command: Command,
+        path: &Path,
+        step: &'static str,
+        stdin: &[u8],
+    ) -> Result<Output, RepoError> {
+        let io = |source| RepoError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true);
+        let mut child = command.spawn().map_err(io)?;
+        let group = process_group(&child);
+        let guard = GroupKill(group);
+        let (Some(mut input), Some(mut stdout), Some(mut stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            return Err(io(std::io::Error::other("git has no pipes")));
+        };
+        // Feed stdin while draining both pipes, and reap, all inside the run limit; dropping
+        // the input once written gives git its EOF.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let bounded = tokio::time::timeout(self.max_runtime, async {
+            let feed = async move { input.write_all(stdin).await };
+            let (fed, read_out, read_err) = tokio::join!(
+                feed,
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err)
+            );
+            (fed, read_out, read_err, child.wait().await)
+        })
+        .await;
+        let Ok((fed, read_out, read_err, status)) = bounded else {
+            kill_and_reap(&mut child, group).await;
+            guard.disarm();
+            tracing::warn!(step, limit = ?self.max_runtime, "git ran past its run limit while making a repository; killed its process group");
+            return Err(RepoError::Overran {
+                path: path.to_path_buf(),
+                step,
+                limit: self.max_runtime,
+            });
+        };
+        if status.is_ok() {
+            guard.disarm();
+        }
+        // A git that already exited closes stdin early; its exit status then tells what happened.
+        match fed {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(io(e)),
+            _ => {}
+        }
+        read_out.map_err(io)?;
+        read_err.map_err(io)?;
+        Ok(Output {
+            status: status.map_err(io)?,
+            stdout: out,
+            stderr: err,
+        })
     }
 }
 
@@ -268,6 +335,16 @@ pub enum RepoError {
         step: &'static str,
         /// git's stderr, trimmed.
         stderr: String,
+    },
+    /// git ran past its run limit while making the repository; its process group was killed.
+    #[error("git {step} for {path} ran past its run limit of {limit:?} and was killed")]
+    Overran {
+        /// The repository path.
+        path: PathBuf,
+        /// `init`, or the `seed_commit` plumbing step that hung.
+        step: &'static str,
+        /// The run limit git exceeded.
+        limit: Duration,
     },
     /// A seed file name is empty, `.`, `..`, carries `/`, a newline or a tab, or is repeated.
     #[error("seed file name {name:?} must be a plain root-level file name")]

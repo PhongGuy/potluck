@@ -762,3 +762,22 @@ pub async fn session(addr: SocketAddr, username: &str, password: &str) -> Result
     let body: serde_json::Value = r.json().await.expect("json");
     Ok(body["token_meta"]["id"].as_i64().expect("token id"))
 }
+
+/// A git wrapper at `<dir>/hanging-git` that hangs when any argument is exactly `step` (such as
+/// `init` or `hash-object`), writing its pid to `<dir>/hung.pid` first, and otherwise runs the
+/// real git from `PATH`. The hang lasts while `<dir>/hold` exists, at most 60 s, so removing
+/// the temp dir ends it even when the code under test never kills it.
+pub fn hanging_git(dir: &Path, step: &str) -> std::path::PathBuf {
+    let wrapper = dir.join("hanging-git");
+    let hold = dir.join("hold");
+    std::fs::write(&hold, b"").expect("hold file");
+    write_script(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = '{step}' ]; then\n    echo $$ > '{pid}'\n    n=0\n    while [ -e '{hold}' ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n+1)); done\n    exit 1\n  fi\ndone\nexec git \"$@\"\n",
+            pid = dir.join("hung.pid").display(),
+            hold = hold.display(),
+        ),
+    );
+    wrapper
+}

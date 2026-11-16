@@ -402,22 +402,34 @@ async fn a_start_sweeps_killed_push_leftovers_and_the_push_then_lands() {
     again.shutdown().await;
 }
 
-/// A `sleep` in its own process group holding `path` open, as a detached maintenance run holds
-/// its lock from outside git's group. Killed and reaped on drop, so a failed assert ends it.
+/// A `git hash-object --stdin` in its own process group holding `path` open, as a detached
+/// maintenance run holds its lock from outside git's group. Killed and reaped on drop.
 struct LockHolder(std::process::Child);
 
 impl LockHolder {
     fn open(path: &std::path::Path) -> LockHolder {
         use std::os::unix::process::CommandExt;
-        let child = std::process::Command::new("sleep")
-            .arg("30")
-            .stdin(std::fs::File::open(path).unwrap())
-            .stdout(Stdio::null())
+        let lock = std::fs::File::options().append(true).open(path).unwrap();
+        let child = std::process::Command::new("git")
+            .args(["hash-object", "--stdin"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::piped())
+            .stdout(lock)
             .stderr(Stdio::null())
             .process_group(0)
             .spawn()
             .unwrap();
-        LockHolder(child)
+        let holder = LockHolder(child);
+        // The sweep checks the holder's argv, so wait until /proc shows git; the holder is
+        // already built, so a timeout still kills and reaps it.
+        let cmdline = format!("/proc/{}/cmdline", holder.0.id());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::fs::read(&cmdline).is_ok_and(|argv| argv.starts_with(b"git\0")) {
+            assert!(Instant::now() < deadline, "git never showed in {cmdline}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        holder
     }
 }
 

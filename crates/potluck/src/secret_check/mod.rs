@@ -40,14 +40,15 @@ pub fn run_pre_receive() -> ExitCode {
 /// Parses stdin and scans it; the error is the reason for the `potluck-error` line, a fixed
 /// ASCII phrase per failure that never carries git's output, a path or a ref name.
 fn check(env: &HookEnv) -> Result<Vec<scan::Rejection>, String> {
-    let mut input = String::new();
+    // Bytes, not text: a ref name need not be UTF-8, and every non-empty line is still parsed.
+    let mut input = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut input)
+        .read_to_end(&mut input)
         .map_err(|_| "unreadable stdin".to_owned())?;
     let updates = input
-        .lines()
+        .split(|&b| b == b'\n')
         .filter(|l| !l.is_empty())
-        .map(|l| RefUpdate::parse_line(l.as_bytes()))
+        .map(RefUpdate::parse_line)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "malformed ref line".to_owned())?;
     scan(env, &updates, &Git::from_env()).map_err(|ScanError::Git(e)| match e {

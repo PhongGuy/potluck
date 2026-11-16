@@ -66,14 +66,19 @@ impl Writer {
             return false;
         }
         // Failing to take the gate means another writer is inside and will sweep on its way out.
-        let Ok(_sweeping) = Arc::clone(&entry.gate).try_write_owned() else {
+        let Ok(sweeping) = Arc::clone(&entry.gate).try_write_owned() else {
             return false;
         };
         if !entry.dirty.swap(false, Ordering::SeqCst) {
             return false;
         }
         let repo = entry.repo.clone();
-        if let Err(err) = tokio::task::spawn_blocking(move || sweep(&repo)).await {
+        // The blocking task owns the guard, so a dropped `leave` cannot open the gate early.
+        let swept = tokio::task::spawn_blocking(move || {
+            let _sweeping = sweeping;
+            sweep(&repo)
+        });
+        if let Err(err) = swept.await {
             tracing::warn!(repo = %entry.repo.display(), error = %err, "sweep task failed");
         }
         true
@@ -312,5 +317,48 @@ mod tests {
         assert!(waiting.is_err(), "enter waits for the sweep");
         drop(sweeping);
         writers.enter(&repo).await.leave(false).await;
+    }
+
+    #[tokio::test]
+    async fn a_dropped_leave_keeps_the_repository_closed_until_its_sweep_ends() {
+        use std::io::Write;
+        use std::time::Duration;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        // A keep that is a FIFO stalls the sweep in its read until the test writes to it.
+        let keep = repo.join("objects/pack/pack-fifo.keep");
+        std::fs::create_dir_all(keep.parent().unwrap()).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&keep)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo made the stalling keep");
+        let writers = Writers::default();
+        let killed = writers.enter(&repo).await;
+        let leaving = tokio::time::timeout(Duration::from_millis(300), killed.leave(true)).await;
+        assert!(leaving.is_err(), "the sweep is stalled on the FIFO");
+        let entered = tokio::time::timeout(Duration::from_millis(300), writers.enter(&repo)).await;
+        // Unstall the sweep before asserting: the runtime's shutdown waits for blocking tasks.
+        // Read-write opens a FIFO without waiting for a reader, so this never blocks.
+        let mut fifo = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&keep)
+            .unwrap();
+        fifo.write_all(b"receive-pack 1 on host\n").unwrap();
+        drop(fifo);
+        assert!(
+            entered.is_err(),
+            "enter waits while the dropped leave's sweep still runs"
+        );
+        let after = tokio::time::timeout(Duration::from_secs(10), writers.enter(&repo))
+            .await
+            .expect("the repository opens once the sweep ends");
+        assert!(!after.leave(false).await, "the sweep cleared the flag");
+        assert!(
+            !repo.join("refs/heads/main.lock").exists(),
+            "the lock is swept"
+        );
+        assert!(!keep.exists(), "the stalled keep is swept");
     }
 }

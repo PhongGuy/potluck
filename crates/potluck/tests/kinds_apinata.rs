@@ -459,3 +459,134 @@ fn over_cap_rule_refuses_an_environment_file_the_hook_cannot_read() {
     assert_eq!(Apinata.over_cap_rule("notes/big.bin"), None);
     assert_eq!(Apinata.over_cap_rule("environments/nested/dev.yml"), None);
 }
+
+#[test]
+fn a_valued_secret_in_a_mapping_key_is_refused() {
+    for (name, bytes) in [
+        (
+            "block complex key",
+            b"variables:\n  - ? {secret: true, value: x}\n    : 1\n" as &[u8],
+        ),
+        (
+            "flow complex key",
+            b"v: {? {secret: true, value: x} : 1}\n" as &[u8],
+        ),
+        (
+            "key of a key",
+            b"? {? {secret: true, value: x} : 1}\n: 1\n" as &[u8],
+        ),
+        (
+            "inside a sequence key",
+            b"? [{secret: true, value: x}]\n: 1\n" as &[u8],
+        ),
+        (
+            "tagged key",
+            b"? !t {secret: true, value: x}\n: 1\n" as &[u8],
+        ),
+        (
+            "inside a value of a key",
+            b"? {v: {secret: true, value: x}}\n: 1\n" as &[u8],
+        ),
+        (
+            "anchored in a key, aliased as a key",
+            b"? &s {secret: true, value: x}\n: 1\nb: {? *s : 2}\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            hit(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_unvalued_secret_in_a_mapping_key_passes() {
+    let bytes = b"? {secret: true, value: null}\n: 1\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
+}
+
+#[test]
+fn a_secret_key_is_found_within_the_same_node_cap() {
+    // root map, key map, 4 scalars, value 1
+    let bytes = b"? {secret: true, value: x}\n: 1\n";
+    assert_eq!(environment_rule(bytes, 7), hit());
+    assert_eq!(environment_rule(bytes, 6), unparsable());
+}
+
+// Nested complex keys, the secret innermost: `{? {? ... {secret: true, value: x} : 1} : 1}`.
+fn nested_keys(depth: usize) -> Vec<u8> {
+    let mut s = "{? ".repeat(depth);
+    s.push_str("{secret: true, value: x}");
+    s.push_str(&" : 1}".repeat(depth));
+    s.into_bytes()
+}
+
+#[test]
+fn key_nesting_is_walked_to_the_parser_depth_limit_and_refused_past_it() {
+    assert_eq!(environment_rule(&nested_keys(120), NODE_CAP), hit());
+    assert_eq!(environment_rule(&nested_keys(200), NODE_CAP), unparsable());
+}
+
+#[test]
+fn an_alias_bomb_expanding_only_into_keys_is_unparsable() {
+    // Ten levels of ten-fold aliases, every anchor inside a key: 10^10 nodes unexpanded.
+    let mut s = String::from("? &l0 [x, x, x, x, x, x, x, x, x, x]\n: 0\n");
+    for i in 1..10 {
+        let prev = format!("*l{}", i - 1);
+        s.push_str(&format!("? &l{i} [{}]\n: {i}\n", vec![prev; 10].join(", ")));
+    }
+    assert_eq!(environment_rule(s.as_bytes(), NODE_CAP), unparsable());
+}
+
+// One 4000-scalar anchor, then `entries` distinct keys `[*a, i]` each expanding it, then a
+// valued secret as the last key. 4003 + entries * 4004 + 6 nodes.
+fn key_fan_out(entries: usize) -> Vec<u8> {
+    let mut s = String::from("? &a [");
+    s.push_str(&vec!["x"; 4000].join(", "));
+    s.push_str("]\n: 0\n");
+    for i in 0..entries {
+        s.push_str(&format!("? [*a, {i}]\n: {i}\n"));
+    }
+    s.push_str("? {secret: true, value: x}\n: end\n");
+    s.into_bytes()
+}
+
+// The walk over keys is one pass over the counted tree, so the real cap bounds it.
+#[test]
+fn a_key_alias_fan_out_is_walked_to_its_last_key_under_the_real_cap() {
+    // 1,993,997 nodes: accepted by the cap, the secret in the last key found.
+    assert_eq!(environment_rule(&key_fan_out(497), NODE_CAP), hit());
+    // 2,010,013 nodes: refused by the cap before any walk.
+    assert_eq!(environment_rule(&key_fan_out(501), NODE_CAP), unparsable());
+}
+
+#[test]
+fn a_merge_inside_a_mapping_key_is_unparsable() {
+    // yaml_serde's apply_merge folds values only, so a `<<` inside a key is a merge it
+    // cannot apply, valued or not.
+    for (name, bytes) in [
+        (
+            "merge brings the value into a key",
+            b"a: &a {value: x}\nv: {? {<<: *a, secret: true} : 1}\n" as &[u8],
+        ),
+        (
+            "benign merge in a key",
+            b"a: &a {name: n}\nv: {? {<<: *a} : 1}\n" as &[u8],
+        ),
+        (
+            "merge in a key of a key",
+            b"a: &a {name: n}\n? {? {<<: *a} : 1}\n: 1\n" as &[u8],
+        ),
+        (
+            "merge in a key under a tag",
+            b"a: &a {name: n}\nv: !t {? [{<<: *a}] : 1}\n" as &[u8],
+        ),
+    ] {
+        assert_eq!(
+            Apinata.content_rule("environments/x.yml", bytes),
+            unparsable(),
+            "{name}"
+        );
+    }
+}

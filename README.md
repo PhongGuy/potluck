@@ -185,12 +185,33 @@ podman volume export potluck-data > potluck-data.tar
 systemctl --user start potluck
 ```
 
-To restore with podman, stop the server and run `podman volume import potluck-data potluck-data.tar`. With docker, stop it and unpack the archive into the volume through a throwaway container:
+Restore only into an empty volume, and check that `potluck-data.tar` exists first, because the clearing step below deletes everything in the volume. Both `podman volume import` and `tar -x` merge into what the volume already holds, so a `server.db-wal` or `server.db-shm` left from the old data would be applied over the restored database, and a leftover repository would be mixed in with the restored ones. A clean stop removes the WAL; if a backup does carry `server.db-wal` or `server.db-shm` (the stop timed out), they belong with that `server.db` and are restored with it, as the whole-volume tarball does.
+
+With podman:
+
+```sh
+podman stop potluck
+podman run --rm -v potluck-data:/data debian:trixie-slim find /data -mindepth 1 -delete
+podman volume import potluck-data potluck-data.tar
+podman start potluck
+```
+
+With docker, unpack the archive into the emptied volume through a throwaway container:
 
 ```sh
 docker stop potluck
+docker run --rm -v potluck-data:/data debian:trixie-slim find /data -mindepth 1 -delete
 docker run --rm -v potluck-data:/data -v "$PWD":/backup debian:trixie-slim tar -C /data -xf /backup/potluck-data.tar
 docker start potluck
+```
+
+With the Quadlet unit:
+
+```sh
+systemctl --user stop potluck
+podman run --rm -v potluck-data:/data debian:trixie-slim find /data -mindepth 1 -delete
+podman volume import potluck-data potluck-data.tar
+systemctl --user start potluck
 ```
 
 ## Verifying the image

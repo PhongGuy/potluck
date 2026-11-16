@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use potluck::git::{RepoError, Repos};
 use potluck::slug::Slug;
 
-use crate::common::{SEED_COMMIT, git, hanging_git, ok};
+use crate::common::{SEED_COMMIT, git, hanging_git, hung_git_is_gone, ok};
 
 fn repos(root: &Path) -> Repos {
     Repos::new(root.to_path_buf(), PathBuf::from("git"))
@@ -320,10 +320,36 @@ async fn seed_commit_refuses_bad_and_duplicate_names_before_spawning_git() {
     }
 }
 
-/// Whether the process `<dir>/hung.pid` names is gone; a killed but unreaped one would remain.
-fn hung_git_is_gone(dir: &Path) -> bool {
-    let pid = std::fs::read_to_string(dir.join("hung.pid")).expect("the wrapper hung");
-    !Path::new(&format!("/proc/{}", pid.trim())).exists()
+#[test]
+fn hung_git_is_gone_waits_for_the_group_child_not_only_the_leader() {
+    let dir = tempfile::tempdir().unwrap();
+    let wrapper = hanging_git(dir.path(), "for-each-ref");
+    let mut leader = std::process::Command::new(&wrapper)
+        .arg("for-each-ref")
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pidfile = dir.path().join("hung.pid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::fs::read_to_string(&pidfile).map_or(true, |p| p.trim().is_empty()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the wrapper never hung"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Only the leader dies and is reaped; the child it started keeps running.
+    leader.kill().unwrap();
+    leader.wait().unwrap();
+    assert!(
+        !hung_git_is_gone(dir.path()),
+        "a live group child means the hung git is not gone"
+    );
+    std::fs::remove_file(dir.path().join("hold")).unwrap();
+    assert!(
+        hung_git_is_gone(dir.path()),
+        "the child ends once the hold file is gone"
+    );
 }
 
 #[tokio::test]

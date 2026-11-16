@@ -763,21 +763,59 @@ pub async fn session(addr: SocketAddr, username: &str, password: &str) -> Result
     Ok(body["token_meta"]["id"].as_i64().expect("token id"))
 }
 
-/// A git wrapper at `<dir>/hanging-git` that hangs when any argument is exactly `step` (such as
-/// `init` or `hash-object`), writing its pid to `<dir>/hung.pid` first, and otherwise runs the
-/// real git from `PATH`. The hang lasts while `<dir>/hold` exists, at most 60 s, so removing
-/// the temp dir ends it even when the code under test never kills it.
+/// A git wrapper at `<dir>/hanging-git` that hangs on the first call with an argument exactly
+/// `step` (such as `init` or `hash-object`) and otherwise runs the real git from `PATH`.
 pub fn hanging_git(dir: &Path, step: &str) -> std::path::PathBuf {
+    hanging_git_on_call(dir, step, 1)
+}
+
+/// Like `hanging_git`, but each `step` call is counted in `<dir>/hung.calls` and the hang starts
+/// from the `nth` one. The hang starts a child in the same process group, records its pid in
+/// `<dir>/hung-child.pid` and then its own in `<dir>/hung.pid`, and lasts while `<dir>/hold`
+/// exists, at most 60 s, so removing the temp dir ends it even when nothing kills it.
+pub fn hanging_git_on_call(dir: &Path, step: &str, nth: usize) -> std::path::PathBuf {
     let wrapper = dir.join("hanging-git");
     let hold = dir.join("hold");
     std::fs::write(&hold, b"").expect("hold file");
     write_script(
         &wrapper,
         &format!(
-            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = '{step}' ]; then\n    echo $$ > '{pid}'\n    n=0\n    while [ -e '{hold}' ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n+1)); done\n    exit 1\n  fi\ndone\nexec git \"$@\"\n",
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = '{step}' ]; then\n    echo >> '{calls}'\n    if [ $(($(wc -l < '{calls}'))) -ge {nth} ]; then\n      (n=0; while [ -e '{hold}' ] && [ $n -lt 600 ]; do sleep 0.1; n=$((n+1)); done) &\n      echo $! > '{child}'\n      echo $$ > '{pid}'\n      wait\n      exit 1\n    fi\n    break\n  fi\ndone\nexec git \"$@\"\n",
+            calls = dir.join("hung.calls").display(),
+            child = dir.join("hung-child.pid").display(),
             pid = dir.join("hung.pid").display(),
             hold = hold.display(),
         ),
     );
     wrapper
+}
+
+/// Whether the hung git is gone: its leader (`<dir>/hung.pid`) must already be reaped, and the
+/// group child (`<dir>/hung-child.pid`) must be dead within 2 s. A zombie child counts as dead,
+/// since its reaper is whoever adopted it, not the code under test.
+pub fn hung_git_is_gone(dir: &Path) -> bool {
+    let read = |name: &str| {
+        let pid = std::fs::read_to_string(dir.join(name)).expect("the wrapper hung");
+        pid.trim().to_owned()
+    };
+    if Path::new(&format!("/proc/{}", read("hung.pid"))).exists() {
+        return false;
+    }
+    let stat = format!("/proc/{}/stat", read("hung-child.pid"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        // The state field follows the parenthesised command name.
+        let dead = std::fs::read_to_string(&stat).map_or(true, |s| {
+            s.rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .is_some_and(|state| state == "Z" || state == "X")
+        });
+        if dead {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }

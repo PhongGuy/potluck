@@ -5,6 +5,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
@@ -14,7 +15,7 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 pub(crate) struct Writers {
     entries: Mutex<HashMap<PathBuf, Arc<Entry>>>,
     /// The sweep each entry runs; always `sweep` outside tests, which stall it.
-    sweep: fn(&Path) -> usize,
+    sweep: fn(&Path) -> Swept,
 }
 
 impl Default for Writers {
@@ -32,7 +33,7 @@ struct Entry {
     repo: PathBuf,
     gate: Arc<RwLock<()>>,
     dirty: AtomicBool,
-    sweep: fn(&Path) -> usize,
+    sweep: fn(&Path) -> Swept,
 }
 
 /// One receive-pack inside a repository, from just before spawn until its reaper is done.
@@ -85,11 +86,14 @@ impl Writer {
         if !entry.dirty.swap(false, Ordering::SeqCst) {
             return false;
         }
-        let (repo, sweep) = (entry.repo.clone(), entry.sweep);
-        // The blocking task owns the guard, so a dropped `leave` cannot open the gate early.
+        let held = Arc::clone(&entry);
+        // The blocking task owns the guard, so a dropped `leave` cannot open the gate early, and
+        // re-marks a deferred sweep before the gate opens, so the next writer out retries it.
         let swept = tokio::task::spawn_blocking(move || {
             let _sweeping = sweeping;
-            sweep(&repo)
+            if (held.sweep)(&held.repo).deferred {
+                held.dirty.store(true, Ordering::SeqCst);
+            }
         });
         if let Err(err) = swept.await {
             tracing::warn!(repo = %entry.repo.display(), error = %err, "sweep task failed");
@@ -98,16 +102,28 @@ impl Writer {
     }
 }
 
+/// What one `sweep` did: how many entries it removed, and whether it left ref locks to a live
+/// gc or maintenance run, so the repository still needs a sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Swept {
+    pub(crate) removed: usize,
+    pub(crate) deferred: bool,
+}
+
 /// Removes what a SIGKILLed receive-pack leaves in the bare repository `repo`: quarantine
 /// directories, ref and packed-refs locks, `HEAD.lock` and receive-pack's own pack keeps.
-/// Blocking. Returns how many entries it removed; a failure is logged and skipped, and a
-/// missing repository removes nothing. The caller guarantees no receive-pack is running in it.
-pub(crate) fn sweep(repo: &Path) -> usize {
+/// While a detached gc or maintenance run may be live the ref locks stay and the sweep is
+/// `deferred`. Blocking. A failure is logged and skipped, and a missing repository removes
+/// nothing. The caller guarantees no receive-pack is running in it.
+pub(crate) fn sweep(repo: &Path) -> Swept {
     let mut removed = 0;
-    for name in ["HEAD.lock", "packed-refs.lock"] {
-        removed += remove(&repo.join(name), false);
+    let deferred = housekeeping_live(repo);
+    if !deferred {
+        for name in ["HEAD.lock", "packed-refs.lock"] {
+            removed += remove(&repo.join(name), false);
+        }
+        removed += sweep_ref_locks(&repo.join("refs"));
     }
-    removed += sweep_ref_locks(&repo.join("refs"));
 
     // Each quarantine directory goes whole; a kill mid index-pack leaves its tmp_pack inside.
     for entry in entries(&repo.join("objects")) {
@@ -132,7 +148,7 @@ pub(crate) fn sweep(repo: &Path) -> usize {
             }
         }
     }
-    removed
+    Swept { removed, deferred }
 }
 
 /// Sweeps every workspace repository, each `<root>/<team>/<name>.git` directory, with `sweep`.
@@ -145,11 +161,85 @@ pub(crate) fn sweep_all(root: &Path) -> usize {
         for repo in entries(&team.path()).iter().filter(|entry| is_dir(entry)) {
             let path = repo.path();
             if path.extension().is_some_and(|ext| ext == "git") {
-                removed += sweep(&path);
+                removed += sweep(&path).removed;
             }
         }
     }
     removed
+}
+
+/// How long git trusts a `gc.pid`; a lock fallback below shares the same horizon.
+const HOUSEKEEPING_HORIZON: Duration = Duration::from_secs(12 * 3600);
+
+/// True while a detached `git gc` or `git maintenance run` in this pid namespace may hold
+/// `repo`'s ref locks. Every positive answer names a live git process, so it ends with that run.
+fn housekeeping_live(repo: &Path) -> bool {
+    gc_live(&repo.join("gc.pid")) || maintenance_live(&repo.join("objects/maintenance.lock"))
+}
+
+/// git's `gc.pid` rule, narrowed to what this host can prove: a record younger than 12 hours
+/// naming this host and a pid that is still a git process. Another host's record, a pid reused
+/// by a non-git process, and a malformed record are stale.
+fn gc_live(pidfile: &Path) -> bool {
+    if !fresh(pidfile) {
+        return false;
+    }
+    let Ok(text) = std::fs::read_to_string(pidfile) else {
+        return false;
+    };
+    let mut fields = text.split_whitespace();
+    let (Some(pid), Some(host)) = (fields.next(), fields.next()) else {
+        return false;
+    };
+    let here = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    host == here.trim() && pid.parse::<u32>().is_ok_and(is_git)
+}
+
+/// A maintenance run holds `objects/maintenance.lock` open for its whole run, so the lock is live
+/// while some process has it open. A git process whose fds cannot be read might be that holder,
+/// so then a lock younger than 12 hours counts as live too.
+fn maintenance_live(lock: &Path) -> bool {
+    let Ok(lock) = std::fs::canonicalize(lock) else {
+        return false;
+    };
+    let mut unreadable_git = false;
+    for proc in entries(Path::new("/proc")) {
+        let Ok(pid) = proc.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        match std::fs::read_dir(proc.path().join("fd")) {
+            Ok(fds) => {
+                let held = fds
+                    .filter_map(Result::ok)
+                    .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|target| target == lock));
+                if held {
+                    return true;
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+                unreadable_git |= is_git(pid);
+            }
+            Err(_) => {}
+        }
+    }
+    unreadable_git && fresh(&lock)
+}
+
+/// Whether `pid` is a live git process: its argv[0] is `git` or a dashed `git-*` program.
+fn is_git(pid: u32) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let argv0 = cmdline.split(|&b| b == 0).next().unwrap_or_default();
+    let name = argv0.rsplit(|&b| b == b'/').next().unwrap_or_default();
+    name == b"git" || name.starts_with(b"git-")
+}
+
+/// Whether `path` was modified within the 12-hour horizon; false when it cannot be read.
+fn fresh(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|at| at.elapsed().map_or(true, |age| age <= HOUSEKEEPING_HORIZON))
 }
 
 /// Removes every `*.lock` file under `dir`, recursively. A refname cannot end in `.lock`, so
@@ -256,7 +346,7 @@ mod tests {
         );
 
         // Two quarantine-tree files count once, as their directory.
-        assert_eq!(sweep(&repo), 6);
+        assert_eq!(sweep(&repo).removed, 6);
         assert!(!repo.join("objects/tmp_objdir-incoming-AbC123").exists());
         for path in &debris[2..] {
             assert!(!repo.join(path).exists(), "{path} is gone");
@@ -269,13 +359,13 @@ mod tests {
             repo.join("objects/pack/pack-bbbb.keep").exists(),
             "an operator keep stays"
         );
-        assert_eq!(sweep(&repo), 0, "a second sweep finds nothing");
+        assert_eq!(sweep(&repo).removed, 0, "a second sweep finds nothing");
     }
 
     #[test]
     fn sweeping_a_missing_repository_removes_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(sweep(&dir.path().join("gone.git")), 0);
+        assert_eq!(sweep(&dir.path().join("gone.git")).removed, 0);
     }
 
     fn locked_repo(dir: &Path) -> std::path::PathBuf {
@@ -393,12 +483,12 @@ mod tests {
         // Unblock before any assertion, so a failing run still ends.
         unstall(&fifo, || swept.is_finished());
         assert!(!stalled, "the sweep read the FIFO keep and blocked");
-        assert_eq!(swept.join().unwrap(), 1, "only the ref lock goes");
+        assert_eq!(swept.join().unwrap().removed, 1, "only the ref lock goes");
         assert!(fifo.exists(), "a keep that is not a regular file stays");
     }
 
     /// Blocks on the FIFO `<repo>/stall` until the test opens it, removes it, then sweeps.
-    fn stalling_sweep(repo: &Path) -> usize {
+    fn stalling_sweep(repo: &Path) -> Swept {
         let stall = repo.join("stall");
         let _ = std::fs::read(&stall);
         let _ = std::fs::remove_file(&stall);
@@ -497,5 +587,181 @@ mod tests {
             outside.join("w.git/HEAD.lock").exists(),
             "a symlinked workspace is not followed"
         );
+    }
+
+    /// A `sleep 30` in its own process group holding `path` open, as a detached `git maintenance
+    /// run` holds its lock from outside git's group. Killed and reaped on drop, so a failing
+    /// assertion never leaves it running.
+    struct Holder(std::process::Child);
+
+    impl Holder {
+        fn open(path: &Path, cwd: &Path) -> Holder {
+            use std::os::unix::process::CommandExt;
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::fs::File::open(path).unwrap())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .current_dir(cwd)
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            Holder(child)
+        }
+
+        /// A live git process (`hash-object` waiting on its open stdin) in its own group.
+        fn git(cwd: &Path) -> Holder {
+            use std::os::unix::process::CommandExt;
+            let child = std::process::Command::new("git")
+                .args(["hash-object", "--stdin"])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .current_dir(cwd)
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            Holder(child)
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+    }
+
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Backdates `path` past git's 12-hour horizon, so only a live holder can keep it live.
+    fn age(path: &Path) {
+        let then = std::time::SystemTime::now() - std::time::Duration::from_secs(13 * 3600);
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(then).unwrap();
+    }
+
+    fn hostname() -> String {
+        let name = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        name.trim().to_owned()
+    }
+
+    const REF_LOCKS: [&str; 3] = ["HEAD.lock", "packed-refs.lock", "refs/heads/main.lock"];
+
+    fn ref_locked_repo(dir: &Path) -> std::path::PathBuf {
+        let repo = dir.join("w.git");
+        for path in REF_LOCKS {
+            put(&repo.join(path), "x");
+        }
+        put(&repo.join("HEAD"), "ref: refs/heads/main\n");
+        repo
+    }
+
+    #[tokio::test]
+    async fn a_live_maintenance_run_keeps_its_ref_locks_through_a_killed_push_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = ref_locked_repo(dir.path());
+        put(
+            &repo.join("objects/tmp_objdir-incoming-AbC123/pack/tmp_pack_xyz"),
+            "x",
+        );
+        let lock = repo.join("objects/maintenance.lock");
+        put(&lock, "");
+        age(&lock);
+        let holder = Holder::open(&lock, &repo);
+        let writers = Writers::default();
+        assert!(
+            writers.enter(&repo).await.leave(true).await,
+            "the killed push sweeps"
+        );
+        for path in REF_LOCKS {
+            assert!(
+                repo.join(path).exists(),
+                "{path} survives the live maintenance run"
+            );
+        }
+        assert!(
+            !repo.join("objects/tmp_objdir-incoming-AbC123").exists(),
+            "the quarantine still goes"
+        );
+        drop(holder);
+        assert!(
+            writers.enter(&repo).await.leave(false).await,
+            "the repository stayed dirty, so the next writer out sweeps"
+        );
+        for path in REF_LOCKS {
+            assert!(
+                !repo.join(path).exists(),
+                "{path} goes once the run has ended"
+            );
+        }
+        assert!(lock.exists(), "the maintenance lock is git's, never swept");
+    }
+
+    #[test]
+    fn a_gc_pid_keeps_ref_locks_only_while_it_names_a_live_git_on_this_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = ref_locked_repo(dir.path());
+        let pidfile = repo.join("gc.pid");
+        let gc = Holder::git(&repo);
+        put(&pidfile, &format!("{} {}", gc.pid(), hostname()));
+        sweep(&repo);
+        for path in REF_LOCKS {
+            assert!(
+                repo.join(path).exists(),
+                "{path} survives a live gc on this host"
+            );
+        }
+        drop(gc);
+        sweep(&repo);
+        for path in REF_LOCKS {
+            assert!(
+                !repo.join(path).exists(),
+                "{path} goes once that gc is gone"
+            );
+        }
+        assert!(pidfile.exists(), "gc.pid is git's, never swept");
+
+        // After a restart the pid can name an unrelated process, and the host can be renamed.
+        let reused = ref_locked_repo(&dir.path().join("reused"));
+        let other = Holder::open(&reused.join("HEAD"), &reused);
+        put(
+            &reused.join("gc.pid"),
+            &format!("{} {}", other.pid(), hostname()),
+        );
+        let renamed = ref_locked_repo(&dir.path().join("renamed"));
+        put(&renamed.join("gc.pid"), "1 potluck-elsewhere.invalid");
+        sweep(&reused);
+        sweep(&renamed);
+        drop(other);
+        assert!(
+            !reused.join("packed-refs.lock").exists(),
+            "a pid reused by a process that is not git is stale"
+        );
+        assert!(
+            !renamed.join("packed-refs.lock").exists(),
+            "another host's gc.pid cannot be proven live"
+        );
+    }
+
+    #[test]
+    fn an_unheld_or_unreadable_housekeeping_file_does_not_keep_ref_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = ref_locked_repo(dir.path());
+        let lock = repo.join("objects/maintenance.lock");
+        put(&lock, "");
+        age(&lock);
+        put(&repo.join("gc.pid"), "not a pid record");
+        sweep(&repo);
+        for path in REF_LOCKS {
+            assert!(
+                !repo.join(path).exists(),
+                "{path} goes: no live gc or maintenance run"
+            );
+        }
     }
 }

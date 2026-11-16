@@ -9,7 +9,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::common::{
-    api_admin, api_team, api_user, api_workspace, call, config_for, test_app, unix_get,
+    api_admin, api_team, api_user, api_workspace, call, client, config_for, test_app, unix_get,
 };
 
 #[tokio::test]
@@ -177,4 +177,34 @@ async fn the_admin_socket_sees_every_workspace_as_admin() {
     let (status, _) = unix_get(running.admin_socket(), "/api/v1/me").await;
     assert_eq!(status, 403, "/me keeps refusing System");
     running.shutdown().await;
+}
+
+/// A workspace the caller holds no role on answers byte for byte like one that does not exist,
+/// so the 404 cannot be used to probe which workspaces exist.
+#[tokio::test]
+async fn get_workspace_answers_no_role_exactly_like_no_workspace() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", false).await;
+    let (_, bob) = api_user(&app.db, "bob").await;
+    let mut answers = Vec::new();
+    for path in [
+        "/workspaces/core/api",
+        "/workspaces/core/nope",
+        "/workspaces/other/api",
+    ] {
+        let res = client()
+            .get(app.url(path))
+            .bearer_auth(&bob)
+            .send()
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let content_type = res.headers().get("content-type").cloned();
+        answers.push((status, content_type, res.bytes().await.unwrap()));
+    }
+    assert_eq!(answers[0].0, 404, "{:?}", answers[0]);
+    assert_eq!(answers[0], answers[1], "no role and an unknown workspace");
+    assert_eq!(answers[0], answers[2], "no role and an unknown team");
 }

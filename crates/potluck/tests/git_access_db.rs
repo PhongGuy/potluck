@@ -7,7 +7,7 @@ use reqwest::Method;
 use serde_json::json;
 
 use crate::common::{
-    FullServer, SEED_COMMIT, api_admin, api_team, api_user, api_workspace, call, failed,
+    FullServer, SEED_COMMIT, api_admin, api_team, api_user, api_workspace, call, client, failed,
     full_server, git, ok, work_tree, write_hook,
 };
 
@@ -331,4 +331,29 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
         "",
         "the declining hook let nothing land"
     );
+}
+
+/// Over git too, a workspace the caller holds no role on answers byte for byte like one that
+/// does not exist.
+#[tokio::test]
+async fn info_refs_answers_no_role_exactly_like_no_workspace() {
+    let a = arena(false).await;
+    let mut answers = Vec::new();
+    for (team, ws) in [("core", "api"), ("core", "nope"), ("other", "api")] {
+        let res = client()
+            .get(format!(
+                "{}/info/refs?service=git-upload-pack",
+                a.server.git_url(team, ws)
+            ))
+            .bearer_auth(&a.bob)
+            .send()
+            .await
+            .unwrap();
+        let status = res.status().as_u16();
+        let content_type = res.headers().get("content-type").cloned();
+        answers.push((status, content_type, res.bytes().await.unwrap()));
+    }
+    assert_eq!(answers[0].0, 404, "{:?}", answers[0]);
+    assert_eq!(answers[0], answers[1], "no role and an unknown workspace");
+    assert_eq!(answers[0], answers[2], "no role and an unknown team");
 }

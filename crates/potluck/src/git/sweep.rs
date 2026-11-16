@@ -10,8 +10,6 @@ use tokio::sync::{OwnedRwLockReadGuard, RwLock};
 
 /// The receive-packs in flight per repository. Only the last one out of a repository that a
 /// killed push left dirty sweeps it, so a sweep never touches a live push's files.
-// Only the tests use the gate until the engine's receive-pack enters it.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Default)]
 pub(crate) struct Writers {
     entries: Mutex<HashMap<PathBuf, Arc<Entry>>>,
@@ -26,7 +24,6 @@ struct Entry {
 }
 
 /// One receive-pack inside a repository, from just before spawn until its reaper is done.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct Writer {
     entry: Arc<Entry>,
@@ -35,7 +32,6 @@ pub(crate) struct Writer {
 
 impl Writers {
     /// Waits only while a sweep of `repo` runs.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn enter(&self, repo: &Path) -> Writer {
         let entry = self.entry(repo);
         let guard = Arc::clone(&entry.gate).read_owned().await;
@@ -59,7 +55,6 @@ impl Writers {
 impl Writer {
     /// Leaves the repository; `killed` marks it dirty first. Sweeps when it is dirty and no
     /// other writer is inside, and returns whether this call swept.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn leave(self, killed: bool) -> bool {
         let Writer { entry, guard } = self;
         // Mark before releasing, so a clean writer leaving at the same moment sees the flag.
@@ -89,8 +84,6 @@ impl Writer {
 /// directories, ref and packed-refs locks, `HEAD.lock` and receive-pack's own pack keeps.
 /// Blocking. Returns how many entries it removed; a failure is logged and skipped, and a
 /// missing repository removes nothing. The caller guarantees no receive-pack is running in it.
-// Only the tests call it until the engine's run-limit kill is wired to it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn sweep(repo: &Path) -> usize {
     let mut removed = 0;
     for name in ["HEAD.lock", "packed-refs.lock"] {

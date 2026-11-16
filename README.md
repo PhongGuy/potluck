@@ -4,7 +4,7 @@ A self-hosted team server for sharing workspaces of local-first desktop apps, gi
 
 ## Status
 
-Potluck is not ready for use yet. There is no release and no published image, and the contract between the apps and the server may still change. Team mode in Apinata is being built against it now; Dbento support follows after the first release. Watch the repository's releases to hear when it is ready.
+Potluck is not ready for use yet, and may still change in ways that break existing setups. Watch the repository's releases to hear when it is ready.
 
 ## Run it
 

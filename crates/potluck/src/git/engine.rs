@@ -105,6 +105,11 @@ impl GitEngine {
         }
     }
 
+    /// Marks each of `repos` dirty, so the next push to leave it sweeps it.
+    pub(crate) fn mark_dirty(&self, repos: &[PathBuf]) {
+        self.writers.mark_dirty(repos);
+    }
+
     /// The repository layout this engine serves.
     pub fn repos(&self) -> &Repos {
         &self.repos

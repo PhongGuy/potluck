@@ -124,3 +124,23 @@ fn report_percent_encodes_paths_and_ref_names() {
         assert_eq!(line.split(' ').count(), 5, "{line}");
     }
 }
+
+#[test]
+fn percent_encode_escapes_each_byte_of_a_truncated_sequence() {
+    assert_eq!(percent_encode(b"caf\xc3"), "caf%C3", "cut at the end");
+    assert_eq!(
+        percent_encode(b"\xe2\x82"),
+        "%E2%82",
+        "nothing but the cut sequence"
+    );
+    assert_eq!(
+        percent_encode(b"\xf0\x9f\x98 x"),
+        "%F0%9F%98%20x",
+        "cut before a space"
+    );
+    assert_eq!(
+        percent_encode(b"\xe2\x82\xc3\xa9"),
+        "%E2%82\u{e9}",
+        "a valid character after the cut stays readable"
+    );
+}

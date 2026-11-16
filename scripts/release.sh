@@ -5,9 +5,10 @@ set -euo pipefail
 
 readonly IMAGE=ghcr.io/phongguy/potluck
 
-# Print X.Y.Z[-pre] for a tag vX.Y.Z[-pre]; any other tag is refused.
+# Print X.Y.Z[-pre] for a tag vX.Y.Z[-pre] whose core numbers are written
+# without leading zeros; any other tag is refused.
 tag_version() {
-  if [[ ! $1 =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$ ]]; then
+  if [[ ! $1 =~ ^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?)$ ]]; then
     echo "release.sh: '$1' is not a vX.Y.Z[-pre] tag" >&2
     return 1
   fi

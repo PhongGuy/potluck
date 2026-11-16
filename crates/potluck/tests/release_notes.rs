@@ -100,6 +100,38 @@ fn version_strips_the_v_and_refuses_other_tags() {
 }
 
 #[test]
+fn version_refuses_leading_zeros_in_any_core_number() {
+    for tag in ["v01.2.3", "v1.02.3", "v1.2.03", "v00.0.0", "v01.2.3-rc.1"] {
+        let out = Command::new(script())
+            .args(["version", tag])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1), "{tag} is refused");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "",
+            "{tag} prints no version"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(tag),
+            "{tag}: the message names the tag: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for (tag, version) in [("v0.0.0", "0.0.0"), ("v10.20.30", "10.20.30")] {
+        let out = Command::new(script())
+            .args(["version", tag])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("{version}\n"),
+            "{tag} is accepted"
+        );
+    }
+}
+
+#[test]
 fn notes_follow_the_layout_and_count_user_facing_changes() {
     let dir = repo_with(
         &[

@@ -4,7 +4,7 @@ A self-hosted team server for sharing workspaces of local-first desktop apps, gi
 
 ## Status
 
-Potluck is not ready for use yet. There is no release and no published image, and the contract between the apps and the server may still change. Team mode in Apinata is being built against it now; Dbento support follows after the first release. Watch the repository's releases to hear when it is ready.
+Potluck is not ready for use yet, and may still change in ways that break existing setups. Watch the repository's releases to hear when it is ready.
 
 ## Run it
 
@@ -14,20 +14,6 @@ Until the first release, build the image yourself from a checkout of this reposi
 
 ```sh
 podman build -t ghcr.io/phongguy/potluck:latest .
-```
-
-If the published package is private when you pull it, log in to the registry once before the first pull, with a GitHub personal access token that holds the `read:packages` scope. The command asks for your GitHub user name and, as the password, the token.
-
-With podman:
-
-```sh
-podman login ghcr.io
-```
-
-With docker:
-
-```sh
-docker login ghcr.io
 ```
 
 ### One command

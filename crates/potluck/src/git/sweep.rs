@@ -646,7 +646,19 @@ mod tests {
                 .process_group(0)
                 .spawn()
                 .unwrap();
-            Holder(child)
+            let holder = Holder(child);
+            // spawn returns once exec starts, before the kernel publishes the new argv, so wait
+            // until /proc shows git; the holder is already built, so a timeout still reaps it.
+            let cmdline = format!("/proc/{}/cmdline", holder.pid());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !std::fs::read(&cmdline).is_ok_and(|argv| argv.starts_with(b"git\0")) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "git never showed in {cmdline}"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            holder
         }
 
         fn pid(&self) -> u32 {

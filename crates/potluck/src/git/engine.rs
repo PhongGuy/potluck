@@ -14,6 +14,9 @@ use crate::api::error::ApiError;
 use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
 use crate::git::{Repos, Service, spool, sweep};
 
+/// The default for how long a git child may run from spawn: 30 min.
+pub(crate) const DEFAULT_MAX_RUNTIME_SECS: u64 = 1800;
+
 /// How many git slots exist, how long a request waits for one, how long an upload may hold one
 /// before git starts, and how long each git child may run from spawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,7 +35,7 @@ impl GitLimits {
             processes: processes.max(1),
             queue_wait,
             upload_timeout,
-            max_runtime: Duration::from_secs(1800),
+            max_runtime: Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS),
         }
     }
 
@@ -135,6 +138,7 @@ impl GitEngine {
             .spawn()
             .map_err(GitError::Spawn)?;
         let group = process_group(&child);
+        let guard = GroupKill(group);
         let (mut stdout, mut stderr) = match (child.stdout.take(), child.stderr.take()) {
             (Some(out), Some(err)) => (out, err),
             _ => return Err(GitError::Spawn(std::io::Error::other("git has no pipes"))),
@@ -150,22 +154,17 @@ impl GitEngine {
         .await;
         let status = match bounded {
             Ok((read_out, read_err, status)) => {
+                if status.is_ok() {
+                    guard.disarm();
+                }
                 read_out.map_err(GitError::Spawn)?;
                 read_err.map_err(GitError::Spawn)?;
                 status.map_err(GitError::Spawn)?
             }
             Err(_) => {
-                kill_group(group);
-                let _ = child.wait().await;
-                tracing::warn!(
-                    service = service.name(),
-                    limit = ?self.max_runtime,
-                    "git ran past its run limit; killed its process group"
-                );
-                return Err(GitError::Overran {
-                    service: service.name(),
-                    limit: self.max_runtime,
-                });
+                let err = overran(&mut child, group, service, self.max_runtime).await;
+                guard.disarm();
+                return Err(err);
             }
         };
         if !status.success() {
@@ -224,7 +223,8 @@ impl GitEngine {
             (stdin, Vec::new())
         };
         // A receive-pack holds the repository's writer gate until it is reaped, so a sweep after
-        // a killed push never overlaps a live one; a `?` below drops it and releases the gate.
+        // a killed push never overlaps a live one. A `?` before the spawn releases it unswept,
+        // since no git has touched the repository; after the spawn every exit goes through `leave`.
         let writer = if service == Service::ReceivePack {
             Some(self.writers.enter(repo).await)
         } else {
@@ -247,10 +247,19 @@ impl GitEngine {
             .spawn()
             .map_err(GitError::Spawn)?;
         let group = process_group(&child);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| GitError::Spawn(std::io::Error::other("git has no stdout")))?;
+        debug_assert!(
+            child.stdout.is_some(),
+            "a piped stdout is present after spawn"
+        );
+        // Unreachable while stdout is piped; if it ever happens, git is killed like an overrun
+        // and the repository is swept before the gate opens.
+        let Some(stdout) = child.stdout.take() else {
+            kill_and_reap(&mut child, group).await;
+            if let Some(writer) = writer {
+                writer.leave(true).await;
+            }
+            return Err(GitError::Spawn(std::io::Error::other("git has no stdout")));
+        };
         let stderr = child.stderr.take();
         let max_runtime = self.max_runtime;
         // The reaper owns the child and the slot: the slot returns when git exits or is killed at
@@ -280,15 +289,8 @@ impl GitEngine {
                     false
                 }
                 Err(_) => {
-                    // Kill the whole group, then reap the leader. The cut-off stderr tail is not
-                    // worth logging.
-                    kill_group(group);
-                    let _ = child.wait().await;
-                    tracing::warn!(
-                        service = service.name(),
-                        limit = ?max_runtime,
-                        "git ran past its run limit; killed its process group"
-                    );
+                    // The cut-off stderr tail is not worth logging.
+                    let _ = overran(&mut child, group, service, max_runtime).await;
                     true
                 }
             };
@@ -375,6 +377,49 @@ fn kill_group(group: Option<rustix::process::Pid>) {
     match kill_process_group(pid, Signal::KILL) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {}
         Err(err) => tracing::warn!(error = %err, "cannot kill the git process group"),
+    }
+}
+
+/// SIGKILLs `group`, then reaps `child`, the group's leader.
+async fn kill_and_reap(child: &mut tokio::process::Child, group: Option<rustix::process::Pid>) {
+    kill_group(group);
+    let _ = child.wait().await;
+}
+
+/// Kills and reaps git at the run limit, logs the one warning, and returns `Overran`.
+async fn overran(
+    child: &mut tokio::process::Child,
+    group: Option<rustix::process::Pid>,
+    service: Service,
+    limit: Duration,
+) -> GitError {
+    kill_and_reap(child, group).await;
+    tracing::warn!(
+        service = service.name(),
+        limit = ?limit,
+        "git ran past its run limit; killed its process group"
+    );
+    GitError::Overran {
+        service: service.name(),
+        limit,
+    }
+}
+
+/// Kills `group` when dropped unless disarmed, so a cancelled caller (the client hung up)
+/// takes down git's whole group, not just the leader `kill_on_drop` reaches.
+struct GroupKill(Option<rustix::process::Pid>);
+
+impl GroupKill {
+    /// Stops the drop from signalling. Call it once git is reaped or its group already killed,
+    /// so a reused pid is never signalled for the first time.
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        kill_group(self.0);
     }
 }
 
@@ -1553,5 +1598,79 @@ mod tests {
         );
         let api = ApiError::from(err);
         assert_eq!((api.status(), api.code().as_str()), (500, "internal"));
+    }
+
+    #[tokio::test]
+    async fn a_client_hanging_up_on_an_advertisement_kills_its_whole_group() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A stand-in git that records its pid, leaves a child of its own and never answers.
+        let leader_file = dir.path().join("leader.pid");
+        let child_file = dir.path().join("child.pid");
+        let fake = dir.path().join("fake-git");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nsleep 30 &\necho $! > '{}'\nwait\n",
+                leader_file.display(),
+                child_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
+        // The run limit is far past the test's waits, so only the hangup can end git.
+        let engine = Arc::new(GitEngine::new(
+            Repos::new(dir.path().join("repos"), fake),
+            dir.path().join("hooks"),
+            dir.path().join("tmp"),
+            1024,
+            limits(1, 100).with_max_runtime(Duration::from_secs(20)),
+        ));
+        let repo = dir.path().join("repos").join("x.git");
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get({
+                let engine = Arc::clone(&engine);
+                move || {
+                    let (engine, repo) = (Arc::clone(&engine), repo.clone());
+                    async move {
+                        let _ = engine.advertise(Service::UploadPack, &repo, false).await;
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(
+            eventually(10, || std::fs::read_to_string(&child_file)
+                .is_ok_and(|t| t.ends_with('\n')))
+            .await,
+            "the stand-in git started its child"
+        );
+        let (leader, child) = (read_pid(&leader_file), read_pid(&child_file));
+        drop(client);
+
+        assert!(
+            eventually(5, || is_dead(leader)).await,
+            "the hangup cancelled the advertisement and killed git {leader}"
+        );
+        assert!(
+            eventually(5, || is_dead(child)).await,
+            "git's child {child} died with its group, not left to its 30 s"
+        );
+        assert!(
+            eventually(5, || engine.permits.available_permits() == 1).await,
+            "the slot is back"
+        );
     }
 }

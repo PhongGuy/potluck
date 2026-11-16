@@ -4,6 +4,7 @@
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use potluck::config::ConfigError;
 use potluck::server::{ServerError, start};
 use serde_json::Value;
 
@@ -335,6 +336,31 @@ fn serve_refuses_a_data_dir_too_long_for_the_admin_socket_and_creates_nothing() 
     assert!(stderr.contains("103"), "{stderr}");
     assert!(!stderr.contains("SUN_LEN"), "{stderr}");
     assert!(!data.exists(), "nothing is created before config passes");
+}
+
+// `serve` checks the socket path itself; a library caller of `start` gets the same refusal,
+// before any directory exists, instead of a bind error after creating the layout.
+#[tokio::test]
+async fn start_refuses_a_data_dir_too_long_for_the_admin_socket_and_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = data_dir_with_socket_len(dir.path(), 104);
+    let err = start(&config_for(&data))
+        .await
+        .expect_err("an over-long socket path is refused");
+    assert!(
+        matches!(
+            err,
+            ServerError::Config(ConfigError::AdminSocketPathTooLong {
+                len: 104,
+                max: 103,
+                ..
+            })
+        ),
+        "got {err:?}"
+    );
+    let text = err.to_string();
+    assert!(text.contains("104") && text.contains("103"), "{text}");
+    assert!(!data.exists(), "nothing is created before the check");
 }
 
 // A receive-pack killed while no server was there to sweep (a crash, the OOM killer, a reboot)

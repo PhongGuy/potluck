@@ -94,7 +94,11 @@ impl Inner {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(handle) = handle {
+        // On the database thread itself a join would deadlock; dropping the handle detaches it,
+        // and the thread ends once the current job returns to the closed channel.
+        if let Some(handle) = handle
+            && handle.thread().id() != std::thread::current().id()
+        {
             let _ = handle.join();
         }
     }
@@ -184,7 +188,8 @@ impl Db {
         self.call(|c| migrations::user_version(c)).await
     }
 
-    /// Stops the thread; every later call fails with `Closed`. Idempotent.
+    /// Stops the thread; every later call fails with `Closed`. Idempotent. Called on the
+    /// database thread itself it cannot wait, so the thread ends after the current job.
     pub fn close(&self) {
         self.inner.stop();
     }
@@ -288,6 +293,34 @@ mod tests {
         assert!(matches!(err, DbError::Closed), "got {err:?}");
         db.close();
         other.close();
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_handle_inside_a_call_ends_the_thread_cleanly() {
+        let (_dir, db) = temp_db();
+        let last = db.clone();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        // The job blocks until every outside handle is gone, then drops the last one on the
+        // database thread itself; `done` is sent only if that drop returns without panicking.
+        let call = db.call(move |_conn| {
+            go_rx.recv().expect("go signal");
+            drop(last);
+            done_tx.send(()).expect("done receiver");
+            Ok(())
+        });
+        // One poll enqueues the job; the timeout then drops the pending call and its borrow.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), call)
+                .await
+                .is_err(),
+            "the job is parked on the go signal"
+        );
+        drop(db);
+        go_tx.send(()).expect("the job is waiting");
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the last handle dropped on the database thread without a panic");
     }
 
     #[tokio::test]

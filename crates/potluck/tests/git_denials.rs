@@ -75,7 +75,6 @@ async fn basic_auth_with_any_username_carries_the_token() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_askpass_client_is_challenged_then_admitted() {
-    use std::os::unix::fs::PermissionsExt;
     let server = server().await;
     let home = server.dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -89,12 +88,10 @@ async fn an_askpass_client_is_challenged_then_admitted() {
     ));
     // git asks for a username, then a password; the password is the token.
     let askpass = home.join("askpass.sh");
-    std::fs::write(
+    crate::common::write_script(
         &askpass,
-        format!("#!/bin/sh\ncase \"$1\" in Username*) echo someone;; *) echo {WRITER};; esac\n"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&askpass, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\ncase \"$1\" in Username*) echo someone;; *) echo {WRITER};; esac\n"),
+    );
     let out = std::process::Command::new("git")
         .args(["clone", "-q", &url, "asked"])
         .current_dir(&home)

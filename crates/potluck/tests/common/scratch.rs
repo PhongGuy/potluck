@@ -134,29 +134,11 @@ impl Scratch {
         )
     }
 
-    /// An executable sh script `name` in the temp dir with `body`, returned only once it runs.
-    /// A child another test thread forks while the file is open for writing keeps that fd until
-    /// its exec, and running the script meanwhile fails with ETXTBSY; one probe run waits it out.
+    /// An executable sh script `name` in the temp dir with `body`.
     pub fn script(&self, name: &str, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        use std::process::{Command, Stdio};
         let path = self.dir.path().join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        for _ in 0..500 {
-            let probe = Command::new(&path)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            match probe {
-                Err(e) if e.raw_os_error() == Some(26) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10))
-                }
-                _ => return path,
-            }
-        }
-        panic!("{} stayed busy", path.display());
+        super::write_script(&path, &format!("#!/bin/sh\n{body}"));
+        path
     }
 
     /// An annotated tag `name` on any object `target` (a commit, tree, blob or tag).

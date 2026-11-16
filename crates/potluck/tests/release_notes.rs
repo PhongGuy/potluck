@@ -1,7 +1,6 @@
 //! `scripts/release.sh` against a throwaway git repository and a stub `gh`.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -55,13 +54,11 @@ fn repo_with(subjects: &[&str], tag: &str) -> tempfile::TempDir {
 /// A `gh` stub that records its arguments and prints a canned generate-notes body.
 fn stub_gh(dir: &Path) -> PathBuf {
     let path = dir.join("gh");
-    fs::write(
+    crate::common::write_script(
         &path,
         "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"$(dirname \"$0\")/gh-args\"\n\
          printf \"## What's Changed\\n* Add thing by @someone in #1\\n\\n\\n**Full Changelog**: x\\n\"\n",
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     path
 }
 
@@ -224,8 +221,7 @@ fn a_pre_release_tag_is_never_the_previous_release() {
 fn an_empty_generate_notes_reply_fails() {
     let dir = repo_with(&["feat: x"], "v0.2.0");
     let gh = dir.path().join("gh");
-    fs::write(&gh, "#!/usr/bin/env bash\nexit 0\n").unwrap();
-    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    crate::common::write_script(&gh, "#!/usr/bin/env bash\nexit 0\n");
     let out = Command::new(script())
         .current_dir(dir.path())
         .env("GH", &gh)

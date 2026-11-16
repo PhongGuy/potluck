@@ -670,11 +670,78 @@ mod tests {
 
     /// A `pre-receive` that accepts everything, with `mode`, so receive-pack may run.
     fn write_stub_hook(hooks: &Path, mode: u32) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(hooks).unwrap();
-        let hook = hooks.join("pre-receive");
-        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(mode)).unwrap();
+        write_script(&hooks.join("pre-receive"), "#!/bin/sh\nexit 0\n", mode);
+    }
+
+    /// `text` at `path` with `mode`, written by a child `sh` to a temporary name and renamed into
+    /// place, so this process never holds a write fd a sibling thread's fork could inherit and
+    /// turn the exec into ETXTBSY.
+    fn write_script(path: &Path, text: &str, mode: u32) {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .args([
+                "-c",
+                r#"cat > "$1.tmp" && chmod "$2" "$1.tmp" && mv -f "$1.tmp" "$1""#,
+                "sh",
+            ])
+            .arg(path)
+            .arg(format!("{mode:o}"))
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Close stdin and reap the child before judging either step, so no failure strands it.
+        let written = child.stdin.take().unwrap().write_all(text.as_bytes());
+        let status = child.wait();
+        match (written, status) {
+            (Ok(()), Ok(status)) if status.success() => {}
+            outcome => panic!("writing {}: {outcome:?}", path.display()),
+        }
+    }
+
+    #[test]
+    fn a_written_script_execs_while_other_threads_fork() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let forkers: Vec<_> = (0..4)
+            .map(|_| {
+                let stop = Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = std::process::Command::new("true").status();
+                    }
+                })
+            })
+            .collect();
+        let runs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (0..200)
+                .map(|i| {
+                    let path = dir.path().join(format!("script-{i}"));
+                    write_script(&path, "#!/bin/sh\nexit 0\n", 0o755);
+                    std::process::Command::new(&path).status()
+                })
+                .collect::<Vec<std::io::Result<std::process::ExitStatus>>>()
+        }));
+        // Results are collected before asserting, and a panic while writing is held until the
+        // forkers are stopped and joined, so no failure leaves them running.
+        stop.store(true, Ordering::Relaxed);
+        for forker in forkers {
+            forker.join().unwrap();
+        }
+        let runs = runs.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let busy = runs
+            .iter()
+            .filter(|run| {
+                run.as_ref()
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::ExecutableFileBusy)
+            })
+            .count();
+        assert_eq!(busy, 0, "runs failed with ETXTBSY");
+        for run in runs {
+            assert!(run.unwrap().success());
+        }
     }
 
     fn has(hay: &[u8], needle: &[u8]) -> bool {
@@ -1007,9 +1074,7 @@ mod tests {
 
     /// `text` at `path`, mode 0755: a hook other than the `pre-receive` `write_stub_hook` writes.
     fn write_hook_file(path: &Path, text: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, text).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_script(path, text, 0o755);
     }
 
     /// A receive-pack body creating `refs/heads/main` at the tip of a fresh work tree under
@@ -1686,20 +1751,18 @@ mod tests {
 
     #[tokio::test]
     async fn an_advertisement_whose_git_exits_is_killed_with_a_child_holding_stdout() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         // A stand-in git that exits at once, leaving a child that holds both pipes open.
         let pidfile = dir.path().join("child.pid");
         let fake = dir.path().join("fake-git");
-        std::fs::write(
+        write_script(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexit 0\n",
                 pidfile.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
         write_stub_hook(&dir.path().join("hooks"), 0o755);
         let engine = GitEngine::new(
@@ -1769,20 +1832,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_hung_advertisement_is_killed_with_its_children_and_answers_500() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         // A stand-in git that never answers and leaves a child of its own behind.
         let pidfile = dir.path().join("child.pid");
         let fake = dir.path().join("fake-git");
-        std::fs::write(
+        write_script(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n",
                 pidfile.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
         write_stub_hook(&dir.path().join("hooks"), 0o755);
         let engine = GitEngine::new(
@@ -1822,23 +1883,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_hanging_up_on_an_advertisement_kills_its_whole_group() {
-        use std::os::unix::fs::PermissionsExt;
         use tokio::io::AsyncWriteExt;
         let dir = tempfile::tempdir().unwrap();
         // A stand-in git that records its pid, leaves a child of its own and never answers.
         let leader_file = dir.path().join("leader.pid");
         let child_file = dir.path().join("child.pid");
         let fake = dir.path().join("fake-git");
-        std::fs::write(
+        write_script(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\necho $$ > '{}'\nsleep 30 &\necho $! > '{}'\nwait\n",
                 leader_file.display(),
                 child_file.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
         write_stub_hook(&dir.path().join("hooks"), 0o755);
         // The run limit is far past the test's waits, so only the hangup can end git.

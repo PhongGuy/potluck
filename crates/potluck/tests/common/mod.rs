@@ -3,7 +3,6 @@ pub mod scratch;
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -362,12 +361,11 @@ pub async fn git_server_at(
     for d in [config.hooks_dir(), config.repos_dir(), config.tmp_dir()] {
         std::fs::create_dir_all(d).expect("data subdir");
     }
-    potluck::hooks::install(
-        &config.hooks_dir(),
-        std::path::Path::new(env!("CARGO_BIN_EXE_potluck")),
-        config.git(),
-    )
-    .expect("install hook");
+    write_script(
+        &config.hooks_dir().join("pre-receive"),
+        &potluck::hooks::script(Path::new(env!("CARGO_BIN_EXE_potluck")), config.git())
+            .expect("hook script"),
+    );
     let db = Db::open(&config.db_path()).expect("open");
     db.migrate().await.expect("migrate");
     let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
@@ -493,12 +491,34 @@ pub fn repo_path(data: &Path, team: &str, ws: &str) -> std::path::PathBuf {
     data.join("repos").join(team).join(format!("{ws}.git"))
 }
 
+/// `text` at `path`, mode 0755, written by a child `sh` to a temporary name and renamed into
+/// place, so this process never holds a write fd a sibling thread's fork could inherit and turn
+/// the exec into ETXTBSY. Panics with the path if any step fails.
+pub fn write_script(path: &Path, text: &str) {
+    use std::io::Write;
+    let mut child = Command::new("sh")
+        .args([
+            "-c",
+            r#"cat > "$1.tmp" && chmod 755 "$1.tmp" && mv -f "$1.tmp" "$1""#,
+            "sh",
+        ])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
+    // Close stdin and reap the child before judging either step, so no failure strands it.
+    let written = child.stdin.take().unwrap().write_all(text.as_bytes());
+    let status = child.wait();
+    match (written, status) {
+        (Ok(()), Ok(status)) if status.success() => {}
+        outcome => panic!("writing {}: {outcome:?}", path.display()),
+    }
+}
+
 /// `<dir>/pre-receive` as `#!/bin/sh` plus `body`, mode 0755, over whatever is there.
 pub fn write_hook(dir: &Path, body: &str) {
     std::fs::create_dir_all(dir).expect("hooks dir");
-    let hook = dir.join("pre-receive");
-    std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).expect("write hook");
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod hook");
+    write_script(&dir.join("pre-receive"), &format!("#!/bin/sh\n{body}\n"));
 }
 
 /// A server from `server::start` on a temp data dir: directories made, database migrated, TCP

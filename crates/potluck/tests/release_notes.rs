@@ -291,3 +291,93 @@ fn only_a_final_release_says_it_is_tagged_latest() {
         "a pre-release never moves latest: {text}"
     );
 }
+
+/// Run `release.sh` with `args` from `cwd`.
+fn release_sh(cwd: &Path, args: &[&str]) -> Output {
+    Command::new(script())
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+/// True for a UTC timestamp written exactly as `YYYY-MM-DDTHH:MM:SSZ`.
+fn utc_seconds(text: &str) -> bool {
+    text.len() == 20
+        && text.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            10 => b == b'T',
+            13 | 16 => b == b':',
+            19 => b == b'Z',
+            _ => b.is_ascii_digit(),
+        })
+}
+
+#[test]
+fn manifest_writes_the_five_fields_for_a_final_or_pre_release_tag() {
+    let dir = tempfile::tempdir().unwrap();
+    for (tag, version) in [("v1.2.0", "1.2.0"), ("v1.2.0-rc.1", "1.2.0-rc.1")] {
+        let out_file = dir.path().join(format!("{tag}.json"));
+        let out = release_sh(
+            dir.path(),
+            &["manifest", tag, DIGEST, out_file.to_str().unwrap()],
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&out_file).unwrap()).unwrap();
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["digest", "image", "notes_url", "published", "version"]
+        );
+        assert_eq!(json["version"], version);
+        assert_eq!(json["image"], IMAGE);
+        assert_eq!(json["digest"], DIGEST);
+        assert_eq!(
+            json["notes_url"],
+            format!("https://github.com/PhongGuy/potluck/releases/tag/{tag}")
+        );
+        let published = json["published"].as_str().unwrap();
+        assert!(utc_seconds(published), "{published}");
+    }
+}
+
+#[test]
+fn manifest_refuses_a_malformed_digest_or_tag_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let hex = DIGEST.strip_prefix("sha256:").unwrap();
+    let cases = [
+        ("v1.2.0", hex.to_owned(), "digest"),
+        ("v1.2.0", format!("sha256:{}", &hex[1..]), "digest"),
+        ("v1.2.0", format!("{DIGEST}0"), "digest"),
+        ("v1.2.0", format!("sha256:{}", hex.to_uppercase()), "digest"),
+        ("v1.2.0", format!("sha512:{hex}"), "digest"),
+        ("v1.2.0", format!("{DIGEST}\n"), "digest"),
+        ("v1.2.0", String::new(), "digest"),
+        ("release-1", DIGEST.to_owned(), "release-1"),
+    ];
+    for (i, (tag, digest, named)) in cases.iter().enumerate() {
+        let out_file = dir.path().join(format!("{i}.json"));
+        let out = release_sh(
+            dir.path(),
+            &["manifest", tag, digest, out_file.to_str().unwrap()],
+        );
+        assert_eq!(out.status.code(), Some(1), "{tag} {digest:?} is refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(named),
+            "{tag} {digest:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out_file.exists(), "{tag} {digest:?} wrote a manifest");
+    }
+}

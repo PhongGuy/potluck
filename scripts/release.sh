@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Release helpers for the release workflow: the version named by a tag, and the
-# draft release notes for the container image.
+# Release helpers for the release workflow: the version named by a tag, the
+# release manifest, and the draft release notes for the container image.
 set -euo pipefail
 
 readonly IMAGE=ghcr.io/phongguy/potluck
+readonly RELEASES=https://github.com/PhongGuy/potluck/releases/tag
 
 # Print X.Y.Z[-pre] for a tag vX.Y.Z[-pre] whose core numbers are written
 # without leading zeros; any other tag is refused.
@@ -13,6 +14,20 @@ tag_version() {
     return 1
   fi
   echo "${BASH_REMATCH[1]}"
+}
+
+# Write OUT, the release manifest for TAG whose image index is DIGEST. Both are
+# checked before OUT is touched, so a refusal leaves no file behind.
+release_manifest() {
+  local tag=$1 digest=$2 out=$3 version
+  version=$(tag_version "$tag") || return 1
+  if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "release.sh: '$digest' is not a sha256 image digest" >&2
+    return 1
+  fi
+  jq -n --arg version "$version" --arg image "$IMAGE" --arg digest "$digest" \
+    --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg notes_url "$RELEASES/$tag" \
+    '{$version, $image, $digest, $published, $notes_url}' >"$out"
 }
 
 # Print the user-facing feat and fix subjects in RANGE, oldest first, as
@@ -129,7 +144,7 @@ NOTES
 }
 
 usage() {
-  echo "usage: release.sh version TAG | notes TAG REPO DIGEST OUT" >&2
+  echo "usage: release.sh version TAG | check-version TAG [CARGO_TOML] | manifest TAG DIGEST OUT | notes TAG REPO DIGEST OUT" >&2
   exit 2
 }
 
@@ -138,6 +153,10 @@ main() {
     version)
       (($# == 2)) || usage
       tag_version "$2" || exit 1
+      ;;
+    manifest)
+      (($# == 4)) || usage
+      release_manifest "$2" "$3" "$4" || exit 1
       ;;
     notes)
       (($# == 5)) || usage

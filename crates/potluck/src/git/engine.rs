@@ -139,15 +139,13 @@ impl GitEngine {
             (Some(out), Some(err)) => (out, err),
             _ => return Err(GitError::Spawn(std::io::Error::other("git has no pipes"))),
         };
-        // Drain both pipes and wait inside the run limit; the child stays owned here, so on
-        // expiry its group is killed while the leader is still unreaped.
+        // Drain both pipes to EOF before reaping, both inside the run limit: an unreaped leader
+        // keeps the group id from being reused, so the kill reaches only git's own group.
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let bounded = tokio::time::timeout(self.max_runtime, async {
-            tokio::join!(
-                stdout.read_to_end(&mut out),
-                stderr.read_to_end(&mut err),
-                child.wait()
-            )
+            let (read_out, read_err) =
+                tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err));
+            (read_out, read_err, child.wait().await)
         })
         .await;
         let status = match bounded {
@@ -1418,6 +1416,57 @@ mod tests {
         assert!(
             eventually(5, || is_dead(pid)).await,
             "the descendant {pid} was killed at the limit, not left to its 30 s"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_advertisement_whose_git_exits_is_killed_with_a_child_holding_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A stand-in git that exits at once, leaving a child that holds both pipes open.
+        let pidfile = dir.path().join("child.pid");
+        let fake = dir.path().join("fake-git");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nexit 0\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
+        let engine = GitEngine::new(
+            Repos::new(dir.path().join("repos"), fake),
+            dir.path().join("hooks"),
+            dir.path().join("tmp"),
+            1024,
+            limits(1, 100).with_max_runtime(Duration::from_millis(1500)),
+        );
+        let err = engine
+            .advertise(
+                Service::UploadPack,
+                &dir.path().join("repos").join("x.git"),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                GitError::Overran {
+                    service: "git-upload-pack",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(engine.permits.available_permits(), 1, "the slot is back");
+        let pid = read_pid(&pidfile);
+        assert!(
+            eventually(5, || is_dead(pid)).await,
+            "the child {pid} was killed at the limit, not left to its 30 s"
         );
     }
 

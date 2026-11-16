@@ -121,6 +121,23 @@ pub(crate) fn sweep(repo: &Path) -> usize {
     removed
 }
 
+/// Sweeps every workspace repository, each `<root>/<team>/<name>.git` directory, with `sweep`.
+/// Blocking. Returns the total removed; a missing `root` removes nothing. The caller
+/// guarantees no receive-pack is running in any of them.
+pub(crate) fn sweep_all(root: &Path) -> usize {
+    let is_dir = |entry: &std::fs::DirEntry| entry.file_type().is_ok_and(|kind| kind.is_dir());
+    let mut removed = 0;
+    for team in entries(root).iter().filter(|entry| is_dir(entry)) {
+        for repo in entries(&team.path()).iter().filter(|entry| is_dir(entry)) {
+            let path = repo.path();
+            if path.extension().is_some_and(|ext| ext == "git") {
+                removed += sweep(&path);
+            }
+        }
+    }
+    removed
+}
+
 /// Removes every `*.lock` file under `dir`, recursively. A refname cannot end in `.lock`, so
 /// no ref is ever among them.
 fn sweep_ref_locks(dir: &Path) -> usize {
@@ -357,5 +374,42 @@ mod tests {
             "the lock is swept"
         );
         assert!(!keep.exists(), "the stalled keep is swept");
+    }
+
+    #[test]
+    fn sweeping_every_repository_reaches_each_workspace_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repos");
+        put(&root.join("core/api.git/refs/heads/main.lock"), "x");
+        put(&root.join("ops/infra.git/HEAD.lock"), "x");
+        put(&root.join("core/notes/refs/heads/main.lock"), "x");
+        put(&root.join("core/file.git"), "x");
+        put(&root.join("stray.lock"), "x");
+        assert_eq!(sweep_all(&root), 2, "one lock in each workspace");
+        assert!(
+            !root.join("core/api.git/refs/heads/main.lock").exists(),
+            "core/api swept"
+        );
+        assert!(
+            !root.join("ops/infra.git/HEAD.lock").exists(),
+            "ops/infra swept"
+        );
+        assert!(
+            root.join("core/notes/refs/heads/main.lock").exists(),
+            "not a workspace repository"
+        );
+        assert!(
+            root.join("core/file.git").exists(),
+            "a file is not a repository"
+        );
+        assert!(
+            root.join("stray.lock").exists(),
+            "the root itself is not swept"
+        );
+        assert_eq!(
+            sweep_all(&dir.path().join("missing")),
+            0,
+            "no root, nothing removed"
+        );
     }
 }

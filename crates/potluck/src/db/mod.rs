@@ -284,6 +284,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_pins_synchronous_normal_and_a_five_second_busy_timeout() {
+        let (_dir, db) = temp_db();
+        let (sync, busy): (i64, i64) = db
+            .call(|c| {
+                let sync = c.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+                let busy = c.pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
+                Ok((sync, busy))
+            })
+            .await
+            .unwrap();
+        assert_eq!(sync, 1, "synchronous=NORMAL");
+        assert_eq!(busy, 5000, "busy_timeout in milliseconds");
+    }
+
+    #[tokio::test]
     async fn close_stops_the_thread_and_later_calls_fail_closed() {
         let (_dir, db) = temp_db();
         let other = db.clone();

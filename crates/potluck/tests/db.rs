@@ -123,3 +123,65 @@ async fn the_schema_enforces_roles_kinds_and_digest_uniqueness() {
     c.execute("INSERT INTO grants VALUES (1, 'user', 1, 'write')", [])
         .unwrap();
 }
+
+/// Rows of `sql` against a migrated fresh database, each row's columns joined with `|`.
+async fn migrated_rows(sql: &str) -> Vec<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("server.db");
+    let db = Db::open(&path).unwrap();
+    db.migrate().await.unwrap();
+    db.close();
+    let c = rusqlite::Connection::open(&path).unwrap();
+    let mut stmt = c.prepare(sql).unwrap();
+    let width = stmt.column_count();
+    stmt.query_map([], |r| {
+        (0..width)
+            .map(|i| r.get::<_, String>(i))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|cols| cols.join("|"))
+    })
+    .unwrap()
+    .map(Result::unwrap)
+    .collect()
+}
+
+#[tokio::test]
+async fn every_table_is_strict() {
+    let loose = migrated_rows(
+        "SELECT name FROM pragma_table_list
+         WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%' AND strict = 0",
+    )
+    .await;
+    assert_eq!(loose, Vec::<String>::new(), "tables without STRICT");
+    let strict = migrated_rows(
+        "SELECT count(*) || '' FROM pragma_table_list
+         WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%' AND strict = 1",
+    )
+    .await;
+    assert_eq!(strict, ["7"], "all seven tables were checked");
+}
+
+#[tokio::test]
+async fn the_unique_constraints_conflict_mapping_relies_on_are_pinned() {
+    // Each row is table|origin|columns: `u` a UNIQUE constraint, `pk` a composite primary key.
+    let unique = migrated_rows(
+        "SELECT t.name, il.origin,
+                (SELECT group_concat(name, ',') FROM
+                    (SELECT ii.name FROM pragma_index_info(il.name) ii ORDER BY ii.seqno))
+         FROM sqlite_schema t, pragma_index_list(t.name) il
+         WHERE t.type = 'table' AND il.\"unique\" = 1
+         ORDER BY t.name, il.origin, 3",
+    )
+    .await;
+    assert_eq!(
+        unique,
+        [
+            "grants|pk|workspace_id,subject_kind,subject_id",
+            "team_members|pk|team_id,user_id",
+            "teams|u|slug",
+            "tokens|u|digest",
+            "users|u|username",
+            "workspaces|u|team_id,slug",
+        ]
+    );
+}

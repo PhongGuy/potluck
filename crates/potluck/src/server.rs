@@ -172,6 +172,8 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
 
 /// Takes the exclusive advisory lock on `config.lock_path()`. The returned `File` is the lock:
 /// dropping it, or the process ending for any reason, releases it. The file itself stays.
+/// Dropping it alone does not release the lock while a forked child still holds a duplicate
+/// of its fd; `Running::shutdown` unlocks explicitly for that reason.
 fn lock_data_dir(config: &Config) -> Result<File, ServerError> {
     let path = config.lock_path();
     // Never truncate: the file carries no content and another instance may be mid-open on it.
@@ -239,11 +241,12 @@ impl Running {
         &self.db
     }
 
-    /// Stops accepting, waits for in-flight requests and then for git reapers, push records and
-    /// workspace creates and deletes, closes the database, removes the socket file, and releases
-    /// the lock while leaving `server.lock` in place. Waiting for a hung git can take up to
-    /// `--git-max-runtime`. The port, the admin socket and the lock are free when it returns, even
-    /// if a child forked meanwhile still holds duplicates of their fds.
+    /// Stops accepting, waits for in-flight requests, takes both sockets out of LISTEN, then waits
+    /// for git reapers, push records and workspace creates and deletes, closes the database,
+    /// removes the socket file, and releases the lock while leaving `server.lock` in place.
+    /// Waiting for a hung git can take up to `--git-max-runtime`. The port, the admin socket and
+    /// the lock are free when it returns, even if a child forked meanwhile still holds duplicates
+    /// of their fds.
     pub async fn shutdown(self) {
         // Open streams would hold the graceful drain forever; end them before stopping.
         self.notices.close_all();
@@ -255,16 +258,11 @@ impl Running {
                 Err(err) => tracing::error!("listener task failed: {err}"),
             }
         }
-        // Reapers, push records and workspace creates and deletes need the database, so they
-        // finish before it closes.
-        self.git_tasks.close();
-        self.git_tasks.wait().await;
-        self.db.close();
-        // The socket may already be gone; only its absence matters.
-        let _ = std::fs::remove_file(&self.admin_socket);
-        // Closing our fds is not enough: shutdown(2) and LOCK_UN act on the shared socket and
-        // open file description, so a forked child's duplicate cannot keep either alive.
+        // Closing our fds is not enough: shutdown(2) acts on the shared socket, so a forked
+        // child's duplicate cannot keep it listening. It runs before the tracker wait so the
+        // kernel refuses new connections instead of queueing them for a reset later.
         let tcp = std::net::TcpStream::from(OwnedFd::from(self.tcp));
+        // On macOS and BSD shutdown(2) on a listening socket fails with ENOTCONN, so it only logs.
         if let Err(err) = tcp.shutdown(Shutdown::Both) {
             tracing::error!("cannot shut down the TCP listener: {err}");
         }
@@ -272,6 +270,15 @@ impl Running {
         if let Err(err) = unix.shutdown(Shutdown::Both) {
             tracing::error!("cannot shut down the admin socket listener: {err}");
         }
+        // Reapers, push records and workspace creates and deletes need the database, so they
+        // finish before it closes.
+        self.git_tasks.close();
+        self.git_tasks.wait().await;
+        self.db.close();
+        // The socket may already be gone; only its absence matters.
+        let _ = std::fs::remove_file(&self.admin_socket);
+        // LOCK_UN acts on the lock's open file description, so a forked child's duplicate
+        // cannot keep the lock held.
         if let Err(err) = self._lock.unlock() {
             tracing::error!("cannot release the data directory lock: {err}");
         }
@@ -311,6 +318,7 @@ pub(crate) fn bind_admin_socket(path: &Path) -> io::Result<tokio::net::UnixListe
 mod tests {
     use std::future::IntoFuture;
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::time::Duration;
 
     use axum::routing::get;
     use axum::{Extension, Router};
@@ -467,6 +475,44 @@ mod tests {
         assert!(
             connected.is_err(),
             "the admin socket still accepts after shutdown"
+        );
+    }
+
+    // A task held on the tracker keeps shutdown waiting after the listeners drain; the port
+    // must refuse new connections through that wait, not queue them for a reset later.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_port_refuses_connections_while_shutdown_waits_for_tracked_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = start(&config_for(dir.path())).await.unwrap();
+        let addr = running.http_addr();
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        running.git_tasks.spawn(async move {
+            let _ = held.await;
+        });
+        let shutdown = tokio::spawn(running.shutdown());
+        // Each try that the kernel still accepts takes a backlog slot, so the tries stay well
+        // under the listen backlog and a refusal is told apart from a full queue by its kind.
+        let mut refused = false;
+        for _ in 0..50 {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    refused = true;
+                    break;
+                }
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        let still_waiting = !shutdown.is_finished();
+        let _ = release.send(());
+        shutdown.await.unwrap();
+        assert!(
+            still_waiting,
+            "shutdown returned before the tracked task was released"
+        );
+        assert!(
+            refused,
+            "the port still queued connections while shutdown waited"
         );
     }
 

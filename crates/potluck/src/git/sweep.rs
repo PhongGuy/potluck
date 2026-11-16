@@ -51,6 +51,13 @@ impl Writers {
         Writer { entry, guard }
     }
 
+    /// Marks each of `repos` dirty, so the next writer to leave it sweeps.
+    pub(crate) fn mark_dirty(&self, repos: &[PathBuf]) {
+        for repo in repos {
+            self.entry(repo).dirty.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// The gate for `repo`, created on first use; the map lock is never held across an await.
     fn entry(&self, repo: &Path) -> Arc<Entry> {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
@@ -151,21 +158,33 @@ pub(crate) fn sweep(repo: &Path) -> Swept {
     Swept { removed, deferred }
 }
 
+/// What `sweep_all` did: the total removed, and each repository whose sweep deferred.
+#[derive(Debug, Default)]
+pub(crate) struct SweptAll {
+    pub(crate) removed: usize,
+    pub(crate) deferred: Vec<PathBuf>,
+}
+
 /// Sweeps every workspace repository, each `<root>/<team>/<name>.git` directory, with `sweep`.
-/// Blocking. Returns the total removed; a missing `root` removes nothing. The caller
-/// guarantees no receive-pack is running in any of them.
-pub(crate) fn sweep_all(root: &Path) -> usize {
+/// Blocking. Reports the total removed and each deferred repository as its
+/// `<root>/<team>/<name>.git` path; a missing `root` removes nothing. The caller guarantees no
+/// receive-pack is running in any of them.
+pub(crate) fn sweep_all(root: &Path) -> SweptAll {
     let is_dir = |entry: &std::fs::DirEntry| entry.file_type().is_ok_and(|kind| kind.is_dir());
-    let mut removed = 0;
+    let mut all = SweptAll::default();
     for team in entries(root).iter().filter(|entry| is_dir(entry)) {
         for repo in entries(&team.path()).iter().filter(|entry| is_dir(entry)) {
             let path = repo.path();
             if path.extension().is_some_and(|ext| ext == "git") {
-                removed += sweep(&path).removed;
+                let swept = sweep(&path);
+                all.removed += swept.removed;
+                if swept.deferred {
+                    all.deferred.push(path);
+                }
             }
         }
     }
-    removed
+    all
 }
 
 /// How long git trusts a `gc.pid`; a lock fallback below shares the same horizon.
@@ -535,7 +554,7 @@ mod tests {
         put(&root.join("core/notes/refs/heads/main.lock"), "x");
         put(&root.join("core/file.git"), "x");
         put(&root.join("stray.lock"), "x");
-        assert_eq!(sweep_all(&root), 2, "one lock in each workspace");
+        assert_eq!(sweep_all(&root).removed, 2, "one lock in each workspace");
         assert!(
             !root.join("core/api.git/refs/heads/main.lock").exists(),
             "core/api swept"
@@ -557,7 +576,7 @@ mod tests {
             "the root itself is not swept"
         );
         assert_eq!(
-            sweep_all(&dir.path().join("missing")),
+            sweep_all(&dir.path().join("missing")).removed,
             0,
             "no root, nothing removed"
         );
@@ -574,7 +593,11 @@ mod tests {
         put(&root.join("core/api.git/HEAD.lock"), "x");
         symlink(outside.join("team"), root.join("linked")).unwrap();
         symlink(outside.join("w.git"), root.join("core/linked.git")).unwrap();
-        assert_eq!(sweep_all(&root), 1, "only the real workspace is swept");
+        assert_eq!(
+            sweep_all(&root).removed,
+            1,
+            "only the real workspace is swept"
+        );
         assert!(
             !root.join("core/api.git/HEAD.lock").exists(),
             "the real workspace is swept"
@@ -761,6 +784,44 @@ mod tests {
             assert!(
                 !repo.join(path).exists(),
                 "{path} goes: no live gc or maintenance run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deferred_startup_sweep_leaves_the_repository_dirty_for_its_first_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repos");
+        let repo = ref_locked_repo(&root.join("core"));
+        put(&root.join("core/quiet.git/refs/heads/main.lock"), "x");
+        let lock = repo.join("objects/maintenance.lock");
+        put(&lock, "");
+        age(&lock);
+        let holder = Holder::open(&lock, &repo);
+        let swept = sweep_all(&root);
+        assert_eq!(
+            swept.deferred,
+            vec![repo.clone()],
+            "only the busy repository defers"
+        );
+        assert_eq!(swept.removed, 1, "the quiet repository is swept");
+        for path in REF_LOCKS {
+            assert!(
+                repo.join(path).exists(),
+                "{path} survives the startup sweep"
+            );
+        }
+        drop(holder);
+        let writers = Writers::default();
+        writers.mark_dirty(&swept.deferred);
+        assert!(
+            writers.enter(&repo).await.leave(false).await,
+            "the first writer out sweeps"
+        );
+        for path in REF_LOCKS {
+            assert!(
+                !repo.join(path).exists(),
+                "{path} goes once the run has ended"
             );
         }
     }

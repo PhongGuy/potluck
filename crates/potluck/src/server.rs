@@ -85,11 +85,22 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     // Nothing can push until the listeners bind, so leftovers of a receive-pack killed while no
     // server ran are swept here. A sweep that fails is logged and never stops the start.
     let repos = config.repos_dir();
-    match tokio::task::spawn_blocking(move || crate::git::sweep_all(&repos)).await {
-        Ok(0) => {}
-        Ok(removed) => tracing::info!(removed, "swept killed-push leftovers at startup"),
-        Err(err) => tracing::warn!(error = %err, "startup sweep task failed"),
-    }
+    // Repositories it deferred to a live gc stay dirty, so the first push out sweeps them.
+    let deferred = match tokio::task::spawn_blocking(move || crate::git::sweep_all(&repos)).await {
+        Ok(swept) => {
+            if swept.removed > 0 {
+                tracing::info!(
+                    removed = swept.removed,
+                    "swept killed-push leftovers at startup"
+                );
+            }
+            swept.deferred
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "startup sweep task failed");
+            Vec::new()
+        }
+    };
     let hooks_dir = config.hooks_dir();
     std::env::current_exe()
         .and_then(|exe| crate::hooks::install(&hooks_dir, &exe, config.git()))
@@ -125,6 +136,7 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
     let state = AppState::new(db.clone(), config.clone());
+    state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
     let router = crate::api::router(state);
     let (stop, rx) = watch::channel(false);

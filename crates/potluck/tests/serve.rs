@@ -623,3 +623,39 @@ async fn shutdown_waits_for_a_workspace_create_whose_client_disconnected() {
     );
     assert!(repo.is_dir(), "the repository is kept with its row");
 }
+
+#[tokio::test]
+async fn dropping_a_running_server_frees_the_data_dir_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    let running = start(&config).await.unwrap();
+    let socket = running.admin_socket().to_path_buf();
+    drop(running);
+    // The detached listener tasks wind down on their own; once the admin socket stops
+    // answering, a refused start can only be the lock.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the dropped server's admin socket kept accepting"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A sibling test's git child can hold a duplicate of a lock fd between fork and exec, so
+    // `DataDirInUse` is retried briefly; a lock the dropped server kept never clears.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let again = loop {
+        match start(&config).await {
+            Err(ServerError::DataDirInUse { .. }) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(ServerError::DataDirInUse { .. }) => {
+                panic!("the dropped server still holds the data directory lock")
+            }
+            started => {
+                break started.expect("a new server starts on the dropped server's data directory");
+            }
+        }
+    };
+    again.shutdown().await;
+}

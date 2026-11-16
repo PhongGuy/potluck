@@ -6,6 +6,7 @@ pub(crate) mod http;
 pub mod push;
 pub mod repos;
 mod spool;
+mod sweep;
 
 pub use engine::{GitEngine, GitError, GitLimits};
 pub use push::RefMove;

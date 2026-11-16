@@ -12,7 +12,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::api::error::ApiError;
 use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
-use crate::git::{Repos, Service, spool};
+use crate::git::{Repos, Service, spool, sweep};
 
 /// How many git slots exist, how long a request waits for one, how long an upload may hold one
 /// before git starts, and how long each git child may run from spawn.
@@ -75,6 +75,7 @@ pub struct GitEngine {
     queue_wait: Duration,
     upload_timeout: Duration,
     max_runtime: Duration,
+    writers: sweep::Writers,
 }
 
 impl GitEngine {
@@ -97,6 +98,7 @@ impl GitEngine {
             queue_wait: limits.queue_wait,
             upload_timeout: limits.upload_timeout,
             max_runtime: limits.max_runtime,
+            writers: sweep::Writers::default(),
         }
     }
 
@@ -222,6 +224,13 @@ impl GitEngine {
         } else {
             (stdin, Vec::new())
         };
+        // A receive-pack holds the repository's writer gate until it is reaped, so a sweep after
+        // a killed push never overlaps a live one; a `?` below drops it and releases the gate.
+        let writer = if service == Service::ReceivePack {
+            Some(self.writers.enter(repo).await)
+        } else {
+            None
+        };
         // The refs before git starts are the baseline the reaper diffs against; nobody listening
         // means no extra git process.
         let watch = match on_push {
@@ -253,16 +262,20 @@ impl GitEngine {
                 tokio::join!(stderr_tail(stderr), child.wait())
             })
             .await;
-            match bounded {
-                Ok((_, Ok(status))) if status.success() => {}
-                Ok((tail, Ok(status))) => tracing::warn!(
-                    service = service.name(),
-                    %status,
-                    stderr = %tail,
-                    "git exited with an error"
-                ),
+            let killed = match bounded {
+                Ok((_, Ok(status))) if status.success() => false,
+                Ok((tail, Ok(status))) => {
+                    tracing::warn!(
+                        service = service.name(),
+                        %status,
+                        stderr = %tail,
+                        "git exited with an error"
+                    );
+                    false
+                }
                 Ok((_, Err(err))) => {
                     tracing::warn!(service = service.name(), error = %err, "waiting for git failed");
+                    false
                 }
                 Err(_) => {
                     // Kill the whole group while the leader is unreaped, so its pid cannot have
@@ -274,7 +287,12 @@ impl GitEngine {
                         limit = ?max_runtime,
                         "git ran past its run limit; killed its process group"
                     );
+                    true
                 }
+            };
+            // Sweep before the observer hears the moves, so a listener sees a clean repository.
+            if let Some(writer) = writer {
+                writer.leave(killed).await;
             }
             // Whatever the exit status, the refs are the ground truth: a client that hangs up
             // mid-report kills git with SIGPIPE after the refs already moved.
@@ -864,6 +882,11 @@ mod tests {
     /// `scratch`: the command pkt-line with `report-status`, a flush, then the pack holding every
     /// object the tip reaches. Returns the body and the tip.
     fn push_body(scratch: &Path) -> (Vec<u8>, String) {
+        push_body_for(scratch, "main")
+    }
+
+    /// As `push_body`, for `refs/heads/<branch>` from a work tree of its own with distinct content.
+    fn push_body_for(scratch: &Path, branch: &str) -> (Vec<u8>, String) {
         let run = |args: &[&str], cwd: &Path, stdin: &[u8]| -> Vec<u8> {
             use std::io::Write;
             let mut child = std::process::Command::new("git")
@@ -892,10 +915,10 @@ mod tests {
             );
             out.stdout
         };
-        let work = scratch.join("pushwork");
+        let work = scratch.join(format!("push-{branch}"));
         std::fs::create_dir_all(&work).unwrap();
         run(&["init", "-q", "-b", "main"], &work, b"");
-        std::fs::write(work.join("README"), "push\n").unwrap();
+        std::fs::write(work.join("README"), format!("{branch}\n")).unwrap();
         run(&["add", "README"], &work, b"");
         run(&["commit", "-q", "-m", "push"], &work, b"");
         let tip = String::from_utf8(run(&["rev-parse", "HEAD"], &work, b""))
@@ -908,7 +931,7 @@ mod tests {
             format!("{tip}\n").as_bytes(),
         );
         let line = format!(
-            "{} {tip} refs/heads/main\0report-status\n",
+            "{} {tip} refs/heads/{branch}\0report-status\n",
             crate::git::push::ZERO_SHA
         );
         let mut body = format!("{:04x}", line.len() + 4).into_bytes();
@@ -1071,6 +1094,204 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         cond()
+    }
+
+    /// The debris a killed receive-pack can leave in `repo`, as repo-relative paths.
+    fn debris(repo: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut stack = vec![repo.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let keep = name.ends_with(".keep")
+                    && std::fs::read_to_string(&path)
+                        .is_ok_and(|text| text.starts_with("receive-pack "));
+                if name.starts_with("tmp_objdir-incoming-") || name.ends_with(".lock") || keep {
+                    found.push(path.strip_prefix(repo).unwrap().display().to_string());
+                } else if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+        found
+    }
+
+    /// The first line a hook wrote to `path`, once it is complete.
+    async fn line_from(path: &Path) -> String {
+        assert!(
+            eventually(20, || std::fs::read_to_string(path)
+                .is_ok_and(|t| t.ends_with('\n')))
+            .await,
+            "the hook wrote {}",
+            path.display()
+        );
+        std::fs::read_to_string(path).unwrap().trim().to_owned()
+    }
+
+    /// One receive-pack of `body` with an observer; the moves it heard.
+    async fn push_once(
+        engine: &GitEngine,
+        repo: &Path,
+        body: Vec<u8>,
+    ) -> Vec<crate::git::push::RefMove> {
+        let (on_push, moved) = observer();
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(30), collect(out)).await;
+        tokio::time::timeout(Duration::from_secs(30), moved)
+            .await
+            .expect("the observer is called")
+            .expect("not dropped")
+    }
+
+    #[tokio::test]
+    async fn a_push_killed_in_pre_receive_leaves_no_quarantine_and_the_retry_lands() {
+        use crate::git::push::{RefMove, ZERO_SHA};
+        let dir = tempfile::tempdir().unwrap();
+        let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
+        let (engine, repo) = engine_in(dir.path(), short).await;
+        let seen = dir.path().join("quarantine.path");
+        let hook = dir.path().join("hooks").join("pre-receive");
+        write_hook_file(
+            &hook,
+            &format!(
+                "#!/bin/sh\necho \"$GIT_QUARANTINE_PATH\" > '{}'\nexec sleep 30\n",
+                seen.display()
+            ),
+        );
+        let (body, tip) = push_body(dir.path());
+        assert!(
+            push_once(&engine, &repo, body.clone()).await.is_empty(),
+            "killed"
+        );
+        let quarantine = line_from(&seen).await;
+        assert!(quarantine.contains("tmp_objdir-incoming-"), "{quarantine}");
+        assert!(!Path::new(&quarantine).exists(), "the quarantine is gone");
+        assert_eq!(debris(&repo), Vec::<String>::new());
+        write_hook_file(&hook, "#!/bin/sh\nexit 0\n");
+        assert_eq!(
+            push_once(&engine, &repo, body).await,
+            vec![RefMove::new("refs/heads/main", ZERO_SHA, &tip)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_killed_holding_ref_locks_leaves_none_and_the_retry_lands() {
+        use crate::git::push::{RefMove, ZERO_SHA};
+        let dir = tempfile::tempdir().unwrap();
+        let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
+        let (engine, repo) = engine_in(dir.path(), short).await;
+        // A pack, not loose objects, so receive-pack also writes its `.keep`.
+        let set = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                repo.to_str().unwrap(),
+                "config",
+                "receive.unpackLimit",
+                "1",
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(set.success());
+        // `prepared` fires with every ref lock of the transaction held.
+        let marker = dir.path().join("prepared.seen");
+        let hook = dir.path().join("hooks").join("reference-transaction");
+        write_hook_file(
+            &hook,
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nif [ \"$1\" = prepared ]; then echo locked > '{}'; exec sleep 30; fi\n",
+                marker.display()
+            ),
+        );
+        let (body, tip) = push_body(dir.path());
+        assert!(
+            push_once(&engine, &repo, body.clone()).await.is_empty(),
+            "killed"
+        );
+        line_from(&marker).await;
+        assert_eq!(debris(&repo), Vec::<String>::new());
+        std::fs::remove_file(&hook).unwrap();
+        assert_eq!(
+            push_once(&engine, &repo, body).await,
+            vec![RefMove::new("refs/heads/main", ZERO_SHA, &tip)]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_killed_push_beside_a_live_one_is_swept_only_after_the_live_one_ends() {
+        use crate::git::push::{RefMove, ZERO_SHA};
+        let dir = tempfile::tempdir().unwrap();
+        let limit = limits(2, 100).with_max_runtime(Duration::from_secs(8));
+        let (engine, repo) = engine_in(dir.path(), limit).await;
+        let (doomed_at, live_at, go) = (
+            dir.path().join("doomed.path"),
+            dir.path().join("live.path"),
+            dir.path().join("go"),
+        );
+        // The doomed push hangs to the limit; the live one waits for the test's go-ahead.
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\nread old new ref\ncase \"$ref\" in\n\
+                 refs/heads/doomed) echo \"$GIT_QUARANTINE_PATH\" > '{d}'; exec sleep 30 ;;\n\
+                 *) echo \"$GIT_QUARANTINE_PATH\" > '{l}'; i=0\n\
+                 while [ ! -e '{g}' ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done ;;\nesac\n",
+                d = doomed_at.display(),
+                l = live_at.display(),
+                g = go.display()
+            ),
+        );
+        let (doomed_body, _) = push_body_for(dir.path(), "doomed");
+        let (live_body, live_tip) = push_body_for(dir.path(), "main");
+        let engine = std::sync::Arc::new(engine);
+        let doomed = tokio::spawn({
+            let (engine, repo) = (std::sync::Arc::clone(&engine), repo.clone());
+            async move { push_once(&engine, &repo, doomed_body).await }
+        });
+        let doomed_q = line_from(&doomed_at).await;
+        // Start the live push halfway through the doomed one's limit, so it is inside the
+        // repository when the doomed one is killed and still well inside its own limit.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let live = tokio::spawn({
+            let (engine, repo) = (std::sync::Arc::clone(&engine), repo.clone());
+            async move { push_once(&engine, &repo, live_body).await }
+        });
+        let live_q = line_from(&live_at).await;
+        assert!(
+            doomed.await.unwrap().is_empty(),
+            "the doomed push was killed"
+        );
+        assert!(
+            Path::new(&live_q).exists(),
+            "the live push keeps its quarantine"
+        );
+        assert!(
+            Path::new(&doomed_q).exists(),
+            "the sweep waits for the live push"
+        );
+        std::fs::write(&go, "").unwrap();
+        assert_eq!(
+            live.await.unwrap(),
+            vec![RefMove::new("refs/heads/main", ZERO_SHA, &live_tip)]
+        );
+        assert_eq!(
+            debris(&repo),
+            Vec::<String>::new(),
+            "swept once the live push left"
+        );
     }
 
     #[test]

@@ -1,8 +1,10 @@
 //! The user queries on the one database thread.
 
+use potluck::api::auth::Authenticated;
 use potluck::api::error::{ApiError, ErrorCode};
+use potluck::api::{Actor, AuthUser};
 use potluck::db::DbError;
-use potluck::db::accounts::{NewUser, UserPatch};
+use potluck::db::accounts::{NewUser, UserPatch, UserRecord};
 
 use crate::common::migrated_db;
 
@@ -116,7 +118,11 @@ async fn update_user_applies_only_the_set_fields() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(unchanged, cleared, "an empty patch is a no-op");
+    assert_eq!(
+        columns(&unchanged),
+        columns(&cleared),
+        "an empty patch is a no-op"
+    );
     assert!(
         db.update_user("nobody", UserPatch::default().disabled(true))
             .await
@@ -183,4 +189,47 @@ async fn a_user_create_that_loses_the_race_is_a_conflict() {
         db.list_users().await.unwrap().is_empty(),
         "the failed statement left no row"
     );
+}
+
+/// Every column of a user row, so two rows compare in full without `UserRecord: PartialEq`.
+type Columns<'a> = (
+    i64,
+    &'a str,
+    &'a str,
+    Option<&'a str>,
+    Option<&'a str>,
+    bool,
+    bool,
+    &'a str,
+);
+
+fn columns(u: &UserRecord) -> Columns<'_> {
+    (
+        u.id(),
+        u.username(),
+        u.display_name(),
+        u.email(),
+        u.password_hash(),
+        u.server_admin(),
+        u.disabled(),
+        u.created_at(),
+    )
+}
+
+// `<T as Probe<_>>` is ambiguous, and fails to compile, exactly when `T: PartialEq`.
+trait Probe<A> {
+    fn not_partial_eq() {}
+}
+impl<T: ?Sized> Probe<()> for T {}
+struct ImplementsPartialEq;
+impl<T: ?Sized + PartialEq> Probe<ImplementsPartialEq> for T {}
+
+#[test]
+fn types_that_carry_a_password_hash_do_not_implement_partial_eq() {
+    <NewUser as Probe<_>>::not_partial_eq();
+    <UserRecord as Probe<_>>::not_partial_eq();
+    <UserPatch as Probe<_>>::not_partial_eq();
+    <AuthUser as Probe<_>>::not_partial_eq();
+    <Actor as Probe<_>>::not_partial_eq();
+    <Authenticated as Probe<_>>::not_partial_eq();
 }

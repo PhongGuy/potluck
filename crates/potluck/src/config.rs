@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use url::{Host, Url};
 
@@ -27,6 +28,10 @@ pub struct ServeArgs {
     /// Largest accepted push body, in bytes.
     #[arg(long, env = "POTLUCK_MAX_PUSH_BYTES", default_value_t = 100 * 1024 * 1024)]
     max_push_bytes: u64,
+    /// Longest a git process (and its hook) may run before it is killed, in seconds.
+    #[arg(long, env = "POTLUCK_GIT_MAX_RUNTIME_SECS", default_value_t = 1800,
+          value_parser = clap::value_parser!(u64).range(1..))]
+    git_max_runtime_secs: u64,
     /// Tracing filter directive, such as `info` or `potluck=debug`.
     #[arg(long, env = "POTLUCK_LOG", default_value = "info")]
     log: String,
@@ -53,6 +58,7 @@ pub struct Config {
     public_url: String,
     git: PathBuf,
     max_push_bytes: u64,
+    git_max_runtime: Duration,
     log: String,
     trusted_proxies: Vec<ipnet::IpNet>,
 }
@@ -81,6 +87,11 @@ impl Config {
     /// The push body cap in bytes.
     pub fn max_push_bytes(&self) -> u64 {
         self.max_push_bytes
+    }
+
+    /// How long a git child may run; `--git-max-runtime-secs`.
+    pub fn git_max_runtime(&self) -> Duration {
+        self.git_max_runtime
     }
 
     /// The tracing filter directive.
@@ -222,6 +233,7 @@ impl TryFrom<ServeArgs> for Config {
             public_url,
             git: args.git,
             max_push_bytes: args.max_push_bytes,
+            git_max_runtime: Duration::from_secs(args.git_max_runtime_secs),
             log: args.log,
             trusted_proxies,
         })

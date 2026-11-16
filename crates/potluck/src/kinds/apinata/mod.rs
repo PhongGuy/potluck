@@ -37,7 +37,8 @@ impl Kind for Apinata {
 
     /// Environment files: `env_unparsable` if the blob is not exactly one YAML document yaml_serde
     /// reads within `NODE_CAP` nodes or has a merge key it cannot apply; `secret_value` if, merged,
-    /// it or a value in it is a mapping with `secret: true` (the boolean) and a non-null `value`.
+    /// it or any node in it, keys included, is a mapping with `secret: true` (the boolean) and a
+    /// non-null `value`.
     fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding> {
         is_environment_file(path)
             .then(|| environment_rule(blob, NODE_CAP))
@@ -234,14 +235,17 @@ fn parse_environment(blob: &[u8], node_cap: usize) -> Result<Value, yaml_serde::
     Counted { budget: &budget }.deserialize(yaml_serde::Deserializer::from_slice(blob))
 }
 
-// Depth-first through mappings, sequences and tags. Only `null` means "no value", so an
-// empty string still counts as one.
+// Depth-first through mapping keys and values, sequences and tags, so a complex key cannot
+// carry a secret past the walk. Only `null` means "no value", so an empty string still counts.
 fn has_valued_secret(node: &Value) -> bool {
     match node {
         Value::Mapping(map) => {
             let secret = map.get("secret") == Some(&Value::Bool(true));
             let valued = map.get("value").is_some_and(|v| !v.is_null());
-            (secret && valued) || map.values().any(has_valued_secret)
+            (secret && valued)
+                || map
+                    .iter()
+                    .any(|(k, v)| has_valued_secret(k) || has_valued_secret(v))
         }
         Value::Sequence(items) => items.iter().any(has_valued_secret),
         Value::Tagged(tagged) => has_valued_secret(&tagged.value),

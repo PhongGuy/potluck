@@ -499,3 +499,38 @@ async fn a_start_deferred_by_live_maintenance_is_swept_by_the_first_push() {
     ok(push());
     again.shutdown().await;
 }
+
+// A pre-receive that leaves a 1 s sleeper in git's process group keeps the reaper, and so the
+// push record, waiting after git has answered; shutdown must not close the database under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn shutdown_waits_for_the_record_of_a_push_git_already_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    let running = start(&config).await.unwrap();
+    let root = api_admin(running.db()).await;
+    let api = format!("http://{}/api/v1", running.http_addr());
+    api_team(&api, &root, "core").await;
+    api_workspace(&api, &root, "core", "api", false).await;
+    write_hook(
+        &dir.path().join("hooks"),
+        "(sleep 1 </dev/null >/dev/null 2>&1 &)\nexit 0",
+    );
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    let url = format!("http://{}/git/core/api.git", running.http_addr());
+    ok(git(
+        &home,
+        Some(&work),
+        Some(&root),
+        &["push", "-q", &url, "main"],
+    ));
+    running.shutdown().await;
+    let db = potluck::db::Db::open(&config.db_path()).unwrap();
+    let ws = db.workspace_by_slugs("core", "api").await.unwrap().unwrap();
+    db.close();
+    assert!(
+        !ws.import_pending(),
+        "the push record landed before shutdown returned"
+    );
+}

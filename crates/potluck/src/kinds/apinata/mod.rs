@@ -37,7 +37,8 @@ impl Kind for Apinata {
 
     /// Environment files: `env_unparsable` if the blob is not exactly one YAML document yaml_serde
     /// reads within `NODE_CAP` nodes or has a merge key it cannot apply; `secret_value` if, merged,
-    /// it or a value in it is a mapping with `secret: true` (the boolean) and a non-null `value`.
+    /// it or any node in it, keys included, is a mapping with `secret: true` (the boolean) and a
+    /// non-null `value`.
     fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding> {
         is_environment_file(path)
             .then(|| environment_rule(blob, NODE_CAP))
@@ -67,8 +68,8 @@ pub const NODE_CAP: usize = 2_000_000;
 
 /// The environment-file rule on `blob` alone with an explicit `node_cap`: `env_unparsable`
 /// when the bytes are not one YAML document, hold more than `node_cap` nodes or carry a
-/// merge key yaml_serde cannot apply, `secret_value` for a valued secret once merges are
-/// folded in, else `None`. `content_rule` applies it with `NODE_CAP` to every path
+/// merge key yaml_serde cannot apply (any `<<` inside a mapping key), `secret_value` for a
+/// valued secret once merges are folded in, else `None`. `content_rule` applies it with `NODE_CAP` to every path
 /// `is_environment_file` accepts.
 pub fn environment_rule(blob: &[u8], node_cap: usize) -> Option<Finding> {
     // Fail closed: Apinata reads with the same parser, so a file it refuses is one no
@@ -90,8 +91,12 @@ const MERGE_ROUNDS: usize = 128;
 
 // One `apply_merge` folds a single level, so a `<<` carried in by a merge survives it;
 // repeat until none is left. Merges move entries and never clone, so no round grows the
-// tree past what the counted parse paid for. `false` on a merge error or the bound.
+// tree past what the counted parse paid for. `false` on a merge error or the bound, and at
+// once for a `<<` inside a key, which `apply_merge` never folds since it walks values only.
 fn fold_merges(doc: &mut Value) -> bool {
+    if merge_in_a_key(doc) {
+        return false;
+    }
     for _ in 0..MERGE_ROUNDS {
         if !has_merge_key(doc) {
             return true;
@@ -105,9 +110,27 @@ fn fold_merges(doc: &mut Value) -> bool {
 
 fn has_merge_key(node: &Value) -> bool {
     match node {
-        Value::Mapping(map) => map.contains_key("<<") || map.values().any(has_merge_key),
+        Value::Mapping(map) => {
+            map.contains_key("<<")
+                || map
+                    .iter()
+                    .any(|(k, v)| has_merge_key(k) || has_merge_key(v))
+        }
         Value::Sequence(items) => items.iter().any(has_merge_key),
         Value::Tagged(tagged) => has_merge_key(&tagged.value),
+        _ => false,
+    }
+}
+
+// Hands each mapping key to `has_merge_key` once and recurses only through values, items and
+// tags, so every node is visited a bounded number of times.
+fn merge_in_a_key(node: &Value) -> bool {
+    match node {
+        Value::Mapping(map) => map
+            .iter()
+            .any(|(k, v)| has_merge_key(k) || merge_in_a_key(v)),
+        Value::Sequence(items) => items.iter().any(merge_in_a_key),
+        Value::Tagged(tagged) => merge_in_a_key(&tagged.value),
         _ => false,
     }
 }
@@ -234,14 +257,17 @@ fn parse_environment(blob: &[u8], node_cap: usize) -> Result<Value, yaml_serde::
     Counted { budget: &budget }.deserialize(yaml_serde::Deserializer::from_slice(blob))
 }
 
-// Depth-first through mappings, sequences and tags. Only `null` means "no value", so an
-// empty string still counts as one.
+// Depth-first through mapping keys and values, sequences and tags, so a complex key cannot
+// carry a secret past the walk. Only `null` means "no value", so an empty string still counts.
 fn has_valued_secret(node: &Value) -> bool {
     match node {
         Value::Mapping(map) => {
             let secret = map.get("secret") == Some(&Value::Bool(true));
             let valued = map.get("value").is_some_and(|v| !v.is_null());
-            (secret && valued) || map.values().any(has_valued_secret)
+            (secret && valued)
+                || map
+                    .iter()
+                    .any(|(k, v)| has_valued_secret(k) || has_valued_secret(v))
         }
         Value::Sequence(items) => items.iter().any(has_valued_secret),
         Value::Tagged(tagged) => has_valued_secret(&tagged.value),

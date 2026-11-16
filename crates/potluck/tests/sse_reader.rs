@@ -92,3 +92,39 @@ async fn an_unterminated_final_block_is_reported_not_dropped() {
     // as one, nor hide it behind a clean end.
     let _ = r.next_block().await;
 }
+
+// Each CRLF pair is split across two chunks, with a pause so the client reads them apart.
+async fn split_crlf_events() -> impl axum::response::IntoResponse {
+    use futures_util::StreamExt;
+    let parts = [
+        ": keep-alive\r",
+        "\n\r",
+        "\nevent: ref\r",
+        "\ndata: {\"ref\":\"refs/heads/main\",\"sha\":\"abc\"}\r",
+        "\n\r",
+        "\n",
+    ];
+    let body = stream::iter(parts).then(|part| async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        Ok::<_, Infallible>(part)
+    });
+    (
+        [("content-type", "text/event-stream")],
+        axum::body::Body::from_stream(body),
+    )
+}
+
+#[tokio::test]
+async fn a_crlf_pair_split_across_chunks_is_one_line_end() {
+    let router = Router::new().route("/events", get(split_crlf_events));
+    let (addr, _task) = serve(router).await;
+    let mut r = SseReader::open(&format!("http://{addr}/events"), "token")
+        .await
+        .unwrap();
+    assert_eq!(
+        ref_event(&r.next_block().await.unwrap()),
+        ("refs/heads/main".to_owned(), "abc".to_owned()),
+        "the split keep-alive was skipped and the event read whole"
+    );
+    assert_eq!(r.next_block().await, None, "the server ended the stream");
+}

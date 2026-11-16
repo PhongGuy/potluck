@@ -4,7 +4,7 @@ use crate::db::accounts::UserRecord;
 
 /// Who a request acts as. Requests over the admin socket are `System`; TCP requests are
 /// `Anonymous` unless they carry a valid token, which makes them `User`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Actor {
     /// An unauthenticated request over TCP.
@@ -36,7 +36,7 @@ impl Actor {
 
 /// The user a token resolved to, and which token it was. `Debug` goes through
 /// `UserRecord`'s, which redacts the password hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct AuthUser {
     user: UserRecord,

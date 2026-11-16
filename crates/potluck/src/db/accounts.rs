@@ -18,7 +18,7 @@ impl std::fmt::Debug for Redacted {
 
 /// What `create_user` inserts; `created_at` is set by the database thread. `Debug` prints the
 /// hash as `<redacted>`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct NewUser {
     username: String,
@@ -75,7 +75,7 @@ impl std::fmt::Debug for NewUser {
 }
 
 /// A `users` row. `Debug` prints the hash as `<redacted>`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct UserRecord {
     id: i64,
@@ -150,7 +150,7 @@ impl std::fmt::Debug for UserRecord {
 
 /// Fields to change; an unset field is left alone. `email(None)` clears the email. `Debug` prints
 /// a set hash as `Some(<redacted>)`.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct UserPatch {
     display_name: Option<String>,

@@ -70,7 +70,7 @@ fn rejected(prefix: &str, reason: &'static str) -> ApiError {
 /// The request's actor: `System` when the `Extension<Actor>` says so (the admin socket), else
 /// the `Authorization` header resolved through `authenticate`, `Anonymous` without one, 401 for
 /// a present but unusable or unknown credential. A missing extension counts as `Anonymous`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Authenticated {
     actor: Actor,

@@ -21,9 +21,9 @@ async fn a_user_actor_exposes_its_user_and_admin_flag() {
     assert!(Actor::System.user().is_none() && Actor::Anonymous.user().is_none());
     assert!(!Actor::Anonymous.is_server_admin());
     assert_eq!(
-        as_bob,
-        Actor::User(AuthUser::new(bob, 7)),
-        "actors compare by value"
+        as_bob.user().map(|u| (u.user().id(), u.token_id())),
+        Some((bob.id(), 7)),
+        "the actor carries the user and token it was built from"
     );
 }
 

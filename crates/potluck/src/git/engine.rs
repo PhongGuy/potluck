@@ -223,7 +223,8 @@ impl GitEngine {
             (stdin, Vec::new())
         };
         // A receive-pack holds the repository's writer gate until it is reaped, so a sweep after
-        // a killed push never overlaps a live one; a `?` below drops it and releases the gate.
+        // a killed push never overlaps a live one. A `?` before the spawn releases it unswept,
+        // since no git has touched the repository; after the spawn every exit goes through `leave`.
         let writer = if service == Service::ReceivePack {
             Some(self.writers.enter(repo).await)
         } else {
@@ -246,10 +247,19 @@ impl GitEngine {
             .spawn()
             .map_err(GitError::Spawn)?;
         let group = process_group(&child);
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| GitError::Spawn(std::io::Error::other("git has no stdout")))?;
+        debug_assert!(
+            child.stdout.is_some(),
+            "a piped stdout is present after spawn"
+        );
+        // Unreachable while stdout is piped; if it ever happens, git is killed like an overrun
+        // and the repository is swept before the gate opens.
+        let Some(stdout) = child.stdout.take() else {
+            kill_and_reap(&mut child, group).await;
+            if let Some(writer) = writer {
+                writer.leave(true).await;
+            }
+            return Err(GitError::Spawn(std::io::Error::other("git has no stdout")));
+        };
         let stderr = child.stderr.take();
         let max_runtime = self.max_runtime;
         // The reaper owns the child and the slot: the slot returns when git exits or is killed at

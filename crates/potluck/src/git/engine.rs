@@ -1230,6 +1230,70 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_killed_push_beside_a_live_one_is_swept_only_after_the_live_one_ends() {
+        use crate::git::push::{RefMove, ZERO_SHA};
+        let dir = tempfile::tempdir().unwrap();
+        let limit = limits(2, 100).with_max_runtime(Duration::from_secs(8));
+        let (engine, repo) = engine_in(dir.path(), limit).await;
+        let (doomed_at, live_at, go) = (
+            dir.path().join("doomed.path"),
+            dir.path().join("live.path"),
+            dir.path().join("go"),
+        );
+        // The doomed push hangs to the limit; the live one waits for the test's go-ahead.
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\nread old new ref\ncase \"$ref\" in\n\
+                 refs/heads/doomed) echo \"$GIT_QUARANTINE_PATH\" > '{d}'; exec sleep 30 ;;\n\
+                 *) echo \"$GIT_QUARANTINE_PATH\" > '{l}'; i=0\n\
+                 while [ ! -e '{g}' ] && [ $i -lt 400 ]; do sleep 0.05; i=$((i+1)); done ;;\nesac\n",
+                d = doomed_at.display(),
+                l = live_at.display(),
+                g = go.display()
+            ),
+        );
+        let (doomed_body, _) = push_body_for(dir.path(), "doomed");
+        let (live_body, live_tip) = push_body_for(dir.path(), "main");
+        let engine = std::sync::Arc::new(engine);
+        let doomed = tokio::spawn({
+            let (engine, repo) = (std::sync::Arc::clone(&engine), repo.clone());
+            async move { push_once(&engine, &repo, doomed_body).await }
+        });
+        let doomed_q = line_from(&doomed_at).await;
+        // Start the live push halfway through the doomed one's limit, so it is inside the
+        // repository when the doomed one is killed and still well inside its own limit.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let live = tokio::spawn({
+            let (engine, repo) = (std::sync::Arc::clone(&engine), repo.clone());
+            async move { push_once(&engine, &repo, live_body).await }
+        });
+        let live_q = line_from(&live_at).await;
+        assert!(
+            doomed.await.unwrap().is_empty(),
+            "the doomed push was killed"
+        );
+        assert!(
+            Path::new(&live_q).exists(),
+            "the live push keeps its quarantine"
+        );
+        assert!(
+            Path::new(&doomed_q).exists(),
+            "the sweep waits for the live push"
+        );
+        std::fs::write(&go, "").unwrap();
+        assert_eq!(
+            live.await.unwrap(),
+            vec![RefMove::new("refs/heads/main", ZERO_SHA, &live_tip)]
+        );
+        assert_eq!(
+            debris(&repo),
+            Vec::<String>::new(),
+            "swept once the live push left"
+        );
+    }
+
     #[test]
     fn the_default_run_limit_is_thirty_minutes() {
         assert_eq!(GitLimits::default().max_runtime, Duration::from_secs(1800));

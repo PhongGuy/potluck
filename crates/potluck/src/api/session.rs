@@ -10,8 +10,7 @@ use super::client_ip::ClientIp;
 use super::error::ApiError;
 use super::json::ApiJson;
 use super::objects::{TokenJson, UserJson};
-use crate::auth::token::MintedToken;
-use crate::db::accounts::NewToken;
+use super::{tokens, validate};
 
 /// The sign-in body. No `Debug`, so the password cannot reach a log by formatting.
 #[derive(Deserialize)]
@@ -38,13 +37,7 @@ pub(super) async fn create(
     ip: ClientIp,
     ApiJson(body): ApiJson<SessionRequest>,
 ) -> Result<(StatusCode, Json<SessionResponse>), ApiError> {
-    let token_name = body.token_name.trim();
-    if token_name.is_empty() || token_name.chars().count() > 100 {
-        return Err(ApiError::invalid_value(
-            "token_name",
-            "token_name must be 1 to 100 characters",
-        ));
-    }
+    let token_name = validate::token_name("token_name", &body.token_name)?;
     // Only attempts that reach the credential check count, the address before the username.
     let limits = state.session_limits();
     limits
@@ -82,21 +75,11 @@ pub(super) async fn create(
         }
     }
 
-    let minted = MintedToken::mint().map_err(|_| ApiError::internal("could not mint a token"))?;
-    let record = state
-        .db()
-        .create_token(NewToken::new(
-            user.id(),
-            token_name,
-            minted.prefix(),
-            *minted.digest(),
-            None,
-        ))
-        .await?;
+    let (token, record) = tokens::mint_and_create(&state, user.id(), token_name, None).await?;
     Ok((
         StatusCode::CREATED,
         Json(SessionResponse {
-            token: minted.secret().to_owned(),
+            token,
             token_meta: TokenJson::from(&record),
             user: UserJson::from(&user),
         }),

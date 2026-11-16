@@ -20,7 +20,7 @@ fn env(kind: Option<&str>) -> HookEnv {
 }
 
 fn update(tip: &str, name: &str) -> RefUpdate {
-    RefUpdate::parse_line(&format!("{ZERO} {tip} {name}")).unwrap()
+    RefUpdate::parse_line(format!("{ZERO} {tip} {name}").as_bytes()).unwrap()
 }
 
 /// `"<ref> <path> <code> <rule>"` per rejection, in order.
@@ -29,7 +29,7 @@ fn rows(r: &[Rejection]) -> Vec<String> {
         .map(|x| {
             format!(
                 "{} {} {} {}",
-                x.ref_name(),
+                String::from_utf8_lossy(x.ref_name()),
                 String::from_utf8_lossy(x.path()),
                 x.finding().code().as_str(),
                 x.finding().rule()
@@ -228,7 +228,7 @@ fn deletions_and_overrides_touch_no_git_and_an_oversized_blob_skips_content_rule
     s.write("creds.txt", AWS);
     let tip = s.stage_commit("secret");
     let broken = Git::new(PathBuf::from("/nonexistent/git"), None);
-    let delete = RefUpdate::parse_line(&format!("{tip} {ZERO} refs/heads/main")).unwrap();
+    let delete = RefUpdate::parse_line(format!("{tip} {ZERO} refs/heads/main").as_bytes()).unwrap();
     assert!(scan(&env(None), &[delete], &broken).unwrap().is_empty());
     assert!(
         scan(

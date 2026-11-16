@@ -80,18 +80,26 @@ impl HeldWorkspace {
 }
 
 // Roles compare as ranks in SQL so `MAX` picks the highest grant; `role_from_rank` reverses it.
-const RANK: &str = "MAX(CASE g.role WHEN 'admin' THEN 3 WHEN 'write' THEN 2 ELSE 1 END)";
+// An unknown role ranks above admin, so `MAX` surfaces it beside any valid grant and
+// `role_from_rank` refuses it rather than reading it as `read`.
+const RANK: &str =
+    "MAX(CASE g.role WHEN 'admin' THEN 3 WHEN 'write' THEN 2 WHEN 'read' THEN 1 ELSE 4 END)";
 
 // The grants `g` that reach user `:user`: their own, or one to a team they belong to.
 const HELD_BY_USER: &str = "((g.subject_kind = 'user' AND g.subject_id = :user) \
      OR (g.subject_kind = 'team' AND g.subject_id IN \
      (SELECT team_id FROM team_members WHERE user_id = :user)))";
 
-fn role_from_rank(rank: i64) -> Role {
+fn role_from_rank(rank: i64, idx: usize) -> rusqlite::Result<Role> {
     match rank {
-        3 => Role::Admin,
-        2 => Role::Write,
-        _ => Role::Read,
+        3 => Ok(Role::Admin),
+        2 => Ok(Role::Write),
+        1 => Ok(Role::Read),
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "role".to_owned(),
+            rusqlite::types::Type::Integer,
+        )),
     }
 }
 
@@ -188,12 +196,15 @@ impl Db {
             let sql = format!(
                 "SELECT {RANK} FROM grants g WHERE g.workspace_id = :ws AND {HELD_BY_USER}"
             );
-            let rank: Option<i64> = conn.query_row(
+            let role = conn.query_row(
                 &sql,
                 named_params! {":ws": workspace_id, ":user": user_id},
-                |row| row.get(0),
+                |row| {
+                    let rank: Option<i64> = row.get(0)?;
+                    rank.map(|rank| role_from_rank(rank, 0)).transpose()
+                },
             )?;
-            Ok(rank.map(role_from_rank))
+            Ok(role)
         })
         .await
     }
@@ -211,7 +222,7 @@ impl Db {
                 .query_map(named_params! {":user": user_id}, |row| {
                     Ok(HeldWorkspace {
                         workspace: workspace_from_row(row)?,
-                        role: role_from_rank(row.get(9)?),
+                        role: role_from_rank(row.get(9)?, 9)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;

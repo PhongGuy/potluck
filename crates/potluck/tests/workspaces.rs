@@ -1,12 +1,15 @@
 //! Workspace creation: the seed, the import state, validation, and the orphan directory.
 
 use std::path::Path;
+use std::time::Duration;
 
+use potluck::server::start;
 use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::common::{
-    SEED_COMMIT, TestApp, api_admin, api_team, api_user, call, git, ok, repo_path, test_app,
+    SEED_COMMIT, TestApp, api_admin, api_team, api_user, call, git, hanging_git, ok, parse_config,
+    repo_path, test_app,
 };
 
 /// `git --git-dir=<repo> <args>`; panics with stderr on failure.
@@ -203,4 +206,46 @@ async fn a_failure_after_the_claim_removes_the_directory() {
     assert_eq!(status, 409, "{err}");
     assert_eq!(err["error"]["code"], "conflict");
     assert!(!repo.exists(), "the claimed directory was removed again");
+}
+
+#[tokio::test]
+async fn a_hung_seed_git_is_killed_at_the_run_limit_and_does_not_hold_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let git = hanging_git(dir.path(), "hash-object");
+    let data = dir.path().join("data");
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data.to_str().unwrap(),
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--git",
+        git.to_str().unwrap(),
+        "--git-max-runtime-secs",
+        "1",
+    ])
+    .unwrap();
+    let running = start(&config).await.unwrap();
+    let api = format!("http://{}/api/v1", running.http_addr());
+    let token = api_admin(running.db()).await;
+    api_team(&api, &token, "acme").await;
+    let body = json!({"slug": "ws", "name": "ws", "kind": "apinata", "default_branch": "main", "seed": true});
+    let url = format!("{api}/teams/acme/workspaces");
+    let create = call(&url, Method::POST, Some(&token), Some(body));
+    // Both waits are capped well past the 1 s limit, so a regression fails instead of hanging.
+    let created = tokio::time::timeout(Duration::from_secs(15), create).await;
+    let stopped = tokio::time::timeout(Duration::from_secs(15), running.shutdown()).await;
+    let (status, body) = created.expect("the workspace create outlived the git run limit");
+    assert_eq!(status, 500, "{body}");
+    assert!(stopped.is_ok(), "shutdown waited on the hung seed git");
+    assert!(
+        !repo_path(&data, "acme", "ws").exists(),
+        "the half-made repository is removed"
+    );
+    let pid = std::fs::read_to_string(dir.path().join("hung.pid")).unwrap();
+    assert!(
+        !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists(),
+        "the hung git is killed and reaped"
+    );
 }

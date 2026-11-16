@@ -95,7 +95,7 @@ impl GitEngine {
         limits: GitLimits,
     ) -> Self {
         Self {
-            repos,
+            repos: repos.with_max_runtime(limits.max_runtime),
             hooks_dir,
             tmp_dir,
             max_body,
@@ -400,7 +400,7 @@ async fn released(writer: Option<sweep::Writer>, err: GitError) -> GitError {
 }
 
 /// The process group `child` leads (spawned with `process_group(0)`); `None` once reaped.
-fn process_group(child: &tokio::process::Child) -> Option<rustix::process::Pid> {
+pub(super) fn process_group(child: &tokio::process::Child) -> Option<rustix::process::Pid> {
     child
         .id()
         .and_then(|id| i32::try_from(id).ok())
@@ -474,7 +474,10 @@ fn kill_group(group: Option<rustix::process::Pid>) {
 }
 
 /// SIGKILLs `group`, then reaps `child`, the group's leader.
-async fn kill_and_reap(child: &mut tokio::process::Child, group: Option<rustix::process::Pid>) {
+pub(super) async fn kill_and_reap(
+    child: &mut tokio::process::Child,
+    group: Option<rustix::process::Pid>,
+) {
     kill_group(group);
     let _ = child.wait().await;
 }
@@ -500,12 +503,12 @@ async fn overran(
 
 /// Kills `group` when dropped unless disarmed, so a cancelled caller (the client hung up)
 /// takes down git's whole group, not just the leader `kill_on_drop` reaches.
-struct GroupKill(Option<rustix::process::Pid>);
+pub(super) struct GroupKill(pub(super) Option<rustix::process::Pid>);
 
 impl GroupKill {
     /// Stops the drop from signalling. Call it once git is reaped or its group already killed,
     /// so a reused pid is never signalled for the first time.
-    fn disarm(mut self) {
+    pub(super) fn disarm(mut self) {
         self.0 = None;
     }
 }

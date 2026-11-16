@@ -4,6 +4,7 @@
 //! container or touches user config.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -21,6 +22,15 @@ fn quadlet() -> String {
 
 fn exists(path: &str) -> bool {
     Path::new(path).exists()
+}
+
+/// Reports a skipped test as `skipped deploy_files::{test}: {reason}` on stderr. It writes to
+/// the stream directly, since libtest captures `eprintln!` and would hide the skip.
+fn skipped(test: &str, reason: &str) {
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "skipped deploy_files::{test}: {reason}"
+    );
 }
 
 #[test]
@@ -113,7 +123,40 @@ fn compose_validates_with_an_installed_compose_tool() {
         );
         return;
     }
-    eprintln!("skipped: no compose tool installed");
+    skipped(
+        "compose_validates_with_an_installed_compose_tool",
+        "no compose tool installed",
+    );
+}
+
+/// Runs the compose test in a child copy of this test binary with an empty `PATH`, so no
+/// compose tool is found, and without `--nocapture`: the skip must still reach stderr.
+#[test]
+fn a_skip_shows_without_nocapture() {
+    let empty = tempfile::tempdir().unwrap();
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "deploy_files::compose_validates_with_an_installed_compose_tool",
+            "--test-threads=1",
+        ])
+        .env("PATH", empty.path())
+        .env_remove("RUST_TEST_NOCAPTURE")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "child run failed: {stdout}{stderr}");
+    assert!(
+        stdout.contains("1 passed"),
+        "the child ran the one test: {stdout}"
+    );
+    assert!(
+        stderr.contains(
+            "skipped deploy_files::compose_validates_with_an_installed_compose_tool: no compose tool installed"
+        ),
+        "the skip is visible: {stderr}"
+    );
 }
 
 /// The Quadlet generator's dry run, confined to a temp copy of the unit, must emit the
@@ -128,7 +171,10 @@ fn quadlet_generates_a_service_in_a_dry_run() {
     .into_iter()
     .find(|p| exists(p));
     let Some(generator) = generator else {
-        eprintln!("skipped: no Quadlet generator installed");
+        skipped(
+            "quadlet_generates_a_service_in_a_dry_run",
+            "no Quadlet generator installed",
+        );
         return;
     };
     let dir = tempfile::tempdir().unwrap();

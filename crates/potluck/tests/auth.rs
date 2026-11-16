@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use axum::routing::get;
 use axum::{Extension, Router};
 use base64::Engine;
-use potluck::api::Actor;
 use potluck::api::auth::Authenticated;
 use potluck::api::error::ApiError;
+use potluck::api::{Actor, AuthUser};
 use potluck::db::Db;
 use serde_json::Value;
 
@@ -217,4 +217,34 @@ async fn require_user_and_require_server_admin_answer_fixed_text() {
             "the system actor has no account".to_owned()
         )
     );
+}
+
+#[tokio::test]
+async fn an_anonymous_extension_still_lets_the_header_decide() {
+    let (_d, db, addr) = app(Some(Actor::Anonymous)).await;
+    let bob = create_user(&db, "bob", "pw", false).await;
+    let bearer = format!("Bearer {}", mint_token(&db, &bob, "t", None).await);
+    let (status, body, _) = get_with(addr, "/whoami", &[("authorization", bearer.as_str())]).await;
+    let id = db.tokens_for_user(bob.id()).await.unwrap()[0].id();
+    assert_eq!((status, body), (200, format!("user:bob:{id}")));
+    let (status, _, _) = get_with(addr, "/whoami", &[("authorization", "Bearer plk_nope")]).await;
+    assert_eq!(status, 401, "a bad token is still refused");
+    assert_eq!(get_with(addr, "/whoami", &[]).await.1, "anonymous");
+}
+
+#[tokio::test]
+async fn a_user_extension_is_never_trusted() {
+    // Only `System` is taken from the extension; a planted `User` must not sign anyone in.
+    let (_dir, db, state) = test_state().await;
+    let alice = create_user(&db, "alice", "pw", true).await;
+    let bob = create_user(&db, "bob", "pw", false).await;
+    let router = Router::new()
+        .route("/whoami", get(whoami))
+        .layer(Extension(Actor::User(AuthUser::new(alice, 99))));
+    let (addr, _task) = serve(router.with_state(state)).await;
+    assert_eq!(get_with(addr, "/whoami", &[]).await.1, "anonymous");
+    let bearer = format!("Bearer {}", mint_token(&db, &bob, "t", None).await);
+    let id = db.tokens_for_user(bob.id()).await.unwrap()[0].id();
+    let (status, body, _) = get_with(addr, "/whoami", &[("authorization", bearer.as_str())]).await;
+    assert_eq!((status, body), (200, format!("user:bob:{id}")));
 }

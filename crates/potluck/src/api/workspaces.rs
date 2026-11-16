@@ -14,7 +14,7 @@ use super::teams::{check_name, check_slug};
 use super::{Actor, AppState};
 use crate::db::workspaces::{NewWorkspace, WorkspaceRecord};
 use crate::db::{Db, DbError};
-use crate::git::RepoError;
+use crate::git::{RepoError, Repos};
 use crate::kinds;
 use crate::role::Role;
 use crate::slug::Slug;
@@ -81,30 +81,21 @@ pub(super) async fn create(
     // A spawned task runs to its end even when axum drops this future on a disconnect, so a
     // claimed directory is always either completed with its row or removed again.
     let task = tokio::spawn(async move {
-        let repo = repos
-            .init(&team_slug, &slug, &branch)
-            .await
-            .map_err(repo_error)?;
-        let made = async {
+        let (repos, branch) = (&repos, &branch);
+        claimed(repos, &team_slug, &slug, branch, |repo| async move {
             if seed {
                 let files = kind.seed();
                 let pairs: Vec<(&str, &[u8])> =
                     files.iter().map(|f| (f.path(), f.bytes())).collect();
                 let message = format!("Seed {} workspace", kind.name());
                 repos
-                    .seed_commit(&repo, &branch, &pairs, "Potluck", &email, &message)
+                    .seed_commit(&repo, branch, &pairs, "Potluck", &email, &message)
                     .await
                     .map_err(repo_error)?;
             }
             Ok::<_, ApiError>(db.create_workspace(row).await?)
-        }
-        .await;
-        if made.is_err()
-            && let Err(err) = repos.remove(&team_slug, &slug).await
-        {
-            tracing::error!(error = %err, "removing a half-made workspace repository failed");
-        }
-        made
+        })
+        .await
     });
     let record = task.await.map_err(|err| {
         tracing::error!(error = %err, "workspace creation task failed");
@@ -118,6 +109,29 @@ pub(super) async fn create(
             state.config().public_url(),
         )),
     ))
+}
+
+/// Claims `{team}/{slug}` with `Repos::init`, runs `make` on the new repository's path, and
+/// removes the directory again when `make` fails, so the slug can be created again.
+async fn claimed<T, F, Fut>(
+    repos: &Repos,
+    team: &Slug,
+    slug: &Slug,
+    branch: &str,
+    make: F,
+) -> Result<T, ApiError>
+where
+    F: FnOnce(std::path::PathBuf) -> Fut,
+    Fut: std::future::Future<Output = Result<T, ApiError>>,
+{
+    let repo = repos.init(team, slug, branch).await.map_err(repo_error)?;
+    let made = make(repo).await;
+    if made.is_err()
+        && let Err(err) = repos.remove(team, slug).await
+    {
+        tracing::error!(error = %err, "removing a half-made workspace repository failed");
+    }
+    made
 }
 
 /// `{team}` and `{ws}` from the URL, or the rejection, so a bad segment answers our 404.

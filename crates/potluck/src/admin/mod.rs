@@ -88,8 +88,9 @@ pub enum AdminError {
         /// The request field the error names, if any.
         field: Option<String>,
     },
-    /// A status the verb did not expect, without the error model's body.
-    #[error("the server answered HTTP {status} without an error body")]
+    /// A status the verb did not expect without the error model's body, or an expected one
+    /// whose body is not the JSON the verb reads.
+    #[error("the server answered HTTP {status} with a body this command cannot read")]
     Malformed {
         /// The HTTP status.
         status: u16,
@@ -300,12 +301,20 @@ pub(crate) fn password_from_stdin(stdin: &mut dyn Read) -> Result<String, AdminE
     Ok(text)
 }
 
-/// `Ok(body)` when `response.status()` is in `ok`; a non-2xx whose body is the error model is
-/// `Api`; any other status is `Malformed`.
+/// `Ok(Some(body))` when `response.status()` is in `ok` and carries JSON, `Ok(None)` for an
+/// expected 204; an expected status with an empty or non-JSON body is `Malformed`. A non-2xx
+/// whose body is the error model is `Api`; any other status is `Malformed`.
 pub(crate) fn expect(response: ApiResponse, ok: &[u16]) -> Result<Option<Value>, AdminError> {
     let status = response.status();
     if ok.contains(&status) {
-        return Ok(response.json());
+        // Only 204 is bodiless by contract; any other expected status must carry JSON.
+        if status == 204 {
+            return Ok(None);
+        }
+        return response
+            .json()
+            .map(Some)
+            .ok_or(AdminError::Malformed { status });
     }
     let error = (!(200..300).contains(&status))
         .then(|| response.json())

@@ -47,7 +47,7 @@ fn check(env: &HookEnv) -> Result<Vec<scan::Rejection>, String> {
     let updates = input
         .lines()
         .filter(|l| !l.is_empty())
-        .map(RefUpdate::parse_line)
+        .map(|l| RefUpdate::parse_line(l.as_bytes()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "malformed ref line".to_owned())?;
     scan(env, &updates, &Git::from_env()).map_err(|ScanError::Git(e)| match e {

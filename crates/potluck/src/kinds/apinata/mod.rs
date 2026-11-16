@@ -35,9 +35,9 @@ impl Kind for Apinata {
         None
     }
 
-    /// For an environment file only: `env_unparsable` when the blob is not exactly one YAML
-    /// document yaml_serde accepts within `NODE_CAP` nodes, `secret_value` when that document
-    /// holds, at any depth, a mapping with `secret: true` (the boolean) and a non-null `value`.
+    /// Environment files: `env_unparsable` if the blob is not exactly one YAML document yaml_serde
+    /// reads within `NODE_CAP` nodes or has a merge key it cannot apply; `secret_value` if, merged,
+    /// it or a value in it is a mapping with `secret: true` (the boolean) and a non-null `value`.
     fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding> {
         is_environment_file(path)
             .then(|| environment_rule(blob, NODE_CAP))

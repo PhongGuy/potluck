@@ -380,6 +380,16 @@ fn select_token(conn: &rusqlite::Connection, id: i64) -> Result<Option<TokenReco
     Ok(conn.query_row(&sql, [id], token_from_row).optional()?)
 }
 
+// Qualifies each name in a comma-separated column list with a table alias, so a join can reuse
+// the same constants the single-table queries select.
+fn prefixed(alias: &str, columns: &str) -> String {
+    columns
+        .split(',')
+        .map(|name| format!("{alias}.{}", name.trim()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn user_from_row(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
     user_at(row, 0)
 }
@@ -510,11 +520,13 @@ impl Db {
         self.call(move |conn| {
             // Token columns, then the digest, then the user, each read at a fixed offset; a digest
             // that is not 32 bytes fails the read.
-            const SQL: &str = "SELECT t.id, t.user_id, t.name, t.prefix, t.created_at, \
-                 t.last_used_at, t.expires_at, t.digest, u.id, u.username, u.display_name, \
-                 u.email, u.password_hash, u.server_admin, u.disabled, u.created_at \
-                 FROM tokens t JOIN users u ON u.id = t.user_id WHERE t.prefix = ?1 ORDER BY t.id";
-            let mut stmt = conn.prepare(SQL)?;
+            let sql = format!(
+                "SELECT {}, t.digest, {} FROM tokens t JOIN users u ON u.id = t.user_id \
+                 WHERE t.prefix = ?1 ORDER BY t.id",
+                prefixed("t", TOKEN_COLUMNS),
+                prefixed("u", USER_COLUMNS)
+            );
+            let mut stmt = conn.prepare(&sql)?;
             let candidates = stmt
                 .query_map([&prefix], |row| {
                     Ok(TokenCandidate {
@@ -566,5 +578,32 @@ impl Db {
             Ok(())
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefixed_qualifies_each_column_with_the_alias() {
+        assert_eq!(
+            prefixed("t", "id, user_id, name"),
+            "t.id, t.user_id, t.name"
+        );
+    }
+
+    #[test]
+    fn the_token_join_selects_tokens_then_digest_then_users() {
+        assert_eq!(
+            format!(
+                "{}, t.digest, {}",
+                prefixed("t", TOKEN_COLUMNS),
+                prefixed("u", USER_COLUMNS)
+            ),
+            "t.id, t.user_id, t.name, t.prefix, t.created_at, t.last_used_at, t.expires_at, \
+             t.digest, u.id, u.username, u.display_name, u.email, u.password_hash, \
+             u.server_admin, u.disabled, u.created_at"
+        );
     }
 }

@@ -112,7 +112,7 @@ pub(super) async fn create(
 }
 
 /// Claims `{team}/{slug}` with `Repos::init`, runs `make` on the new repository's path, and
-/// removes the directory again when `make` fails, so the slug can be created again.
+/// removes the directory again when `make` fails or panics, so the slug can be created again.
 async fn claimed<T, F, Fut>(
     repos: &Repos,
     team: &Slug,
@@ -124,14 +124,36 @@ where
     F: FnOnce(std::path::PathBuf) -> Fut,
     Fut: std::future::Future<Output = Result<T, ApiError>>,
 {
+    // Arm the guard only once init has created the directory for us, so a lost race or an
+    // existing workspace is never removed; keep it only once `make` has fully succeeded.
     let repo = repos.init(team, slug, branch).await.map_err(repo_error)?;
+    let claim = Claim(Some(repo.clone()));
     let made = make(repo).await;
-    if made.is_err()
-        && let Err(err) = repos.remove(team, slug).await
-    {
-        tracing::error!(error = %err, "removing a half-made workspace repository failed");
+    if made.is_ok() {
+        claim.keep();
     }
     made
+}
+
+/// A repository directory this request created; dropped unkept, by an error or a panic
+/// unwinding, it removes the directory synchronously, since a drop cannot await.
+struct Claim(Option<std::path::PathBuf>);
+
+impl Claim {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take()
+            && let Err(err) = std::fs::remove_dir_all(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(path = %path.display(), error = %err, "removing a half-made workspace repository failed");
+        }
+    }
 }
 
 /// `{team}` and `{ws}` from the URL, or the rejection, so a bad segment answers our 404.
@@ -330,5 +352,43 @@ fn check_default_branch(s: &str) -> Result<(), ApiError> {
             "default_branch must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$, without `..`, a \
              trailing `.` or `.lock`, and not be HEAD",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panic_after_the_claim_removes_the_directory_and_frees_the_slug() {
+        let dir = tempfile::tempdir().unwrap();
+        let repos = Repos::new(dir.path().to_path_buf(), std::path::PathBuf::from("git"));
+        let team = Slug::parse("core").unwrap();
+        let slug = Slug::parse("api").unwrap();
+        let path = repos.path(&team, &slug);
+        let task = tokio::spawn({
+            let (repos, team, slug) = (repos.clone(), team.clone(), slug.clone());
+            async move {
+                claimed(&repos, &team, &slug, "main", |_repo| async {
+                    // A stand-in for a seed or insert step that panics after the claim.
+                    if std::hint::black_box(true) {
+                        panic!("injected panic after the claim");
+                    }
+                    Ok::<(), ApiError>(())
+                })
+                .await
+            }
+        });
+        let joined = task.await.expect_err("the panic reaches the join handle");
+        assert!(joined.is_panic(), "a panic, not a cancel: {joined:?}");
+        assert!(
+            !path.exists(),
+            "the claimed directory is removed after a panic"
+        );
+        let again = claimed(&repos, &team, &slug, "main", |repo| async move {
+            Ok::<_, ApiError>(repo)
+        })
+        .await;
+        assert_eq!(again.expect("the slug can be claimed again"), path);
     }
 }

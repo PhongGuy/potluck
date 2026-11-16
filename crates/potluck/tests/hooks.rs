@@ -310,3 +310,47 @@ async fn a_busy_engine_answers_503_after_the_queue_wait() {
     ok(push.join().unwrap());
     ok(git(&home, Some(&home), Some(TOKEN), &["ls-remote", &url]));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hook_past_the_run_limit_fails_the_push_and_frees_the_slot() {
+    let server = writer_server(Some(
+        GitLimits::new(1, Duration::from_millis(300), Duration::from_secs(60))
+            .with_max_runtime(Duration::from_secs(2)),
+    ))
+    .await;
+    let home = server.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let url = server.url("core", "api");
+    let work = work_tree(&home, "work");
+    write_hook(&hooks_dir(&server), "exec sleep 30");
+    let started = std::time::Instant::now();
+    let push_home = home.clone();
+    let push_url = url.clone();
+    let push = tokio::task::spawn_blocking(move || {
+        git(
+            &push_home,
+            Some(&work),
+            Some(TOKEN),
+            &["push", "-q", &push_url, "main"],
+        )
+    });
+    failed(push.await.unwrap());
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the push failed near the 2 s limit, not after the hook's 30 s: {:?}",
+        started.elapsed()
+    );
+    // One slot and a 300 ms queue wait: this answers only if the killed push gave its slot back.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let out = git(&home, Some(&home), Some(TOKEN), &["ls-remote", &url]);
+        if out.status.success() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the slot never came back"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

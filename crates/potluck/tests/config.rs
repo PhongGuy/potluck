@@ -335,3 +335,61 @@ fn config_listening_on_takes_the_address_and_config_for_asks_for_port_zero() {
     assert_eq!(config.db_path(), dir.path().join("server.db"));
     assert_eq!(config_for(dir.path()).listen().port(), 0);
 }
+
+#[test]
+fn the_git_run_limit_defaults_to_thirty_minutes_and_is_read() {
+    let config = parse_config(&["--public-url", "http://127.0.0.1:8080"]).unwrap();
+    assert_eq!(
+        config.git_max_runtime(),
+        std::time::Duration::from_secs(1800)
+    );
+    let config = parse_config(&[
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--git-max-runtime-secs",
+        "90",
+    ])
+    .unwrap();
+    assert_eq!(config.git_max_runtime(), std::time::Duration::from_secs(90));
+}
+
+#[test]
+fn a_zero_git_run_limit_is_refused() {
+    #[derive(Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: potluck::config::ServeArgs,
+    }
+    let err = Wrap::try_parse_from([
+        "potluck",
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--git-max-runtime-secs",
+        "0",
+    ])
+    .err()
+    .expect("zero is refused");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+}
+
+#[test]
+fn serve_help_lists_the_git_run_limit() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_potluck"))
+        .args(["serve", "--help"])
+        .env_clear()
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    for needle in [
+        "--git-max-runtime-secs",
+        "POTLUCK_GIT_MAX_RUNTIME_SECS",
+        "1800",
+    ] {
+        assert!(text.contains(needle), "help lacks {needle}: {text}");
+    }
+}

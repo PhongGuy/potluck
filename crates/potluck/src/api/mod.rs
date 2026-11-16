@@ -50,10 +50,13 @@ pub struct AppState {
 
 impl AppState {
     /// Bundles the handle and the config for the router, with the database-backed resolver,
-    /// the default git limits and the production hashing cost; the engine reads its paths and
-    /// body cap from `config`.
+    /// the default git limits under the configured run limit and the production hashing cost;
+    /// the engine reads its paths and body cap from `config`.
     pub fn new(db: Db, config: Config) -> Self {
-        let git = Arc::new(git_engine(&config, GitLimits::default()));
+        let git = Arc::new(git_engine(
+            &config,
+            GitLimits::default().with_max_runtime(config.git_max_runtime()),
+        ));
         let git_access = Arc::new(DbAccess::new(db.clone()));
         AppState {
             db,

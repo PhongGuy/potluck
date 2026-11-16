@@ -1,8 +1,5 @@
 //! `authenticate`: the token verifier, every refusal, the touch, and no token in the log.
 
-use std::cell::RefCell;
-use std::sync::{Arc, Mutex, Once};
-
 use potluck::api::auth::authenticate;
 use potluck::api::credential::Credential;
 use potluck::api::error::ErrorCode;
@@ -10,6 +7,7 @@ use potluck::clock::{now_rfc3339, shift_secs};
 use potluck::db::accounts::{NewToken, UserPatch};
 
 use crate::common::{create_user, mint_token, test_state};
+use crate::logs::captured_logs;
 
 fn cred(token: &str) -> Credential {
     Credential::new(token.to_owned())
@@ -144,67 +142,29 @@ async fn expiry_is_inclusive_at_the_boundary() {
     );
 }
 
-thread_local! {
-    static CAPTURE: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
-}
-
-/// Writes into the current thread's capture buffer, if it has one, and drops the bytes otherwise.
-struct ThreadSink;
-
-impl std::io::Write for ThreadSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        CAPTURE.with(|c| {
-            if let Some(captured) = &*c.borrow() {
-                captured.lock().unwrap().extend_from_slice(buf);
-            }
-        });
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-// One process-wide subscriber rather than a scoped one: with a single dispatcher, tracing caches
-// each callsite's interest from whichever thread reaches it first, so a concurrent test with no
-// subscriber could silence the events this test reads. The thread-local writer keeps capture
-// per test.
-fn install_capturing_subscriber() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .with_writer(|| ThreadSink)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).expect("no other global subscriber");
-    });
-}
-
 #[test]
 fn a_failed_auth_never_logs_the_token() {
-    install_capturing_subscriber();
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    CAPTURE.with(|c| *c.borrow_mut() = Some(Arc::clone(&captured)));
-    // A current-thread runtime runs everything on this thread, whose events the sink captures;
-    // the database thread logs nothing of its own.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let (good, wrong) = rt.block_on(async {
-        let (_dir, db, state) = test_state().await;
-        let bob = create_user(&db, "bob", "pw", false).await;
-        let good = mint_token(&db, &bob, "t", None).await;
-        let mut wrong = good.clone();
-        wrong.replace_range(40.., "zzzzzzz");
-        let _ = authenticate(&state, &cred(&wrong)).await;
-        let _ = authenticate(&state, &cred("nope")).await;
-        let _ = authenticate(&state, &cred(&good)).await;
-        (good, wrong)
+    let mut tokens = None;
+    let text = captured_logs(|| {
+        // A current-thread runtime runs everything on this thread, whose events the sink
+        // captures; the database thread logs nothing of its own.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokens = Some(rt.block_on(async {
+            let (_dir, db, state) = test_state().await;
+            let bob = create_user(&db, "bob", "pw", false).await;
+            let good = mint_token(&db, &bob, "t", None).await;
+            let mut wrong = good.clone();
+            wrong.replace_range(40.., "zzzzzzz");
+            let _ = authenticate(&state, &cred(&wrong)).await;
+            let _ = authenticate(&state, &cred("nope")).await;
+            let _ = authenticate(&state, &cred(&good)).await;
+            (good, wrong)
+        }));
     });
-    CAPTURE.with(|c| *c.borrow_mut() = None);
-    let text = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let (good, wrong) = tokens.expect("the runtime ran");
     assert!(
         text.contains("token rejected"),
         "the refusal was logged at debug: {text}"

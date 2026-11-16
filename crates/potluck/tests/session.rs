@@ -153,3 +153,22 @@ async fn too_many_attempts_from_one_address_are_429() {
     let (status, _, body) = post_session(&app, creds("u99", "x")).await;
     assert_eq!(status, 429, "{body}");
 }
+
+#[tokio::test]
+async fn a_rejected_token_name_counts_against_neither_limiter() {
+    let app = test_app().await;
+    create_user(&app.db, "bob", "pw-123456", false).await;
+    // Ten 422s for one username from one address: past the username limit (5) and up to the
+    // address limit (10), so counting them against either limiter turns the next sign-in into 429.
+    for i in 0..10 {
+        let (status, _, body) = post_session(
+            &app,
+            json!({"username": "bob", "password": "pw-123456", "token_name": "  "}),
+        )
+        .await;
+        assert_eq!(status, 422, "attempt {i}: {body}");
+        assert_eq!(body["error"]["field"], "token_name", "attempt {i}: {body}");
+    }
+    let (status, _, body) = post_session(&app, creds("bob", "pw-123456")).await;
+    assert_eq!(status, 201, "a 422 counted against a login limiter: {body}");
+}

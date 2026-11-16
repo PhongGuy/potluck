@@ -120,10 +120,11 @@ pub(crate) fn sweep(repo: &Path) -> usize {
         }
     }
 
-    // receive-pack stamps its own keeps; any other keep is an operator's and stays.
+    // receive-pack stamps its own keeps; any other keep, or one that is not a regular file, stays.
     for entry in entries(&repo.join("objects/pack")) {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "keep") {
+        let regular = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if regular && path.extension().is_some_and(|ext| ext == "keep") {
             match std::fs::read(&path) {
                 Ok(text) if text.starts_with(b"receive-pack ") => removed += remove(&path, false),
                 Ok(_) => {}
@@ -371,6 +372,29 @@ mod tests {
             .status()
             .unwrap();
         assert!(made.success(), "mkfifo made {}", path.display());
+    }
+
+    #[test]
+    fn a_keep_that_is_not_a_regular_file_is_skipped_without_reading_it() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let repo = locked_repo(dir.path());
+        let fifo = repo.join("objects/pack/pack-fifo.keep");
+        mkfifo(&fifo);
+        let swept = std::thread::spawn({
+            let repo = repo.clone();
+            move || sweep(&repo)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !swept.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stalled = !swept.is_finished();
+        // Unblock before any assertion, so a failing run still ends.
+        unstall(&fifo, || swept.is_finished());
+        assert!(!stalled, "the sweep read the FIFO keep and blocked");
+        assert_eq!(swept.join().unwrap(), 1, "only the ref lock goes");
+        assert!(fifo.exists(), "a keep that is not a regular file stays");
     }
 
     /// Blocks on the FIFO `<repo>/stall` until the test opens it, removes it, then sweeps.

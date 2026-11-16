@@ -10,7 +10,8 @@ use super::auth::{Authenticated, token_required};
 use super::error::ApiError;
 use super::json::ApiJson;
 use super::objects::{WorkspaceJson, noreply_host};
-use super::teams::{check_name, check_slug};
+use super::teams::check_slug;
+use super::validate;
 use super::{Actor, AppState};
 use crate::db::workspaces::{NewWorkspace, WorkspaceRecord};
 use crate::db::{Db, DbError};
@@ -47,7 +48,7 @@ pub(super) async fn create(
     auth.require_server_admin()?;
     let ApiJson(body) = body?;
     let slug = check_slug(&body.slug)?;
-    let name = check_name(&body.name)?.to_owned();
+    let name = validate::name("name", &body.name)?.to_owned();
     // The kind is checked before the claim: the schema CHECK would admit a reserved kind, and
     // an unknown one would only surface from the insert as a 500.
     let Some(kind) = kinds::by_name(&body.kind) else {

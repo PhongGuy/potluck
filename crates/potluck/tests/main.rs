@@ -51,6 +51,7 @@ mod kinds_apinata;
 mod kinds_generic;
 mod logs;
 mod measurements;
+mod name_checks;
 mod notices;
 mod objects;
 mod overrides;

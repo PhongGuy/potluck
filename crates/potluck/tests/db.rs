@@ -34,13 +34,13 @@ fn table_names(path: &std::path::Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_fresh_database_migrates_to_version_1_and_stays_there() {
+async fn a_fresh_database_migrates_to_version_2_and_stays_there() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("server.db")).unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 0, "fresh file");
-    assert_eq!(db.migrate().await.unwrap(), 1);
-    assert_eq!(db.migrate().await.unwrap(), 1, "a second run is a no-op");
-    assert_eq!(db.schema_version().await.unwrap(), 1);
+    assert_eq!(db.migrate().await.unwrap(), 2);
+    assert_eq!(db.migrate().await.unwrap(), 2, "a second run is a no-op");
+    assert_eq!(db.schema_version().await.unwrap(), 2);
     db.close();
 }
 
@@ -80,7 +80,7 @@ async fn a_database_from_a_newer_potluck_is_refused() {
             err,
             DbError::SchemaTooNew {
                 found: 99,
-                supported: 1
+                supported: 2
             }
         ),
         "got {err:?}"

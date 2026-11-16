@@ -188,7 +188,8 @@ impl GitEngine {
     /// Serves one `POST git-upload-pack` or `git-receive-pack`: takes a slot, spools the body
     /// within `upload_timeout`, spawns git with the spool as stdin and `extra_env` in its
     /// environment, and returns its stdout as the response body. The slot is released when git
-    /// exits. A receive-pack over `MAX_COMMANDS` commands is `TooManyCommands` before git starts;
+    /// and every process left in its group have exited, or at the run limit. A receive-pack over
+    /// `MAX_COMMANDS` commands is `TooManyCommands` before git starts;
     /// `on_push`, when given, hears the moves the push achieved once git has exited.
     // Each argument is one facet of the request the route already holds; bundling them would
     // only rename the list.
@@ -270,14 +271,21 @@ impl GitEngine {
         };
         let stderr = child.stderr.take();
         let max_runtime = self.max_runtime;
-        // The reaper owns the child and the slot: the slot returns when git exits or is killed at
-        // the run limit, and a non-zero exit is logged with the tail of stderr.
+        // The reaper owns the child and the slot: the slot returns when git's group is empty or is
+        // killed at the run limit, and a non-zero exit is logged with the tail of stderr.
         tokio::spawn(async move {
             let _permit = permit;
-            // Drain stderr to EOF before reaping, both inside the run limit: an unreaped leader
-            // keeps the group id from being reused, so the kill reaches only git's own group.
+            // Wait for git's whole group inside the run limit: stderr to EOF, the leader to exit
+            // (left unreaped so the group id cannot be reused), then any process still in it.
+            let pidfd = leader_pidfd(&child);
             let bounded = tokio::time::timeout(max_runtime, async {
                 let tail = stderr_tail(stderr).await;
+                if let (Some(pidfd), Some(group)) = (pidfd, group) {
+                    exited(pidfd).await;
+                    while strays_in_group(group).await {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }
                 (tail, child.wait().await)
             })
             .await;
@@ -383,6 +391,60 @@ fn process_group(child: &tokio::process::Child) -> Option<rustix::process::Pid> 
         .id()
         .and_then(|id| i32::try_from(id).ok())
         .and_then(rustix::process::Pid::from_raw)
+}
+
+/// A pidfd for `child`, taken while it is unreaped so it names this process for good; `None`
+/// when the kernel cannot give one.
+fn leader_pidfd(child: &tokio::process::Child) -> Option<std::os::fd::OwnedFd> {
+    let pid = process_group(child)?;
+    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+}
+
+/// Waits until the process behind `pidfd` exits, without reaping it.
+async fn exited(pidfd: std::os::fd::OwnedFd) {
+    use rustix::process::{WaitId, WaitIdOptions, waitid};
+    use std::os::fd::AsFd;
+    let _ = tokio::task::spawn_blocking(move || {
+        loop {
+            match waitid(
+                WaitId::PidFd(pidfd.as_fd()),
+                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+            ) {
+                Err(rustix::io::Errno::INTR) => continue,
+                // Any other error (ECHILD once reaped) counts as exited; `child.wait()` follows.
+                _ => return,
+            }
+        }
+    })
+    .await;
+}
+
+/// Whether any live process other than its leader is still in `group`, read from /proc.
+async fn strays_in_group(group: rustix::process::Pid) -> bool {
+    let leader = group.as_raw_nonzero().get();
+    tokio::task::spawn_blocking(move || {
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        dir.filter_map(Result::ok)
+            .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|pid| *pid != leader)
+            .any(|pid| {
+                let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                    return false;
+                };
+                // Fields after the command: state, ppid, pgrp.
+                let Some((_, rest)) = stat.rsplit_once(") ") else {
+                    return false;
+                };
+                let mut fields = rest.split_whitespace();
+                let state = fields.next();
+                let pgrp = fields.nth(1).and_then(|f| f.parse::<i32>().ok());
+                pgrp == Some(leader) && !matches!(state, Some("Z" | "X"))
+            })
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// SIGKILL to every process in `group`; a no-op on `None`, ESRCH ignored.
@@ -1151,6 +1213,31 @@ mod tests {
             .expect("a pid")
     }
 
+    /// SIGKILLs, when dropped, the `sleep 30` whose pid a hook wrote to the held path, so a test
+    /// that panics never leaves it running; armed before the hook runs, it reads the file in drop.
+    struct KillsSleeper(PathBuf);
+
+    impl Drop for KillsSleeper {
+        fn drop(&mut self) {
+            use rustix::process::{Pid, Signal, kill_process};
+            let Some(pid) = std::fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+            else {
+                return;
+            };
+            // Only a live process still running the hook's sleep, so a reused pid is never hit.
+            let ours = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmd| cmd == b"sleep\x0030\x00");
+            if ours
+                && !is_dead(pid)
+                && let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw)
+            {
+                let _ = kill_process(pid, Signal::KILL);
+            }
+        }
+    }
+
     /// Polls `cond` every 20 ms for up to `secs`; true once it holds.
     async fn eventually(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);
@@ -1478,6 +1565,117 @@ mod tests {
         assert!(
             eventually(5, || is_dead(pid)).await,
             "the descendant {pid} was killed at the limit, not left to its 30 s"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_kills_a_hook_descendant_that_closed_stderr_at_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
+        let (engine, repo) = engine_in(dir.path(), short).await;
+        let pidfile = dir.path().join("descendant.pid");
+        let _sleeper = KillsSleeper(pidfile.clone());
+        // The hook accepts at once and leaves a child with every stdio stream closed, so nothing
+        // ties it to receive-pack's pipes once receive-pack exits.
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\nsleep 30 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\nexit 0\n",
+                pidfile.display()
+            ),
+        );
+        let (body, tip) = push_body(dir.path());
+        let (on_push, moved) = observer();
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(10), collect(out))
+            .await
+            .expect("receive-pack answers without waiting for the descendant");
+        let moves = tokio::time::timeout(Duration::from_secs(10), moved)
+            .await
+            .expect("the observer is called by the limit")
+            .expect("not dropped");
+        assert_eq!(moves.len(), 1, "the push landed: {moves:?}");
+        assert_eq!(moves[0].new_sha(), tip);
+        assert!(
+            eventually(10, || engine.permits.available_permits() == 1).await,
+            "the slot came back"
+        );
+        let pid = read_pid(&pidfile);
+        assert!(
+            eventually(5, || is_dead(pid)).await,
+            "the descendant {pid} was killed at the limit, not left to its 30 s"
+        );
+    }
+
+    // Detached auto maintenance calls setsid(2) and so leaves git's group: the run limit must
+    // neither wait for it nor kill it.
+    #[tokio::test]
+    async fn a_hook_descendant_that_leaves_the_group_is_neither_awaited_nor_killed() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
+        let (engine, repo) = engine_in(dir.path(), short).await;
+        let pidfile = dir.path().join("detached.pid");
+        // The detached sleep is outside every group the engine kills; the guard ends it.
+        let _sleeper = KillsSleeper(pidfile.clone());
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\nsetsid sleep 30 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\nexit 0\n",
+                pidfile.display()
+            ),
+        );
+        let (body, _tip) = push_body(dir.path());
+        let started = std::time::Instant::now();
+        let moves = push_once(&engine, &repo, body).await;
+        let elapsed = started.elapsed();
+        let pid = read_pid(&pidfile);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let alive = !is_dead(pid);
+        assert_eq!(moves.len(), 1, "the push landed: {moves:?}");
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "the push did not wait for the detached process: {elapsed:?}"
+        );
+        assert!(alive, "the detached process {pid} outlived the limit");
+    }
+
+    // A descendant that ends on its own inside the limit holds the push until it ends, unkilled.
+    #[tokio::test]
+    async fn a_push_waits_for_a_hook_descendant_that_ends_inside_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = limits(1, 100).with_max_runtime(Duration::from_secs(20));
+        let (engine, repo) = engine_in(dir.path(), limit).await;
+        let done = dir.path().join("descendant.done");
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\n(sleep 1; echo ok > '{}') </dev/null >/dev/null 2>&1 &\nexit 0\n",
+                done.display()
+            ),
+        );
+        let (body, _tip) = push_body(dir.path());
+        let started = std::time::Instant::now();
+        let moves = push_once(&engine, &repo, body).await;
+        assert!(
+            done.exists(),
+            "the observer heard the push only once the descendant ended"
+        );
+        assert_eq!(moves.len(), 1, "the push landed: {moves:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the push ended with its descendant, not at the 20 s limit: {:?}",
+            started.elapsed()
         );
     }
 

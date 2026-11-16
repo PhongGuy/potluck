@@ -229,4 +229,37 @@ mod tests {
         assert!(sub.next().await.is_none(), "the stream ends at once");
         assert_eq!(notices.open(), 0, "and is never registered");
     }
+
+    #[tokio::test]
+    async fn a_subscribe_after_close_all_leaves_an_earlier_live_topic_alone() {
+        let notices = Notices::new();
+        let early = notices.subscribe(7, 1, 1);
+        // A sender clone identifies the channel without adding a receiver to it.
+        let topic = lock(&notices.inner).topics[&7].clone();
+        notices.close_all();
+        let mut late = notices.subscribe(7, 2, 2);
+        {
+            let reg = lock(&notices.inner);
+            assert_eq!(reg.topics.len(), 1, "the late subscribe made no topic");
+            let live = &reg.topics[&7];
+            assert!(live.same_channel(&topic), "the early topic is not replaced");
+            assert_eq!(live.receiver_count(), 1, "the late stream is not on it");
+        }
+        assert!(late.next().await.is_none(), "the late stream ends at once");
+        drop(late);
+        {
+            let reg = lock(&notices.inner);
+            let live = reg
+                .topics
+                .get(&7)
+                .expect("the late guard left the topic in place");
+            assert!(live.same_channel(&topic));
+            assert_eq!(live.receiver_count(), 1);
+        }
+        drop(early);
+        assert!(
+            lock(&notices.inner).topics.is_empty(),
+            "the early stream's guard still removes its topic"
+        );
+    }
 }

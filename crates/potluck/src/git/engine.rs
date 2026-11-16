@@ -657,7 +657,16 @@ mod tests {
     }
 
     pub(super) async fn engine_in(dir: &Path, limits: GitLimits) -> (GitEngine, PathBuf) {
-        let repos = Repos::new(dir.join("repos"), PathBuf::from("git"));
+        engine_with_git(dir, limits, PathBuf::from("git")).await
+    }
+
+    /// As `engine_in`, spawning `git` for every git child, receive-pack and ref listings included.
+    pub(super) async fn engine_with_git(
+        dir: &Path,
+        limits: GitLimits,
+        git: PathBuf,
+    ) -> (GitEngine, PathBuf) {
+        let repos = Repos::new(dir.join("repos"), git);
         let repo = repos
             .init(
                 &Slug::parse("core").unwrap(),
@@ -1528,6 +1537,76 @@ mod tests {
             Vec::<String>::new(),
             "swept once the live push left"
         );
+    }
+
+    #[tokio::test]
+    async fn a_hung_push_holds_the_git_tasks_for_two_run_limits_and_leaves_nothing_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = Duration::from_millis(1500);
+        let (hook_pid, list_pid, marker) = (
+            dir.path().join("hook.pid"),
+            dir.path().join("list.pid"),
+            dir.path().join("receive.started"),
+        );
+        // The real git for everything except a ref listing after the hook has started, which
+        // hangs: the reaper's listing, not the one taken before receive-pack.
+        let wrapper = dir.path().join("git-wrapper");
+        write_hook_file(
+            &wrapper,
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in *for-each-ref*) if [ -e '{m}' ]; then echo $$ > '{p}'; exec sleep 30; fi ;; esac\nexec git \"$@\"\n",
+                m = marker.display(),
+                p = list_pid.display()
+            ),
+        );
+        let _hook = KillsSleeper(hook_pid.clone());
+        let _list = KillsSleeper(list_pid.clone());
+        let (engine, repo) =
+            engine_with_git(dir.path(), limits(1, 100).with_max_runtime(limit), wrapper).await;
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\necho $$ > '{p}'\n: > '{m}'\nexec sleep 30\n",
+                p = hook_pid.display(),
+                m = marker.display()
+            ),
+        );
+        let (body, _tip) = push_body(dir.path());
+        let (on_push, moved) = observer();
+        let started = std::time::Instant::now();
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(10), collect(out))
+            .await
+            .expect("the body ends once receive-pack's group is killed");
+        // What `Running::shutdown` waits on: the reaper ends only after the listing's own limit.
+        engine.tasks().close();
+        tokio::time::timeout(Duration::from_secs(20), engine.tasks().wait())
+            .await
+            .expect("the reaper ends");
+        let held = started.elapsed();
+        assert!(
+            held >= 2 * limit,
+            "receive-pack and the listing each ran a full limit: {held:?}"
+        );
+        assert!(
+            held < 3 * limit + Duration::from_secs(3),
+            "bounded near two limits: {held:?}"
+        );
+        assert!(moved.await.is_err(), "a failed listing reports no moves");
+        for pid in [read_pid(&hook_pid), read_pid(&list_pid)] {
+            assert!(eventually(5, || is_dead(pid)).await, "{pid} was killed");
+        }
     }
 
     #[test]

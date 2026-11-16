@@ -55,6 +55,8 @@ systemctl --user enable --now podman.socket
 podman compose up -d
 ```
 
+If the `potluck-data` volume already exists, from the one-command run or a restore, `up` warns `volume "potluck-data" already exists but was not created by Docker Compose`. That is expected: compose uses the existing volume as it is.
+
 ### Quadlet (podman under systemd)
 
 [`deploy/potluck.container`](deploy/potluck.container) runs Potluck as a systemd user service under rootless podman. Open it, change the line `Environment=POTLUCK_PUBLIC_URL=https://potluck.example.com` to your public address, then copy it into place and start it.
@@ -236,7 +238,11 @@ podman unshare chown 65532:65532 ~/potluck-data
 podman run -d --name potluck -p 127.0.0.1:8080:8080 -v ~/potluck-data:/data:Z -e POTLUCK_PUBLIC_URL=http://127.0.0.1:8080 ghcr.io/phongguy/potluck:latest
 ```
 
-The `:Z` suffix relabels the directory for SELinux hosts (Fedora, RHEL); it is harmless elsewhere. With docker, run `sudo chown 65532:65532 ~/potluck-data` instead and use `docker run` with the same `-v` option, keeping `:Z` only on SELinux hosts.
+The `:Z` suffix relabels the directory for SELinux hosts (Fedora, RHEL); it is harmless elsewhere. With docker, use `docker run` with the same `-v` option, keeping `:Z` only on SELinux hosts, and give the directory its owner the way your docker runs. `docker info` lists `rootless` under Security Options when it runs rootless. With rootful docker, run `sudo chown 65532:65532 ~/potluck-data`. With rootless docker, uid 65532 in the container maps to a subordinate uid on the host, so set the owner from inside a throwaway container instead:
+
+```sh
+docker run --rm -v ~/potluck-data:/data debian:trixie-slim chown 65532:65532 /data
+```
 
 The data directory must be on a local filesystem that supports file locks. On NFS without lock support, `serve` stops with "cannot take the lock on .../server.lock".
 

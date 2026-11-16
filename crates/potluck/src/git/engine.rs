@@ -690,17 +690,13 @@ mod tests {
             .stdin(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(text.as_bytes())
-            .unwrap();
-        assert!(
-            child.wait().unwrap().success(),
-            "writing {}",
-            path.display()
-        );
+        // Close stdin and reap the child before judging either step, so no failure strands it.
+        let written = child.stdin.take().unwrap().write_all(text.as_bytes());
+        let status = child.wait();
+        match (written, status) {
+            (Ok(()), Ok(status)) if status.success() => {}
+            outcome => panic!("writing {}: {outcome:?}", path.display()),
+        }
     }
 
     #[test]
@@ -719,18 +715,22 @@ mod tests {
                 })
             })
             .collect();
-        let runs: Vec<std::io::Result<std::process::ExitStatus>> = (0..200)
-            .map(|i| {
-                let path = dir.path().join(format!("script-{i}"));
-                write_script(&path, "#!/bin/sh\nexit 0\n", 0o755);
-                std::process::Command::new(&path).status()
-            })
-            .collect();
-        // Results are collected before asserting, so a failure still stops and joins the forkers.
+        let runs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (0..200)
+                .map(|i| {
+                    let path = dir.path().join(format!("script-{i}"));
+                    write_script(&path, "#!/bin/sh\nexit 0\n", 0o755);
+                    std::process::Command::new(&path).status()
+                })
+                .collect::<Vec<std::io::Result<std::process::ExitStatus>>>()
+        }));
+        // Results are collected before asserting, and a panic while writing is held until the
+        // forkers are stopped and joined, so no failure leaves them running.
         stop.store(true, Ordering::Relaxed);
         for forker in forkers {
             forker.join().unwrap();
         }
+        let runs = runs.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         let busy = runs
             .iter()
             .filter(|run| {

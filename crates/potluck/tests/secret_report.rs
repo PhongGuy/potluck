@@ -5,7 +5,7 @@ use potluck::secret_check::scan::{HookEnv, MAX_LINES, Rejection, percent_encode,
 
 fn env_file(path: &[u8]) -> Rejection {
     Rejection::new(
-        "refs/heads/main",
+        b"refs/heads/main",
         path,
         Finding::new(Code::EnvFile, "env_file"),
     )
@@ -43,20 +43,20 @@ fn hook_env_reads_the_three_variables() {
 #[test]
 fn rejection_accessors_round_trip() {
     let r = Rejection::new(
-        "refs/heads/x",
+        b"refs/heads/x",
         b"a/b",
         Finding::new(Code::SecretPattern, "aws"),
     );
     assert_eq!(
         (r.ref_name(), r.path(), r.finding().rule()),
-        ("refs/heads/x", b"a/b" as &[u8], "aws")
+        (b"refs/heads/x" as &[u8], b"a/b" as &[u8], "aws")
     );
 }
 
 #[test]
 fn report_prints_the_contract_lines_capped_at_twenty() {
     let one = Rejection::new(
-        "refs/heads/main",
+        b"refs/heads/main",
         b"creds.txt",
         Finding::new(Code::SecretPattern, "aws"),
     );
@@ -107,7 +107,7 @@ fn report_percent_encodes_paths_and_ref_names() {
         "valid UTF-8 stays readable"
     );
     let odd_ref = Rejection::new(
-        "refs/heads/a\nb",
+        b"refs/heads/a\nb",
         b".env",
         Finding::new(Code::EnvFile, "env_file"),
     );

@@ -26,6 +26,14 @@ impl Sha {
         Ok(Sha(hex.to_ascii_lowercase()))
     }
 
+    /// [`Sha::parse`] on a raw field; a field that is not UTF-8 is [`ParseError::NotHex`].
+    fn parse_bytes(field: &[u8]) -> Result<Sha, ParseError> {
+        let text = std::str::from_utf8(field).map_err(|_| ParseError::NotHex {
+            text: String::from_utf8_lossy(field).into_owned(),
+        })?;
+        Sha::parse(text)
+    }
+
     /// The lower-case hex digits.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -49,28 +57,28 @@ impl fmt::Display for Sha {
 pub struct RefUpdate {
     old: Sha,
     new: Sha,
-    name: String,
+    name: Vec<u8>,
 }
 
 impl RefUpdate {
-    /// Parses exactly three space-separated fields; a trailing newline is fine.
-    pub fn parse_line(line: &str) -> Result<RefUpdate, ParseError> {
-        let trimmed = line.strip_suffix('\n').unwrap_or(line);
-        let fields: Vec<&str> = trimmed.split(' ').collect();
+    /// Parses exactly three space-separated fields; a trailing newline is fine. The ref name
+    /// keeps its exact bytes, while the object names must be UTF-8 hex.
+    pub fn parse_line(line: &[u8]) -> Result<RefUpdate, ParseError> {
+        let shape = || ParseError::Shape {
+            line: String::from_utf8_lossy(line).into_owned(),
+        };
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
+        let fields: Vec<&[u8]> = trimmed.split(|&b| b == b' ').collect();
         let [old, new, name] = fields.as_slice() else {
-            return Err(ParseError::Shape {
-                line: line.to_owned(),
-            });
+            return Err(shape());
         };
         if name.is_empty() {
-            return Err(ParseError::Shape {
-                line: line.to_owned(),
-            });
+            return Err(shape());
         }
         Ok(RefUpdate {
-            old: Sha::parse(old)?,
-            new: Sha::parse(new)?,
-            name: (*name).to_owned(),
+            old: Sha::parse_bytes(old)?,
+            new: Sha::parse_bytes(new)?,
+            name: name.to_vec(),
         })
     }
 
@@ -86,8 +94,8 @@ impl RefUpdate {
         &self.new
     }
 
-    /// The full ref name, such as `refs/heads/main`.
-    pub fn name(&self) -> &str {
+    /// The full ref name as git sent it, such as `refs/heads/main`; not always UTF-8.
+    pub fn name(&self) -> &[u8] {
         &self.name
     }
 

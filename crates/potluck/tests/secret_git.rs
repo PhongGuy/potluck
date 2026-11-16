@@ -15,30 +15,30 @@ fn sha(s: &str) -> Sha {
 #[test]
 fn ref_update_lines_parse_and_a_zero_new_is_a_delete() {
     let a = "a".repeat(40);
-    let u = RefUpdate::parse_line(&format!("{ZERO} {a} refs/heads/main\n")).unwrap();
+    let u = RefUpdate::parse_line(format!("{ZERO} {a} refs/heads/main\n").as_bytes()).unwrap();
     assert!(u.old().is_zero());
     assert!(!u.is_delete());
     assert_eq!(u.new().as_str(), a);
-    assert_eq!(u.name(), "refs/heads/main");
+    assert_eq!(u.name(), b"refs/heads/main");
     assert!(
-        RefUpdate::parse_line(&format!("{a} {ZERO} refs/heads/gone"))
+        RefUpdate::parse_line(format!("{a} {ZERO} refs/heads/gone").as_bytes())
             .unwrap()
             .is_delete()
     );
     assert!(matches!(
-        RefUpdate::parse_line("x y").unwrap_err(),
+        RefUpdate::parse_line(b"x y").unwrap_err(),
         ParseError::Shape { .. }
     ));
     assert!(matches!(
-        RefUpdate::parse_line(&format!("{ZERO} {a} refs/heads/two words")).unwrap_err(),
+        RefUpdate::parse_line(format!("{ZERO} {a} refs/heads/two words").as_bytes()).unwrap_err(),
         ParseError::Shape { .. }
     ));
     assert!(matches!(
-        RefUpdate::parse_line(&format!("{ZERO} {a} ")).unwrap_err(),
+        RefUpdate::parse_line(format!("{ZERO} {a} ").as_bytes()).unwrap_err(),
         ParseError::Shape { .. }
     ));
     assert!(matches!(
-        RefUpdate::parse_line(&format!("{ZERO} nothex refs/heads/x")).unwrap_err(),
+        RefUpdate::parse_line(format!("{ZERO} nothex refs/heads/x").as_bytes()).unwrap_err(),
         ParseError::NotHex { .. }
     ));
     assert_eq!(
@@ -48,6 +48,15 @@ fn ref_update_lines_parse_and_a_zero_new_is_a_delete() {
     );
     assert!(Sha::parse("abcdef").is_err(), "wrong width");
     assert_eq!(sha(ZERO).to_string(), ZERO);
+}
+
+#[test]
+fn a_ref_name_keeps_its_exact_bytes() {
+    let a = "a".repeat(40);
+    let mut line = format!("{ZERO} {a} ").into_bytes();
+    line.extend_from_slice(b"refs/heads/caf\xe9\n");
+    let u = RefUpdate::parse_line(&line).unwrap();
+    assert_eq!(u.name(), b"refs/heads/caf\xe9");
 }
 
 #[test]

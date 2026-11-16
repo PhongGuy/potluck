@@ -1186,6 +1186,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_push_killed_holding_ref_locks_leaves_none_and_the_retry_lands() {
+        use crate::git::push::{RefMove, ZERO_SHA};
+        let dir = tempfile::tempdir().unwrap();
+        let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
+        let (engine, repo) = engine_in(dir.path(), short).await;
+        // A pack, not loose objects, so receive-pack also writes its `.keep`.
+        let set = std::process::Command::new("git")
+            .args([
+                "--git-dir",
+                repo.to_str().unwrap(),
+                "config",
+                "receive.unpackLimit",
+                "1",
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap();
+        assert!(set.success());
+        // `prepared` fires with every ref lock of the transaction held.
+        let marker = dir.path().join("prepared.seen");
+        let hook = dir.path().join("hooks").join("reference-transaction");
+        write_hook_file(
+            &hook,
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nif [ \"$1\" = prepared ]; then echo locked > '{}'; exec sleep 30; fi\n",
+                marker.display()
+            ),
+        );
+        let (body, tip) = push_body(dir.path());
+        assert!(
+            push_once(&engine, &repo, body.clone()).await.is_empty(),
+            "killed"
+        );
+        line_from(&marker).await;
+        assert_eq!(debris(&repo), Vec::<String>::new());
+        std::fs::remove_file(&hook).unwrap();
+        assert_eq!(
+            push_once(&engine, &repo, body).await,
+            vec![RefMove::new("refs/heads/main", ZERO_SHA, &tip)]
+        );
+    }
+
     #[test]
     fn the_default_run_limit_is_thirty_minutes() {
         assert_eq!(GitLimits::default().max_runtime, Duration::from_secs(1800));

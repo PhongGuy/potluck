@@ -135,6 +135,7 @@ impl GitEngine {
             .spawn()
             .map_err(GitError::Spawn)?;
         let group = process_group(&child);
+        let guard = GroupKill(group);
         let (mut stdout, mut stderr) = match (child.stdout.take(), child.stderr.take()) {
             (Some(out), Some(err)) => (out, err),
             _ => return Err(GitError::Spawn(std::io::Error::other("git has no pipes"))),
@@ -150,13 +151,18 @@ impl GitEngine {
         .await;
         let status = match bounded {
             Ok((read_out, read_err, status)) => {
+                if status.is_ok() {
+                    guard.disarm();
+                }
                 read_out.map_err(GitError::Spawn)?;
                 read_err.map_err(GitError::Spawn)?;
                 status.map_err(GitError::Spawn)?
             }
             Err(_) => {
                 kill_group(group);
-                let _ = child.wait().await;
+                if child.wait().await.is_ok() {
+                    guard.disarm();
+                }
                 tracing::warn!(
                     service = service.name(),
                     limit = ?self.max_runtime,
@@ -375,6 +381,23 @@ fn kill_group(group: Option<rustix::process::Pid>) {
     match kill_process_group(pid, Signal::KILL) {
         Ok(()) | Err(rustix::io::Errno::SRCH) => {}
         Err(err) => tracing::warn!(error = %err, "cannot kill the git process group"),
+    }
+}
+
+/// Kills `group` when dropped unless disarmed, so a cancelled caller (the client hung up)
+/// takes down git's whole group, not just the leader `kill_on_drop` reaches.
+struct GroupKill(Option<rustix::process::Pid>);
+
+impl GroupKill {
+    /// Stops the drop from signalling; call only once the leader has been reaped.
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        kill_group(self.0);
     }
 }
 
@@ -1553,5 +1576,79 @@ mod tests {
         );
         let api = ApiError::from(err);
         assert_eq!((api.status(), api.code().as_str()), (500, "internal"));
+    }
+
+    #[tokio::test]
+    async fn a_client_hanging_up_on_an_advertisement_kills_its_whole_group() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::AsyncWriteExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A stand-in git that records its pid, leaves a child of its own and never answers.
+        let leader_file = dir.path().join("leader.pid");
+        let child_file = dir.path().join("child.pid");
+        let fake = dir.path().join("fake-git");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\necho $$ > '{}'\nsleep 30 &\necho $! > '{}'\nwait\n",
+                leader_file.display(),
+                child_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
+        // The run limit is far past the test's waits, so only the hangup can end git.
+        let engine = Arc::new(GitEngine::new(
+            Repos::new(dir.path().join("repos"), fake),
+            dir.path().join("hooks"),
+            dir.path().join("tmp"),
+            1024,
+            limits(1, 100).with_max_runtime(Duration::from_secs(20)),
+        ));
+        let repo = dir.path().join("repos").join("x.git");
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get({
+                let engine = Arc::clone(&engine);
+                move || {
+                    let (engine, repo) = (Arc::clone(&engine), repo.clone());
+                    async move {
+                        let _ = engine.advertise(Service::UploadPack, &repo, false).await;
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        assert!(
+            eventually(10, || std::fs::read_to_string(&child_file)
+                .is_ok_and(|t| t.ends_with('\n')))
+            .await,
+            "the stand-in git started its child"
+        );
+        let (leader, child) = (read_pid(&leader_file), read_pid(&child_file));
+        drop(client);
+
+        assert!(
+            eventually(5, || is_dead(leader)).await,
+            "the hangup cancelled the advertisement and killed git {leader}"
+        );
+        assert!(
+            eventually(5, || is_dead(child)).await,
+            "git's child {child} died with its group, not left to its 30 s"
+        );
+        assert!(
+            eventually(5, || engine.permits.available_permits() == 1).await,
+            "the slot is back"
+        );
     }
 }

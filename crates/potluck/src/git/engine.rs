@@ -95,7 +95,7 @@ impl GitEngine {
         limits: GitLimits,
     ) -> Self {
         Self {
-            repos,
+            repos: repos.with_max_runtime(limits.max_runtime),
             hooks_dir,
             tmp_dir,
             max_body,

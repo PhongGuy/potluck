@@ -29,7 +29,7 @@ async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1, "migrations ran at start");
+    assert_eq!(version, 2, "migrations ran at start");
     running.shutdown().await;
 }
 

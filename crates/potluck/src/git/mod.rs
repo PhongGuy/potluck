@@ -11,6 +11,7 @@ mod sweep;
 pub use engine::{GitEngine, GitError, GitLimits};
 pub use push::RefMove;
 pub use repos::{RepoError, Repos};
+pub(crate) use sweep::sweep_all;
 
 use crate::role::Role;
 

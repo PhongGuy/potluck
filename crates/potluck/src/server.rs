@@ -68,8 +68,9 @@ pub enum ServerError {
 }
 
 /// Creates `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, locks `<data>/server.lock`
-/// for the life of the server, installs the pre-receive hook, opens and migrates the database,
-/// binds `config.listen()` and the admin socket, and serves the API on both.
+/// for the life of the server, sweeps what killed pushes left in its repositories, installs the
+/// pre-receive hook, opens and migrates the database, binds `config.listen()` and the admin
+/// socket, and serves the API on both.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
     for path in [
         config.data().to_path_buf(),
@@ -81,6 +82,14 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     }
     // Lock before anything opens, writes or binds, so a second instance touches nothing.
     let _lock = lock_data_dir(config)?;
+    // Nothing can push until the listeners bind, so leftovers of a receive-pack killed while no
+    // server ran are swept here. A sweep that fails is logged and never stops the start.
+    let repos = config.repos_dir();
+    match tokio::task::spawn_blocking(move || crate::git::sweep_all(&repos)).await {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(removed, "swept killed-push leftovers at startup"),
+        Err(err) => tracing::warn!(error = %err, "startup sweep task failed"),
+    }
     let hooks_dir = config.hooks_dir();
     std::env::current_exe()
         .and_then(|exe| crate::hooks::install(&hooks_dir, &exe, config.git()))

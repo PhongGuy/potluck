@@ -181,24 +181,44 @@ fn serve_on_a_busy_port_prints_the_cause_once() {
 #[test]
 fn serve_refuses_oidc_flags_from_the_environment() {
     let dir = tempfile::tempdir().unwrap();
-    let out = potluck()
+    let child = potluck()
         .env("POTLUCK_PUBLIC_URL", "http://127.0.0.1:8080")
         .env("POTLUCK_OIDC_CLIENT_ID", "potluck")
+        .env("POTLUCK_LISTEN", "127.0.0.1:0")
         .args(["serve", "--data"])
         .arg(dir.path())
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(String::from_utf8_lossy(&out.stderr).contains("OIDC"));
+    let (exited, out) = output_within(child, Duration::from_secs(5));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(exited, "serve started despite the OIDC flags: {stderr}");
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("OIDC"), "{stderr}");
     assert!(
         !dir.path().join("server.db").exists(),
         "nothing is created before config passes"
     );
+}
+
+/// Waits up to `limit` for `child` to exit, killing and reaping it if it has not, so a serve
+/// that should have refused to start fails its test instead of hanging the suite.
+fn output_within(mut child: std::process::Child, limit: Duration) -> (bool, std::process::Output) {
+    let deadline = Instant::now() + limit;
+    let exited = loop {
+        if child.try_wait().unwrap().is_some() {
+            break true;
+        }
+        if Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !exited {
+        let _ = child.kill();
+    }
+    (exited, child.wait_with_output().unwrap())
 }
 
 #[tokio::test]
@@ -250,7 +270,7 @@ fn serve_exits_when_another_process_holds_the_data_dir() {
     let dir = tempfile::tempdir().unwrap();
     let held = std::fs::File::create(dir.path().join("server.lock")).unwrap();
     held.try_lock().unwrap();
-    let mut child = potluck()
+    let child = potluck()
         .args([
             "serve",
             "--listen",
@@ -263,22 +283,7 @@ fn serve_exits_when_another_process_holds_the_data_dir() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    // A serve that ignored the lock would run forever; cap the wait so a regression fails
-    // instead of hanging the suite.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let exited = loop {
-        if child.try_wait().unwrap().is_some() {
-            break true;
-        }
-        if Instant::now() > deadline {
-            break false;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    if !exited {
-        let _ = child.kill();
-    }
-    let out = child.wait_with_output().unwrap();
+    let (exited, out) = output_within(child, Duration::from_secs(5));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(exited, "serve kept running on a held data dir: {stderr}");
     assert_eq!(out.status.code(), Some(1), "{stderr}");

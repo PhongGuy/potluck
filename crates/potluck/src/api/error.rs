@@ -183,8 +183,9 @@ impl From<DbError> for ApiError {
     fn from(err: DbError) -> Self {
         match err {
             DbError::Conflict { what } => ApiError::conflict(what),
+            // Closed means the server is shutting down, which is expected rather than a fault.
             err @ DbError::Closed => {
-                tracing::error!(error = %err, "database error");
+                tracing::warn!(error = %err, "database closed, shutting down");
                 ApiError::unavailable("database unavailable")
             }
             err @ (DbError::Sqlite(_) | DbError::SchemaTooNew { .. }) => {

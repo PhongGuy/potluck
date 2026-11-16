@@ -225,8 +225,8 @@ impl GitEngine {
             (stdin, Vec::new())
         };
         // A receive-pack holds the repository's writer gate until it is reaped, so a sweep after
-        // a killed push never overlaps a live one. A `?` before the spawn releases it unswept,
-        // since no git has touched the repository; after the spawn every exit goes through `leave`.
+        // a killed push never overlaps a live one. After `enter`, every exit goes through `leave`,
+        // so a sweep an earlier killed push deferred runs even when this push fails before git.
         let writer = if service == Service::ReceivePack {
             Some(self.writers.enter(repo).await)
         } else {
@@ -235,19 +235,25 @@ impl GitEngine {
         // The refs before git starts are the baseline the reaper diffs against; nobody listening
         // means no extra git process.
         let watch = match on_push {
-            Some(on_push) => Some((on_push, list_refs(self.repos.git(), repo).await?)),
+            Some(on_push) => match list_refs(self.repos.git(), repo).await {
+                Ok(refs) => Some((on_push, refs)),
+                Err(err) => return Err(released(writer, err).await),
+            },
             None => None,
         };
         let git = self.repos.git().to_path_buf();
         let repo_path = repo.to_path_buf();
-        let mut child = self
+        let spawned = self
             .command(service, v2, extra_env)
             .arg(repo)
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
-            .map_err(GitError::Spawn)?;
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(err) => return Err(released(writer, GitError::Spawn(err)).await),
+        };
         let group = process_group(&child);
         debug_assert!(
             child.stdout.is_some(),
@@ -360,6 +366,15 @@ impl GitEngine {
         cmd.kill_on_drop(true);
         cmd
     }
+}
+
+/// Leaves the writer gate, if held, before `err` is returned: no git touched the repository, but
+/// a sweep an earlier killed push deferred runs now.
+async fn released(writer: Option<sweep::Writer>, err: GitError) -> GitError {
+    if let Some(writer) = writer {
+        writer.leave(false).await;
+    }
+    err
 }
 
 /// The process group `child` leads (spawned with `process_group(0)`); `None` once reaped.
@@ -1730,5 +1745,58 @@ mod tests {
             "nothing is left to sweep"
         );
         drop(ahead.await.unwrap().unwrap());
+    }
+
+    // A push that fails after entering the writer gate but before git starts must still run a
+    // sweep an earlier killed push deferred, once the repository is quiet.
+    #[tokio::test]
+    async fn a_push_failing_before_git_starts_runs_the_deferred_sweep() {
+        for observe in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let (_, repo) = engine_in(dir.path(), limits(1, 100)).await;
+            // The same layout with a git binary that does not exist, so both `list_refs` and the
+            // spawn fail after the gate is entered.
+            let engine = GitEngine::new(
+                Repos::new(
+                    dir.path().join("repos"),
+                    PathBuf::from("/nonexistent/potluck-test-git"),
+                ),
+                dir.path().join("hooks"),
+                dir.path().join("tmp"),
+                1024 * 1024,
+                limits(1, 100),
+            );
+            std::fs::write(repo.join("refs/heads/stale.lock"), "x").unwrap();
+            // A killed push leaves while another writer is inside, so its sweep is deferred; the
+            // other writer is then dropped, leaving the repository dirty and quiet.
+            let held = engine.writers.enter(&repo).await;
+            let killed = engine.writers.enter(&repo).await;
+            assert!(
+                !killed.leave(true).await,
+                "deferred while another writer is inside"
+            );
+            drop(held);
+            let (on_push, _moved) = observer();
+            let err = engine
+                .rpc(
+                    Service::ReceivePack,
+                    &repo,
+                    false,
+                    None,
+                    &[],
+                    Body::from("0000"),
+                    observe.then_some(on_push),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, GitError::Spawn(_)),
+                "observe={observe}: {err:?}"
+            );
+            assert!(
+                !repo.join("refs/heads/stale.lock").exists(),
+                "observe={observe}: the failed push ran the deferred sweep"
+            );
+        }
     }
 }

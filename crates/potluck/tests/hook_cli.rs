@@ -13,6 +13,11 @@ const ENV_YML: &[u8] = include_bytes!("fixtures/secret-check/bad/env-secret-valu
 /// Runs the hook against the scratch server repository with `env` on top of git's variables.
 /// `HOME` and the two config variables keep git off the real user and system config.
 fn run_hook(s: &Scratch, env: &[(&str, &str)], stdin: &str) -> Output {
+    run_hook_bytes(s, env, stdin.as_bytes())
+}
+
+/// `run_hook` with stdin as raw bytes, for ref names that are not UTF-8.
+fn run_hook_bytes(s: &Scratch, env: &[(&str, &str)], stdin: &[u8]) -> Output {
     let mut cmd = potluck();
     cmd.args(["hook", "pre-receive"])
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -27,12 +32,7 @@ fn run_hook(s: &Scratch, env: &[(&str, &str)], stdin: &str) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(stdin.as_bytes())
-        .unwrap();
+    child.stdin.take().unwrap().write_all(stdin).unwrap();
     child.wait_with_output().unwrap()
 }
 
@@ -199,5 +199,28 @@ fn a_token_in_a_commit_message_is_reported_at_a_slash() {
     assert_eq!(
         stderr(&out),
         "potluck-reject secret_pattern refs/heads/main / potluck\n"
+    );
+}
+
+#[test]
+fn a_ref_name_that_is_not_utf8_is_judged_on_content_and_reported_byte_exact() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let clean = s.stage_commit("clean");
+    let mut input = format!("{ZERO} {clean} ").into_bytes();
+    input.extend_from_slice(b"refs/heads/caf\xe9\n");
+    let out = run_hook_bytes(&s, &[], &input);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(out.stderr.is_empty(), "a clean push is silent");
+    s.write("creds.txt", AWS);
+    let bad = s.stage_commit("bad");
+    let mut input = format!("{ZERO} {bad} ").into_bytes();
+    input.extend_from_slice(b"refs/heads/caf\xe9\n");
+    let out = run_hook_bytes(&s, &[], &input);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stderr(&out),
+        "potluck-reject secret_pattern refs/heads/caf%E9 creds.txt aws\n",
+        "the reject line carries the exact ref bytes, percent-encoded"
     );
 }

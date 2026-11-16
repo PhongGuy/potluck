@@ -60,23 +60,23 @@ impl HookEnv {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Rejection {
-    ref_name: String,
+    ref_name: Vec<u8>,
     path: Vec<u8>,
     finding: Finding,
 }
 
 impl Rejection {
     /// A refusal of `path` under `ref_name` for `finding`.
-    pub fn new(ref_name: &str, path: &[u8], finding: Finding) -> Rejection {
+    pub fn new(ref_name: &[u8], path: &[u8], finding: Finding) -> Rejection {
         Rejection {
-            ref_name: ref_name.to_owned(),
+            ref_name: ref_name.to_vec(),
             path: path.to_vec(),
             finding,
         }
     }
 
     /// The ref the path was pushed under.
-    pub fn ref_name(&self) -> &str {
+    pub fn ref_name(&self) -> &[u8] {
         &self.ref_name
     }
 
@@ -269,7 +269,7 @@ pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result
             out,
             "potluck-reject {} {} {} {}",
             r.finding.code().as_str(),
-            percent_encode(r.ref_name.as_bytes()),
+            percent_encode(&r.ref_name),
             percent_encode(&r.path),
             r.finding.rule(),
         )?;

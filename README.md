@@ -16,20 +16,6 @@ Until the first release, build the image yourself from a checkout of this reposi
 podman build -t ghcr.io/phongguy/potluck:latest .
 ```
 
-If the published package is private when you pull it, log in to the registry once before the first pull, with a GitHub personal access token that holds the `read:packages` scope. The command asks for your GitHub user name and, as the password, the token.
-
-With podman:
-
-```sh
-podman login ghcr.io
-```
-
-With docker:
-
-```sh
-docker login ghcr.io
-```
-
 ### One command
 
 With podman:

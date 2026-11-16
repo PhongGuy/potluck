@@ -113,7 +113,8 @@ impl GitEngine {
         self.writers.mark_dirty(repos);
     }
 
-    /// The tracker every reaper and push record is spawned on, so shutdown can wait for them.
+    /// The tracker every reaper, push record and workspace create or delete is spawned on, so
+    /// shutdown can wait for them before the database closes.
     pub(crate) fn tasks(&self) -> &TaskTracker {
         &self.tasks
     }

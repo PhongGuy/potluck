@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use potluck::server::{ServerError, start};
 use serde_json::Value;
 
-use crate::common::{config_for, config_listening_on, create_user, potluck, unix_get};
+use crate::common::{
+    api_admin, api_team, api_workspace, config_for, config_listening_on, create_user, git, ok,
+    potluck, repo_path, unix_get, work_tree, write_hook,
+};
 
 #[tokio::test]
 async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
@@ -332,4 +335,69 @@ fn serve_refuses_a_data_dir_too_long_for_the_admin_socket_and_creates_nothing() 
     assert!(stderr.contains("103"), "{stderr}");
     assert!(!stderr.contains("SUN_LEN"), "{stderr}");
     assert!(!data.exists(), "nothing is created before config passes");
+}
+
+// A receive-pack killed while no server was there to sweep (a crash, the OOM killer, a reboot)
+// leaves its debris for the next start to clear before anything can push.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_sweeps_killed_push_leftovers_and_the_push_then_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    let first = start(&config).await.unwrap();
+    let root = api_admin(first.db()).await;
+    let api = format!("http://{}/api/v1", first.http_addr());
+    api_team(&api, &root, "core").await;
+    api_workspace(&api, &root, "core", "api", false).await;
+    first.shutdown().await;
+
+    let repo = repo_path(dir.path(), "core", "api");
+    let put = |rel: &str, text: &str| {
+        let path = repo.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let debris = [
+        "objects/tmp_objdir-incoming-AbC123/pack/tmp_pack_xyz",
+        "refs/heads/main.lock",
+        "HEAD.lock",
+        "packed-refs.lock",
+    ];
+    for rel in debris {
+        put(rel, "x");
+    }
+    put(
+        "objects/pack/pack-aaaa.keep",
+        "receive-pack 4018551 on host\n",
+    );
+    put("objects/pack/pack-bbbb.keep", "kept by the operator\n");
+
+    let again = start(&config).await.unwrap();
+    // The installed hook execs the serving binary, which here is the test binary.
+    write_hook(&dir.path().join("hooks"), "exit 0");
+    assert!(
+        !repo.join("objects/tmp_objdir-incoming-AbC123").exists(),
+        "the quarantine is swept"
+    );
+    for rel in &debris[1..] {
+        assert!(!repo.join(rel).exists(), "{rel} is swept");
+    }
+    assert!(
+        !repo.join("objects/pack/pack-aaaa.keep").exists(),
+        "receive-pack's keep is swept"
+    );
+    assert!(
+        repo.join("objects/pack/pack-bbbb.keep").exists(),
+        "an operator keep stays"
+    );
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    let url = format!("http://{}/git/core/api.git", again.http_addr());
+    ok(git(
+        &home,
+        Some(&work),
+        Some(&root),
+        &["push", "-q", &url, "main"],
+    ));
+    again.shutdown().await;
 }

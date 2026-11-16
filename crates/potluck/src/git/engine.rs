@@ -208,6 +208,8 @@ impl GitEngine {
         }
         // The slot covers the spool too, so the disk holds at most `processes` bodies at once; the
         // upload timeout keeps a trickling client from parking on a slot.
+        // The slot comes before the writer gate, so a push refused `Busy` never held the gate and
+        // cannot strand a killed push's deferred sweep.
         let permit = self.acquire().await?;
         // Spool before spawning: a 413 can still be answered, and git reads its request from a
         // file, so nothing has to feed stdin while git is already writing progress to stdout.
@@ -1672,5 +1674,61 @@ mod tests {
             eventually(5, || engine.permits.available_permits() == 1).await,
             "the slot is back"
         );
+    }
+
+    // A push takes its slot before the writer gate. Were the order swapped, a push left waiting
+    // for a slot would sit inside the gate when a killed push leaves, take over its sweep, and
+    // then fail `Busy` without running it.
+    #[tokio::test]
+    async fn a_push_that_never_gets_a_slot_does_not_strand_a_killed_push_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let limit = limits(1, 3000).with_max_runtime(Duration::from_millis(1500));
+        let (engine, repo) = engine_in(dir.path(), limit).await;
+        let doomed_at = dir.path().join("doomed.path");
+        write_hook_file(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\necho \"$GIT_QUARANTINE_PATH\" > '{}'\nexec sleep 30\n",
+                doomed_at.display()
+            ),
+        );
+        let (doomed_body, _) = push_body_for(dir.path(), "doomed");
+        let (late_body, _) = push_body_for(dir.path(), "late");
+        let engine = Arc::new(engine);
+        let doomed = tokio::spawn({
+            let (engine, repo) = (Arc::clone(&engine), repo.clone());
+            async move { push_once(&engine, &repo, doomed_body).await }
+        });
+        let doomed_q = line_from(&doomed_at).await;
+        // Queued ahead of the late push, this takes the slot the killed push frees and holds
+        // it until the late push has given up.
+        let ahead = tokio::spawn(Arc::clone(&engine.permits).acquire_owned());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let late = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(late_body),
+                None,
+            )
+            .await;
+        assert!(matches!(late, Err(GitError::Busy)), "got {late:?}");
+        assert!(
+            doomed.await.unwrap().is_empty(),
+            "the doomed push was killed"
+        );
+        assert!(
+            !Path::new(&doomed_q).exists(),
+            "the killed push swept its own quarantine"
+        );
+        assert_eq!(
+            debris(&repo),
+            Vec::<String>::new(),
+            "nothing is left to sweep"
+        );
+        drop(ahead.await.unwrap().unwrap());
     }
 }

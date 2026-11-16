@@ -188,7 +188,8 @@ impl GitEngine {
     /// Serves one `POST git-upload-pack` or `git-receive-pack`: takes a slot, spools the body
     /// within `upload_timeout`, spawns git with the spool as stdin and `extra_env` in its
     /// environment, and returns its stdout as the response body. The slot is released when git
-    /// and every process left in its group have exited, or at the run limit. A receive-pack over `MAX_COMMANDS` commands is `TooManyCommands` before git starts;
+    /// and every process left in its group have exited, or at the run limit. A receive-pack over
+    /// `MAX_COMMANDS` commands is `TooManyCommands` before git starts;
     /// `on_push`, when given, hears the moves the push achieved once git has exited.
     // Each argument is one facet of the request the route already holds; bundling them would
     // only rename the list.
@@ -1212,6 +1213,31 @@ mod tests {
             .expect("a pid")
     }
 
+    /// SIGKILLs, when dropped, the `sleep 30` whose pid a hook wrote to the held path, so a test
+    /// that panics never leaves it running; armed before the hook runs, it reads the file in drop.
+    struct KillsSleeper(PathBuf);
+
+    impl Drop for KillsSleeper {
+        fn drop(&mut self) {
+            use rustix::process::{Pid, Signal, kill_process};
+            let Some(pid) = std::fs::read_to_string(&self.0)
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+            else {
+                return;
+            };
+            // Only a live process still running the hook's sleep, so a reused pid is never hit.
+            let ours = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmd| cmd == b"sleep\x0030\x00");
+            if ours
+                && !is_dead(pid)
+                && let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw)
+            {
+                let _ = kill_process(pid, Signal::KILL);
+            }
+        }
+    }
+
     /// Polls `cond` every 20 ms for up to `secs`; true once it holds.
     async fn eventually(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(secs);
@@ -1548,6 +1574,7 @@ mod tests {
         let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
         let (engine, repo) = engine_in(dir.path(), short).await;
         let pidfile = dir.path().join("descendant.pid");
+        let _sleeper = KillsSleeper(pidfile.clone());
         // The hook accepts at once and leaves a child with every stdio stream closed, so nothing
         // ties it to receive-pack's pipes once receive-pack exits.
         write_hook_file(
@@ -1599,6 +1626,8 @@ mod tests {
         let short = limits(1, 100).with_max_runtime(Duration::from_millis(1500));
         let (engine, repo) = engine_in(dir.path(), short).await;
         let pidfile = dir.path().join("detached.pid");
+        // The detached sleep is outside every group the engine kills; the guard ends it.
+        let _sleeper = KillsSleeper(pidfile.clone());
         write_hook_file(
             &dir.path().join("hooks").join("pre-receive"),
             &format!(
@@ -1613,11 +1642,6 @@ mod tests {
         let pid = read_pid(&pidfile);
         tokio::time::sleep(Duration::from_secs(2)).await;
         let alive = !is_dead(pid);
-        // The detached sleep is outside every group the engine kills; end it here.
-        let _ = std::process::Command::new("kill")
-            .arg("-9")
-            .arg(pid.to_string())
-            .status();
         assert_eq!(moves.len(), 1, "the push landed: {moves:?}");
         assert!(
             elapsed < Duration::from_millis(1500),

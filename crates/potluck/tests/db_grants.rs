@@ -379,3 +379,24 @@ async fn a_rolled_back_delete_keeps_the_grants() {
         "and comes back when that transaction rolls back"
     );
 }
+
+#[tokio::test]
+async fn list_grants_skips_a_grant_whose_subject_is_gone() {
+    let (d, f) = fx().await;
+    f.db.put_grant(f.api.id(), user("bob"), Role::Read)
+        .await
+        .unwrap()
+        .unwrap();
+    raw(&d)
+        .execute(
+            "INSERT INTO grants (workspace_id, subject_kind, subject_id, role) \
+             VALUES (?1, 'user', 999, 'admin'), (?1, 'team', 999, 'write')",
+            [f.api.id()],
+        )
+        .unwrap();
+    assert_eq!(
+        f.db.list_grants(f.api.id()).await.unwrap(),
+        [GrantRecord::new(user("bob"), Role::Read)],
+        "the dangling user and team grants are skipped, not an error"
+    );
+}

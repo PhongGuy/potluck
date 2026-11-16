@@ -283,8 +283,8 @@ fn wide(aliases: usize) -> Vec<u8> {
     s.into_bytes()
 }
 
-// The one test at the real cap: 0.67 s in a release build, slower in the unoptimised test
-// profile. Every other cap test uses a small `node_cap` through `environment_rule`.
+// The one test at the real cap; every other cap test uses a small `node_cap` through
+// `environment_rule`.
 #[test]
 fn the_real_cap_refuses_a_wide_alias_fan_out() {
     // 1 + 1 + 4001 + 1 + 1 + 501 * 4001 = 2_008_506 nodes, 501 jumps: yaml_serde accepts it.
@@ -404,9 +404,22 @@ fn a_merge_yaml_serde_cannot_apply_is_unparsable() {
 
 #[test]
 fn a_plain_merge_key_is_not_a_variable_key() {
-    // The merge key vanishes; a mapping with only `<<` and `name` has no secret.
+    // The merge key vanishes; a mapping with only `<<` and `name` has no value.
     let bytes = b"a: &a {name: base}\nvariables:\n  - <<: *a\n    secret: true\n";
     assert_eq!(Apinata.content_rule("environments/x.yml", bytes), None);
+}
+
+#[test]
+fn an_alias_used_as_a_mapping_key_is_counted_and_read_as_its_value() {
+    // root map, key a, sequence of 3 (4), the alias copy as a key (4), value v
+    let counted = b"a: &a [1, 2, 3]\n? *a\n: v\n";
+    assert_eq!(environment_rule(counted, 11), None);
+    assert_eq!(environment_rule(counted, 10), unparsable());
+    // An anchored `secret` scalar spelled as an alias key is still the `secret` key.
+    let valued = b"k: &k secret\nvariables:\n  - *k : true\n    value: x\n    name: n\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", valued), hit());
+    let unvalued = b"k: &k secret\nvariables:\n  - *k : true\n    name: n\n";
+    assert_eq!(Apinata.content_rule("environments/x.yml", unvalued), None);
 }
 
 #[test]

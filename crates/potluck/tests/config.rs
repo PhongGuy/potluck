@@ -496,3 +496,21 @@ fn an_ipv6_range_wider_than_the_mapped_block_never_trusts_ipv4_peers() {
         "::/0 names IPv6 peers only"
     );
 }
+
+#[test]
+fn a_mapped_address_under_a_prefix_below_96_never_trusts_ipv4_peers() {
+    // Each range is parsed alone so a failure names the entry that widened trust.
+    for range in ["::ffff:10.0.0.0/88", "::ffff:0:0/80"] {
+        let config = parse_config(&[
+            "--public-url",
+            "https://p.example.com",
+            "--trusted-proxies",
+            range,
+        ])
+        .unwrap();
+        assert!(
+            !config.trusts_proxy("10.0.0.1".parse().unwrap()),
+            "{range}: a range wider than the mapped block names IPv6 peers only"
+        );
+    }
+}

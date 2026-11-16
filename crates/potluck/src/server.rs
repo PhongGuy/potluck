@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use axum::{Extension, Router};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_util::task::TaskTracker;
 
 use crate::api::{Actor, AppState};
 use crate::config::Config;
@@ -138,6 +139,7 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
     let state = AppState::new(db.clone(), config.clone());
     state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
+    let git_tasks = state.git().tasks().clone();
     let router = crate::api::router(state);
     let (stop, rx) = watch::channel(false);
     let http = tokio::spawn(
@@ -159,6 +161,7 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         admin_socket,
         stop,
         tasks: [http, admin],
+        git_tasks,
         db,
         notices,
         tcp: kept_tcp,
@@ -203,6 +206,7 @@ pub struct Running {
     admin_socket: PathBuf,
     stop: watch::Sender<bool>,
     tasks: [JoinHandle<io::Result<()>>; 2],
+    git_tasks: TaskTracker,
     db: Db,
     notices: Notices,
     tcp: std::net::TcpListener,
@@ -235,10 +239,11 @@ impl Running {
         &self.db
     }
 
-    /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file,
-    /// and releases the lock while leaving `server.lock` in place. The port, the admin socket and
-    /// the lock are free when it returns, even if a child forked meanwhile still holds duplicates
-    /// of their fds.
+    /// Stops accepting, waits for in-flight requests and then for git reapers and push records,
+    /// closes the database, removes the socket file, and releases the lock while leaving
+    /// `server.lock` in place. Waiting for a hung git can take up to `--git-max-runtime`. The port,
+    /// the admin socket and the lock are free when it returns, even if a child forked meanwhile
+    /// still holds duplicates of their fds.
     pub async fn shutdown(self) {
         // Open streams would hold the graceful drain forever; end them before stopping.
         self.notices.close_all();
@@ -250,6 +255,9 @@ impl Running {
                 Err(err) => tracing::error!("listener task failed: {err}"),
             }
         }
+        // The reapers and push records need the database, so they finish before it closes.
+        self.git_tasks.close();
+        self.git_tasks.wait().await;
         self.db.close();
         // The socket may already be gone; only its absence matters.
         let _ = std::fs::remove_file(&self.admin_socket);

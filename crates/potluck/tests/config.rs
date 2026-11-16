@@ -455,3 +455,44 @@ fn a_relative_data_dir_is_measured_absolute() {
     assert_eq!(*len, path.as_os_str().len());
     assert!(*len > 95 + "/admin.sock".len(), "{len}");
 }
+
+#[test]
+fn an_ipv4_mapped_cidr_matches_the_ipv4_peers_it_maps() {
+    let config = parse_config(&[
+        "--public-url",
+        "https://p.example.com",
+        "--trusted-proxies",
+        "::ffff:10.0.0.0/104, ::ffff:192.168.1.5",
+    ])
+    .unwrap();
+    assert!(
+        config.trusts_proxy("10.0.0.5".parse().unwrap()),
+        "a mapped CIDR covers the IPv4 peers it maps"
+    );
+    assert!(
+        config.trusts_proxy("::ffff:10.9.9.9".parse().unwrap()),
+        "and their mapped form"
+    );
+    assert!(
+        config.trusts_proxy("192.168.1.5".parse().unwrap()),
+        "a bare mapped address is its IPv4 host"
+    );
+    assert!(!config.trusts_proxy("11.0.0.1".parse().unwrap()));
+    assert!(!config.trusts_proxy("192.168.1.6".parse().unwrap()));
+}
+
+#[test]
+fn an_ipv6_range_wider_than_the_mapped_block_never_trusts_ipv4_peers() {
+    let config = parse_config(&[
+        "--public-url",
+        "https://p.example.com",
+        "--trusted-proxies",
+        "::/0",
+    ])
+    .unwrap();
+    assert!(config.trusts_proxy("fd00::1".parse().unwrap()));
+    assert!(
+        !config.trusts_proxy("10.0.0.1".parse().unwrap()),
+        "::/0 names IPv6 peers only"
+    );
+}

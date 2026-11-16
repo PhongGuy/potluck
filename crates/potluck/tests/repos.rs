@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use potluck::git::{RepoError, Repos};
+use potluck::kinds;
 use potluck::slug::Slug;
 
 use crate::common::{SEED_COMMIT, git, hanging_git, hung_git_is_gone, ok};
@@ -128,13 +129,14 @@ async fn remove_deletes_the_repository_and_reports_absence() {
     assert!(path.join("HEAD").is_file(), "the slug is free again");
 }
 
-const SEED_COLLECTION: &[u8] = b"opencollection: 1.0.0\n\ninfo:\n  name: Workspace\nbundled: false\nextensions:\n  bruno:\n    ignore:\n      - node_modules\n      - .git\n";
-
-fn apinata_seed() -> [(&'static str, &'static [u8]); 2] {
-    [
-        (".gitignore", b".env\n"),
-        ("opencollection.yml", SEED_COLLECTION),
-    ]
+/// The apinata kind's own seed, in the shape `seed_commit` takes.
+fn apinata_seed() -> Vec<(&'static str, &'static [u8])> {
+    kinds::by_name("apinata")
+        .expect("apinata is a kind")
+        .seed()
+        .iter()
+        .map(|file| (file.path(), file.bytes()))
+        .collect()
 }
 
 /// `git --git-dir=<repo> <args>` through the isolated runner; panics with stderr on failure.
@@ -211,7 +213,7 @@ async fn seed_commit_is_the_same_sha_on_two_repositories() {
             ]
         )
         .as_bytes(),
-        SEED_COLLECTION
+        apinata_seed()[1].1
     );
     let other = r
         .seed_commit(

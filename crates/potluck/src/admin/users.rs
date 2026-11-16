@@ -3,7 +3,7 @@
 use serde_json::{Map, Value, json};
 
 use super::client::Verb;
-use super::{AdminError, Context, output, pretty, segment};
+use super::{AdminError, Context, NewPassword, output, pretty, segment};
 
 /// The `user` verbs.
 #[derive(clap::Subcommand, Debug)]
@@ -97,15 +97,10 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
                 "server_admin": server_admin,
             })
             .to_string();
-            let user = cx
+            let answer = cx
                 .fetch(Verb::Post, "/api/v1/users", Some(&body), &[201])
-                .await?
-                .unwrap_or(Value::Null);
-            print_user(
-                cx,
-                &user,
-                password.generated.then_some(password.text.as_str()),
-            )
+                .await;
+            print_answer(cx, answer, &password)
         }
         UserCmd::Set {
             username,
@@ -149,20 +144,15 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
             let username = segment("username", &username)?;
             let password = cx.new_password(password_stdin)?;
             let body = json!({"password": password.text}).to_string();
-            let user = cx
+            let answer = cx
                 .fetch(
                     Verb::Patch,
                     &format!("/api/v1/users/{username}"),
                     Some(&body),
                     &[200],
                 )
-                .await?
-                .unwrap_or(Value::Null);
-            print_user(
-                cx,
-                &user,
-                password.generated.then_some(password.text.as_str()),
-            )
+                .await;
+            print_answer(cx, answer, &password)
         }
         UserCmd::Tokens { username } => {
             let username = segment("username", &username)?;
@@ -188,8 +178,26 @@ pub(crate) async fn run_token(cmd: TokenCmd, cx: &mut Context<'_>) -> Result<(),
     }
 }
 
+/// Prints the answer to a request that set `password`. An unreadable answer may still mean the
+/// server applied the password, so a generated one is printed with no user before the error.
+fn print_answer(
+    cx: &mut Context<'_>,
+    answer: Result<Option<Value>, AdminError>,
+    password: &NewPassword,
+) -> Result<(), AdminError> {
+    let generated = password.generated.then_some(password.text.as_str());
+    match answer {
+        Ok(user) => print_user(cx, &user.unwrap_or(Value::Null), generated),
+        Err(e @ AdminError::Malformed { .. }) if generated.is_some() => {
+            print_user(cx, &Value::Null, generated)?;
+            Err(e)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// The only printer of a password: the `{"user", "password"}` wrap in JSON mode, else the row
-/// followed by `password: <pw>` when this command generated it.
+/// (none for a null user) followed by `password: <pw>` when this command generated it.
 fn print_user(
     cx: &mut Context<'_>,
     user: &Value,
@@ -199,7 +207,11 @@ fn print_user(
         let text = pretty(&json!({"user": user, "password": generated}))?;
         return cx.write(&text);
     }
-    let mut text = output::users(std::slice::from_ref(user));
+    let mut text = if user.is_null() {
+        String::new()
+    } else {
+        output::users(std::slice::from_ref(user))
+    };
     if let Some(pw) = generated {
         text.push_str(&format!("password: {pw}\n"));
     }

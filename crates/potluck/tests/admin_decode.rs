@@ -68,3 +68,53 @@ async fn a_2xx_body_of_the_wrong_json_shape_is_malformed() {
     .await;
     server.abort();
 }
+
+/// The generated password a command printed, from its `password: ` line or its JSON wrap.
+fn printed_password(out: &str) -> String {
+    let table = out.lines().find_map(|l| l.strip_prefix("password: "));
+    let json = serde_json::from_str::<serde_json::Value>(out).ok();
+    let json = json.as_ref().and_then(|v| v["password"].as_str());
+    table
+        .or(json)
+        .unwrap_or_else(|| panic!("a generated password on stdout: {out:?}"))
+        .to_owned()
+}
+
+#[tokio::test]
+async fn a_generated_password_is_printed_before_an_unreadable_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = Router::new()
+        .route(
+            "/api/v1/users",
+            axum::routing::post(|| async { (axum::http::StatusCode::CREATED, "") }),
+        )
+        .route(
+            "/api/v1/users/{name}",
+            axum::routing::patch(|| async { (axum::http::StatusCode::OK, "") }),
+        );
+    let server = stand_in(dir.path(), router);
+    let commands: [(&[&str], u16); 3] = [
+        (&["user", "create", "ada"], 201),
+        (&["--json", "user", "create", "ada"], 201),
+        (&["user", "reset-password", "ada"], 200),
+    ];
+    for (args, expected) in commands {
+        let (result, out) = admin(dir.path(), args, "").await;
+        let password = printed_password(&out);
+        assert!(
+            password.len() == 32,
+            "{args:?} printed a generated password: {out:?}"
+        );
+        match &result {
+            Err(e @ AdminError::Malformed { status }) => {
+                assert_eq!(*status, expected, "{args:?}");
+                assert!(
+                    !format!("{e} {e:?}").contains(&password),
+                    "{args:?} error holds no password"
+                );
+            }
+            other => panic!("{args:?} is Malformed: {other:?}"),
+        }
+    }
+    server.abort();
+}

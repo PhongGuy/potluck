@@ -393,3 +393,65 @@ fn serve_help_lists_the_git_run_limit() {
         assert!(text.contains(needle), "help lacks {needle}: {text}");
     }
 }
+
+#[test]
+fn an_admin_socket_path_over_the_limit_is_refused_with_its_length() {
+    // "/" + 92 bytes + "/admin.sock" is 104 bytes, one over the limit.
+    let data = format!("/{}", "a".repeat(92));
+    let err = parse_config(&["--data", &data, "--public-url", "https://p.example.com"])
+        .unwrap()
+        .check_admin_socket()
+        .unwrap_err();
+    match &err {
+        ConfigError::AdminSocketPathTooLong { path, len, max } => {
+            assert_eq!(path, &Path::new(&data).join("admin.sock"));
+            assert_eq!(*len, 104);
+            assert_eq!(*max, 103);
+        }
+        other => panic!("got {other:?}"),
+    }
+    let text = err.to_string();
+    assert!(text.contains(&data), "{text}");
+    assert!(text.contains("104"), "{text}");
+    assert!(text.contains("103"), "{text}");
+    assert!(text.contains("--data"), "{text}");
+    assert!(!text.contains("SUN_LEN"), "{text}");
+}
+
+#[test]
+fn an_admin_socket_path_at_the_limit_is_accepted() {
+    let data = format!("/{}", "a".repeat(91));
+    let config = parse_config(&["--data", &data, "--public-url", "https://p.example.com"]).unwrap();
+    assert_eq!(config.admin_socket().as_os_str().len(), 103);
+    config.check_admin_socket().unwrap();
+}
+
+#[test]
+fn a_multibyte_data_dir_is_measured_in_bytes() {
+    // 46 two-byte chars: 93 bytes of --data, 104 bytes of socket path, 58 chars.
+    let data = format!("/{}", "\u{e9}".repeat(46));
+    let err = parse_config(&["--data", &data, "--public-url", "https://p.example.com"])
+        .unwrap()
+        .check_admin_socket()
+        .unwrap_err();
+    assert!(
+        matches!(err, ConfigError::AdminSocketPathTooLong { len: 104, .. }),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn a_relative_data_dir_is_measured_absolute() {
+    // 95 + "/admin.sock" is over the limit before any working directory is prefixed.
+    let data = "r".repeat(95);
+    let err = parse_config(&["--data", &data, "--public-url", "https://p.example.com"])
+        .unwrap()
+        .check_admin_socket()
+        .unwrap_err();
+    let ConfigError::AdminSocketPathTooLong { path, len, .. } = &err else {
+        panic!("got {err:?}");
+    };
+    assert!(path.is_absolute(), "{}", path.display());
+    assert_eq!(*len, path.as_os_str().len());
+    assert!(*len > 95 + "/admin.sock".len(), "{len}");
+}

@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::future::IntoFuture;
 use std::io;
 use std::net::{Shutdown, SocketAddr};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::{Path, PathBuf};
 
 use axum::{Extension, Router};
@@ -112,6 +112,15 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         path: admin_socket.clone(),
         source,
     })?;
+    // The same duplicate for the admin socket, so a forked child's copy cannot keep it accepting.
+    let kept_unix = unix
+        .as_fd()
+        .try_clone_to_owned()
+        .map(std::os::unix::net::UnixListener::from)
+        .map_err(|source| ServerError::AdminSocket {
+            path: admin_socket.clone(),
+            source,
+        })?;
 
     // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
@@ -141,6 +150,7 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
         db,
         notices,
         tcp: kept_tcp,
+        unix: kept_unix,
         _lock,
     })
 }
@@ -184,6 +194,7 @@ pub struct Running {
     db: Db,
     notices: Notices,
     tcp: std::net::TcpListener,
+    unix: std::os::unix::net::UnixListener,
     _lock: File,
 }
 
@@ -213,8 +224,9 @@ impl Running {
     }
 
     /// Stops accepting, waits for in-flight requests, closes the database, removes the socket file,
-    /// and releases the lock while leaving `server.lock` in place. The port and the lock are free
-    /// when it returns, even if a child forked meanwhile still holds duplicates of their fds.
+    /// and releases the lock while leaving `server.lock` in place. The port, the admin socket and
+    /// the lock are free when it returns, even if a child forked meanwhile still holds duplicates
+    /// of their fds.
     pub async fn shutdown(self) {
         // Open streams would hold the graceful drain forever; end them before stopping.
         self.notices.close_all();
@@ -234,6 +246,10 @@ impl Running {
         let tcp = std::net::TcpStream::from(OwnedFd::from(self.tcp));
         if let Err(err) = tcp.shutdown(Shutdown::Both) {
             tracing::error!("cannot shut down the TCP listener: {err}");
+        }
+        let unix = std::os::unix::net::UnixStream::from(OwnedFd::from(self.unix));
+        if let Err(err) = unix.shutdown(Shutdown::Both) {
+            tracing::error!("cannot shut down the admin socket listener: {err}");
         }
         if let Err(err) = self._lock.unlock() {
             tracing::error!("cannot release the data directory lock: {err}");
@@ -413,6 +429,24 @@ mod tests {
         let connected = std::net::TcpStream::connect(addr);
         drop(duplicate);
         assert!(connected.is_err(), "the port still accepts after shutdown");
+    }
+
+    // The admin socket's path is gone after shutdown, so a hard link made beforehand is the only
+    // way left to reach it: nothing may accept through it while a duplicate fd is open.
+    #[tokio::test]
+    async fn shutdown_closes_the_admin_socket_while_a_duplicate_fd_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = start(&config_for(dir.path())).await.unwrap();
+        let alias = dir.path().join("alias.sock");
+        std::fs::hard_link(running.admin_socket(), &alias).unwrap();
+        let duplicate = running.unix.try_clone().unwrap();
+        running.shutdown().await;
+        let connected = std::os::unix::net::UnixStream::connect(&alias);
+        drop(duplicate);
+        assert!(
+            connected.is_err(),
+            "the admin socket still accepts after shutdown"
+        );
     }
 
     #[tokio::test]

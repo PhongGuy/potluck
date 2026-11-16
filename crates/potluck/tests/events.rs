@@ -10,7 +10,7 @@ use tokio::time::timeout;
 
 use crate::common::{
     FullServer, SEED_COMMIT, SseReader, api_admin, api_team, api_user, api_workspace, call,
-    full_server, git, ok, ref_event, work_tree,
+    full_server, git, ok, ref_event, unix_get, work_tree,
 };
 
 const T: Duration = Duration::from_secs(10);
@@ -441,5 +441,49 @@ async fn a_dropped_admin_flag_and_a_failed_repository_removal_still_close_stream
     assert_eq!(
         SseReader::open(&events_url(&a, "docs"), &a.bob).await.err(),
         Some(404)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_system_actor_gets_403_on_events() {
+    let a = arena().await;
+    let (status, body) = timeout(
+        T,
+        unix_get(
+            a.server.running.admin_socket(),
+            "/api/v1/workspaces/core/api/events",
+        ),
+    )
+    .await
+    .expect("a refusal, not a stream");
+    assert_eq!(status, 403, "{body}");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("error body");
+    assert_eq!(body["error"]["code"], "forbidden", "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ref_notice_carries_exactly_the_contract_bytes() {
+    let a = arena().await;
+    let mut r = SseReader::open(&events_url(&a, "api"), &a.bob)
+        .await
+        .expect("read role streams");
+    assert_eq!(next(&mut r).await.unwrap(), vec!["retry: 2000"]);
+    assert_eq!(
+        next(&mut r).await.unwrap(),
+        vec![
+            "event: ref".to_owned(),
+            format!(r#"data: {{"ref":"refs/heads/main","sha":"{SEED_COMMIT}"}}"#),
+        ],
+        "the shared contract's data line, byte for byte"
+    );
+    let work = work_tree(&a.home, "work");
+    let tip = push(&a, &work, "main:refs/heads/topic");
+    assert_eq!(
+        next(&mut r).await.unwrap(),
+        vec![
+            "event: ref".to_owned(),
+            format!(r#"data: {{"ref":"refs/heads/topic","sha":"{tip}"}}"#),
+        ],
+        "a live move uses the same bytes"
     );
 }

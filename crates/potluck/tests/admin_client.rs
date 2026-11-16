@@ -1,6 +1,9 @@
 //! `AdminClient`: the socket probe, JSON bodies both ways, and empty answers.
 
 use std::io::ErrorKind;
+use std::net::Shutdown;
+use std::os::fd::OwnedFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use potluck::admin::client::{AdminClient, Verb};
 use potluck::server::start;
@@ -21,10 +24,18 @@ async fn connect_reports_a_missing_socket_as_not_found() {
 async fn connect_reports_a_dead_socket_file_as_connection_refused() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("admin.sock");
-    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    let listener = UnixListener::bind(&socket).unwrap();
+    // The duplicate stands in for a child forked by another test that holds the fd until exec.
+    let forked_child_fd = listener.try_clone().unwrap();
+    // Dropping our fd alone leaves the socket listening through that duplicate; shutdown(2) acts on
+    // the shared socket, so it is dead whoever still holds an fd to it.
+    UnixStream::from(OwnedFd::from(listener))
+        .shutdown(Shutdown::Both)
+        .unwrap();
     assert!(socket.exists(), "the file outlives the listener");
     let err = AdminClient::connect(&socket).await.unwrap_err();
     assert_eq!(err.kind(), ErrorKind::ConnectionRefused, "got {err:?}");
+    drop(forked_child_fd);
 }
 
 #[tokio::test]

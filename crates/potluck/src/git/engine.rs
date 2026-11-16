@@ -111,7 +111,8 @@ impl GitEngine {
     }
 
     /// The `GET info/refs` body: the `# service=` pkt-line and flush, unless `v2` and
-    /// `UploadPack`, followed by git's own advertisement.
+    /// `UploadPack`, followed by git's own advertisement. A git still running at `max_runtime`
+    /// has its process group killed and is `Overran`.
     pub async fn advertise(
         &self,
         service: Service,
@@ -122,29 +123,65 @@ impl GitEngine {
             self.require_hook()?;
         }
         let _permit = self.acquire().await?;
-        let output = self
+        let mut child = self
             .command(service, v2, &[])
             .arg("--http-backend-info-refs")
             .arg(repo)
             .stdin(Stdio::null())
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(GitError::Spawn)?;
-        if !output.status.success() {
+        let (mut stdout, mut stderr) = match (child.stdout.take(), child.stderr.take()) {
+            (Some(out), Some(err)) => (out, err),
+            _ => return Err(GitError::Spawn(std::io::Error::other("git has no pipes"))),
+        };
+        // Drain both pipes and wait inside the run limit; the child stays owned here, so on
+        // expiry its group is killed while the leader is still unreaped.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let bounded = tokio::time::timeout(self.max_runtime, async {
+            tokio::join!(
+                stdout.read_to_end(&mut out),
+                stderr.read_to_end(&mut err),
+                child.wait()
+            )
+        })
+        .await;
+        let status = match bounded {
+            Ok((read_out, read_err, status)) => {
+                read_out.map_err(GitError::Spawn)?;
+                read_err.map_err(GitError::Spawn)?;
+                status.map_err(GitError::Spawn)?
+            }
+            Err(_) => {
+                kill_group(&child);
+                let _ = child.wait().await;
+                tracing::warn!(
+                    service = service.name(),
+                    limit = ?self.max_runtime,
+                    "git ran past its run limit; killed its process group"
+                );
+                return Err(GitError::Overran {
+                    service: service.name(),
+                    limit: self.max_runtime,
+                });
+            }
+        };
+        if !status.success() {
             return Err(GitError::Failed {
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                stderr: String::from_utf8_lossy(&err).trim().to_owned(),
             });
         }
         // A v2 upload-pack client expects the capability list first, as git-http-backend sends
         // it; every other combination opens with the service pkt-line and a flush.
-        let mut body = Vec::with_capacity(output.stdout.len() + 40);
+        let mut body = Vec::with_capacity(out.len() + 40);
         if !(v2 && service == Service::UploadPack) {
             let name = service.name();
             body.extend_from_slice(
                 format!("{:04x}# service={name}\n0000", 4 + 10 + name.len() + 1).as_bytes(),
             );
         }
-        body.extend_from_slice(&output.stdout);
+        body.extend_from_slice(&out);
         Ok(body)
     }
 
@@ -407,6 +444,14 @@ pub enum GitError {
         /// The hook path.
         path: PathBuf,
     },
+    /// git ran past `max_runtime` and its process group was killed: 500 `internal`, logged.
+    #[error("git {service} ran past its {limit:?} run limit and was killed")]
+    Overran {
+        /// `Service::name()` of the killed child.
+        service: &'static str,
+        /// The limit it ran past.
+        limit: Duration,
+    },
 }
 
 impl From<GitError> for ApiError {
@@ -420,7 +465,10 @@ impl From<GitError> for ApiError {
             | GitError::SlowBody(_)
             | GitError::Body(_)
             | GitError::TooManyCommands { .. } => ApiError::invalid_request(err.to_string()),
-            GitError::Spawn(_) | GitError::Failed { .. } | GitError::HookMissing { .. } => {
+            GitError::Spawn(_)
+            | GitError::Failed { .. }
+            | GitError::HookMissing { .. }
+            | GitError::Overran { .. } => {
                 tracing::error!(error = %err, "git error");
                 ApiError::internal("git failed")
             }
@@ -1122,5 +1170,58 @@ mod tests {
             .unwrap();
         assert_eq!(moves.len(), 1, "the push landed: {moves:?}");
         assert_eq!(moves[0].new_sha(), tip, "at the pushed tip");
+    }
+
+    #[tokio::test]
+    async fn a_hung_advertisement_is_killed_with_its_children_and_answers_500() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        // A stand-in git that never answers and leaves a child of its own behind.
+        let pidfile = dir.path().join("child.pid");
+        let fake = dir.path().join("fake-git");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
+        let engine = GitEngine::new(
+            Repos::new(dir.path().join("repos"), fake),
+            dir.path().join("hooks"),
+            dir.path().join("tmp"),
+            1024,
+            limits(1, 100).with_max_runtime(Duration::from_millis(1500)),
+        );
+        let started = std::time::Instant::now();
+        let err = engine
+            .advertise(
+                Service::UploadPack,
+                &dir.path().join("repos").join("x.git"),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, GitError::Overran { service: "git-upload-pack", limit } if limit == Duration::from_millis(1500)),
+            "got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(engine.permits.available_permits(), 1, "the slot is back");
+        let pid = read_pid(&pidfile);
+        assert!(
+            eventually(5, || is_dead(pid)).await,
+            "the grandchild {pid} was killed too"
+        );
+        let api = ApiError::from(err);
+        assert_eq!((api.status(), api.code().as_str()), (500, "internal"));
     }
 }

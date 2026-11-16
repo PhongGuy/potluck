@@ -135,6 +135,54 @@ fn moved_keeps_only_the_commands_the_repository_confirms() {
     );
 }
 
+#[test]
+fn a_sha256_null_id_counts_as_absent() {
+    // SHA-256 repositories spell "no object" with 64 zeros instead of 40.
+    let z64 = "0".repeat(64);
+    let c = "c".repeat(64);
+    let d = "d".repeat(64);
+    let refs = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(r, s)| ((*r).to_owned(), (*s).to_owned()))
+            .collect()
+    };
+    let before = refs(&[("refs/heads/gone", &c), ("refs/heads/kept", &d)]);
+    let after = refs(&[("refs/heads/kept", &d), ("refs/heads/new", &c)]);
+    let commands = [
+        RefCommand::new(&c, &z64, "refs/heads/gone"),
+        RefCommand::new(&z64, &c, "refs/heads/new"),
+        RefCommand::new(&d, &z64, "refs/heads/kept"),
+        RefCommand::new(&z64, &z64, "refs/heads/never"),
+    ];
+    assert_eq!(
+        moved(&commands, &before, &after),
+        vec![
+            RefMove::new("refs/heads/gone", &c, &z64),
+            RefMove::new("refs/heads/new", &z64, &c),
+        ],
+        "a confirmed 64-zero deletion and creation; not a refused deletion or a null no-op"
+    );
+}
+
+#[test]
+fn only_an_all_zero_id_of_a_real_width_is_null() {
+    let refs = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(r, s)| ((*r).to_owned(), (*s).to_owned()))
+            .collect()
+    };
+    let before = refs(&[("refs/heads/a", A), ("refs/heads/b", A)]);
+    let after = BTreeMap::new();
+    // 39 and 41 zeros are not null ids, so asking for them is never a deletion.
+    let commands = [
+        RefCommand::new(A, &"0".repeat(39), "refs/heads/a"),
+        RefCommand::new(A, &"0".repeat(41), "refs/heads/b"),
+    ];
+    assert_eq!(moved(&commands, &before, &after), vec![]);
+}
+
 #[tokio::test]
 async fn list_refs_reads_a_bare_repository() {
     let dir = tempfile::tempdir().unwrap();

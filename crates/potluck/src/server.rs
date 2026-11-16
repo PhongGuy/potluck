@@ -267,9 +267,11 @@ impl Running {
     /// Stops accepting, waits for in-flight requests, takes both sockets out of LISTEN, then waits
     /// for git reapers, push records and workspace creates and deletes, closes the database,
     /// removes the socket file, and releases the lock while leaving `server.lock` in place.
-    /// Waiting for a hung git can take up to `--git-max-runtime`. The port, the admin socket and
-    /// the lock are free when it returns, even if a child forked meanwhile still holds duplicates
-    /// of their fds.
+    /// Each git child stops at `--git-max-runtime-secs`, but a request or task runs its children
+    /// in turn, so a hung push can hold shutdown for up to three limits (a ref listing,
+    /// receive-pack, a ref listing) and a workspace create for one per git step. The port, the
+    /// admin socket and the lock are free when it returns, even if a child forked meanwhile still
+    /// holds duplicates of their fds.
     pub async fn shutdown(self) {
         // Open streams would hold the graceful drain forever; end them before stopping.
         self.notices.close_all();

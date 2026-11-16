@@ -36,6 +36,17 @@ pub enum ServerError {
         /// The data directory from `--data`.
         path: PathBuf,
     },
+    /// The filesystem refused the lock on `<data>/server.lock`, as NFS without lock support does.
+    #[error(
+        "cannot take the lock on {path}; keep the data directory on a local filesystem that supports file locks"
+    )]
+    DataDirLock {
+        /// The lock file whose lock was refused.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: io::Error,
+    },
     /// The TCP listen address could not be bound.
     #[error("cannot listen on {addr}")]
     Listen {
@@ -187,16 +198,23 @@ fn lock_data_dir(config: &Config) -> Result<File, ServerError> {
         .truncate(false)
         .write(true)
         .open(&path)
-        .map_err(|source| ServerError::DataDir {
-            path: path.clone(),
-            source,
-        })?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => Err(ServerError::DataDirInUse {
+        .map_err(|source| ServerError::DataDir { path, source })?;
+    file.try_lock()
+        .map(|()| file)
+        .map_err(|err| lock_refused(err, config))
+}
+
+/// Why the lock was not taken: another holder is `DataDirInUse`, a filesystem that cannot
+/// lock at all is `DataDirLock`.
+fn lock_refused(err: TryLockError, config: &Config) -> ServerError {
+    match err {
+        TryLockError::WouldBlock => ServerError::DataDirInUse {
             path: config.data().to_path_buf(),
-        }),
-        Err(TryLockError::Error(source)) => Err(ServerError::DataDir { path, source }),
+        },
+        TryLockError::Error(source) => ServerError::DataDirLock {
+            path: config.lock_path(),
+            source,
+        },
     }
 }
 
@@ -518,6 +536,36 @@ mod tests {
         assert!(
             refused,
             "the port still queued connections while shutdown waited"
+        );
+    }
+
+    #[test]
+    fn a_filesystem_that_cannot_lock_is_reported_as_a_lock_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_for(dir.path());
+        let nolck = std::io::Error::from(rustix::io::Errno::NOLCK);
+        let err = lock_refused(std::fs::TryLockError::Error(nolck), &config);
+        let ServerError::DataDirLock { path, .. } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(path, &config.lock_path());
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!(
+                "cannot take the lock on {}",
+                config.lock_path().display()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("local filesystem that supports file locks"),
+            "{text}"
+        );
+        assert!(!text.contains("cannot create"), "{text}");
+        let busy = lock_refused(std::fs::TryLockError::WouldBlock, &config);
+        assert!(
+            matches!(busy, ServerError::DataDirInUse { .. }),
+            "got {busy:?}"
         );
     }
 

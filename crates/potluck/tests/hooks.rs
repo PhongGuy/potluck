@@ -335,8 +335,19 @@ async fn a_busy_engine_answers_503_after_the_queue_wait() {
     std::fs::create_dir_all(&home).unwrap();
     let url = server.url("core", "api");
     let work = work_tree(&home, "work");
-    // The hook holds the only slot for 4 s; a concurrent ls-remote waits 300 ms and gets 503.
-    write_hook(&hooks_dir(&server), "sleep 4\nexit 0");
+    // A running hook means receive-pack holds the only slot, so the hook announces itself with a
+    // marker and holds on until the test releases it; a concurrent ls-remote then waits 300 ms
+    // and gets 503. The loop is bounded so a failed test cannot leave the hook running.
+    let started = server.dir.path().join("hook-started");
+    let release = Release(server.dir.path().join("hook-release"));
+    write_hook(
+        &hooks_dir(&server),
+        &format!(
+            "touch '{}'\ni=0\nwhile [ ! -e '{}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\nexit 0",
+            started.display(),
+            release.0.display()
+        ),
+    );
     let push_home = home.clone();
     let push_url = url.clone();
     let push = std::thread::spawn(move || {
@@ -347,11 +358,48 @@ async fn a_busy_engine_answers_503_after_the_queue_wait() {
             &["push", "-q", &push_url, "main"],
         )
     });
-    std::thread::sleep(Duration::from_millis(1500));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hook never started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let stderr = failed(git(&home, Some(&home), Some(TOKEN), &["ls-remote", &url]));
     assert!(stderr.contains("503"), "{stderr}");
+    release.now();
     ok(push.join().unwrap());
-    ok(git(&home, Some(&home), Some(TOKEN), &["ls-remote", &url]));
+    // The reaper returns the slot after git's group is gone and the refs are listed, which can
+    // trail the client's exit, so the slot coming back is awaited with a deadline.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let out = git(&home, Some(&home), Some(TOKEN), &["ls-remote", &url]);
+        if out.status.success() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the slot never came back: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The hook's release file, created on `now` or on drop so a panicking test frees the hook.
+struct Release(std::path::PathBuf);
+
+impl Release {
+    fn now(&self) {
+        std::fs::write(&self.0, b"").expect("release the hook");
+    }
+}
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

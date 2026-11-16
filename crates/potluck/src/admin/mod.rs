@@ -158,7 +158,7 @@ pub(crate) struct Context<'a> {
 
 impl Context<'_> {
     /// Sends one request expecting a status in `ok`, then prints the body as pretty JSON or
-    /// as the table `rows` renders from it.
+    /// as the table `rows` renders from it. A body that is not a JSON object is `Malformed`.
     pub(crate) async fn call(
         &mut self,
         verb: Verb,
@@ -167,13 +167,44 @@ impl Context<'_> {
         ok: &[u16],
         rows: impl FnOnce(&Value) -> String,
     ) -> Result<(), AdminError> {
-        let Some(value) = self.fetch(verb, target, body, ok).await? else {
+        let response = self.send(verb, target, body).await?;
+        let status = response.status();
+        let Some(value) = expect(response, ok)? else {
             return Ok(());
         };
+        if !value.is_object() {
+            return Err(AdminError::Malformed { status });
+        }
         let text = if self.json {
             pretty(&value)?
         } else {
             rows(&value)
+        };
+        self.write(&text)
+    }
+
+    /// As `call`, for a list: a body that is not a JSON array is `Malformed`, and `rows`
+    /// renders its elements.
+    pub(crate) async fn call_list(
+        &mut self,
+        verb: Verb,
+        target: &str,
+        body: Option<&str>,
+        ok: &[u16],
+        rows: impl FnOnce(&[Value]) -> String,
+    ) -> Result<(), AdminError> {
+        let response = self.send(verb, target, body).await?;
+        let status = response.status();
+        let Some(value) = expect(response, ok)? else {
+            return Ok(());
+        };
+        let Some(items) = value.as_array() else {
+            return Err(AdminError::Malformed { status });
+        };
+        let text = if self.json {
+            pretty(&value)?
+        } else {
+            rows(items)
         };
         self.write(&text)
     }
@@ -186,6 +217,16 @@ impl Context<'_> {
         body: Option<&str>,
         ok: &[u16],
     ) -> Result<Option<Value>, AdminError> {
+        expect(self.send(verb, target, body).await?, ok)
+    }
+
+    /// Connects on first use, then sends one request and returns the raw response.
+    async fn send(
+        &mut self,
+        verb: Verb,
+        target: &str,
+        body: Option<&str>,
+    ) -> Result<ApiResponse, AdminError> {
         let client = match &mut self.client {
             Some(client) => client,
             None => {
@@ -198,11 +239,10 @@ impl Context<'_> {
                 self.client.insert(client)
             }
         };
-        let response = client
+        client
             .send(verb, target, body)
             .await
-            .map_err(|source| AdminError::Transport { source })?;
-        expect(response, ok)
+            .map_err(|source| AdminError::Transport { source })
     }
 
     /// Sends one bodiless request expecting 204: a person gets `line`, JSON mode stays silent.

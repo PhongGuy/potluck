@@ -77,10 +77,8 @@ pub enum TokenCmd {
 pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminError> {
     match cmd {
         UserCmd::List => {
-            cx.call(Verb::Get, "/api/v1/users", None, &[200], |v| {
-                output::users(v.as_array().map(Vec::as_slice).unwrap_or_default())
-            })
-            .await
+            cx.call_list(Verb::Get, "/api/v1/users", None, &[200], output::users)
+                .await
         }
         UserCmd::Create {
             username,
@@ -168,12 +166,12 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
         }
         UserCmd::Tokens { username } => {
             let username = segment("username", &username)?;
-            cx.call(
+            cx.call_list(
                 Verb::Get,
                 &format!("/api/v1/users/{username}/tokens"),
                 None,
                 &[200],
-                |v| output::tokens(v.as_array().map(Vec::as_slice).unwrap_or_default()),
+                output::tokens,
             )
             .await
         }

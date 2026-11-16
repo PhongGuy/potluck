@@ -3,6 +3,7 @@
 use axum::Router;
 use axum::routing::get;
 use potluck::admin::AdminError;
+use serde_json::json;
 
 use crate::common::admin;
 
@@ -37,6 +38,31 @@ async fn an_empty_or_non_json_2xx_body_is_malformed() {
             &["team", "list"],
             &["--json", "team", "list"],
             &["user", "list"],
+        ],
+    )
+    .await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_2xx_body_of_the_wrong_json_shape_is_malformed() {
+    let dir = tempfile::tempdir().unwrap();
+    let router = Router::new()
+        .route(
+            "/api/v1/workspaces",
+            get(|| async { axum::Json(json!({})) }),
+        )
+        .route(
+            "/api/v1/workspaces/core/api",
+            get(|| async { axum::Json(json!([])) }),
+        );
+    let server = stand_in(dir.path(), router);
+    assert_malformed(
+        dir.path(),
+        &[
+            &["workspace", "list"],
+            &["--json", "workspace", "list"],
+            &["workspace", "show", "core/api"],
         ],
     )
     .await;

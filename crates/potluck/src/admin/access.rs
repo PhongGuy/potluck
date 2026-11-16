@@ -113,10 +113,8 @@ pub(crate) async fn run_grant(cmd: GrantCmd, cx: &mut Context<'_>) -> Result<(),
     match cmd {
         GrantCmd::List { workspace } => {
             let target = format!("/api/v1/workspaces/{workspace}/grants");
-            cx.call(Verb::Get, &target, None, &[200], |v| {
-                output::grants(v.as_array().map(Vec::as_slice).unwrap_or_default())
-            })
-            .await
+            cx.call_list(Verb::Get, &target, None, &[200], output::grants)
+                .await
         }
         GrantCmd::Set {
             workspace,
@@ -147,10 +145,8 @@ pub(crate) async fn run_override(cmd: OverrideCmd, cx: &mut Context<'_>) -> Resu
     match cmd {
         OverrideCmd::List { workspace } => {
             let target = format!("/api/v1/workspaces/{workspace}/overrides");
-            cx.call(Verb::Get, &target, None, &[200], |v| {
-                output::overrides(v.as_array().map(Vec::as_slice).unwrap_or_default())
-            })
-            .await
+            cx.call_list(Verb::Get, &target, None, &[200], output::overrides)
+                .await
         }
         OverrideCmd::Arm {
             workspace,

@@ -116,10 +116,8 @@ pub enum WorkspaceCmd {
 pub(crate) async fn run_team(cmd: TeamCmd, cx: &mut Context<'_>) -> Result<(), AdminError> {
     match cmd {
         TeamCmd::List => {
-            cx.call(Verb::Get, "/api/v1/teams", None, &[200], |v| {
-                output::teams(v.as_array().map(Vec::as_slice).unwrap_or_default())
-            })
-            .await
+            cx.call_list(Verb::Get, "/api/v1/teams", None, &[200], output::teams)
+                .await
         }
         TeamCmd::Create { slug, name } => {
             // The server requires a name; the slug stands in when none is given.
@@ -151,10 +149,8 @@ pub(crate) async fn run_workspace(
                 Some(kind) => format!("/api/v1/workspaces?kind={}", segment("kind", &kind)?),
                 None => "/api/v1/workspaces".to_owned(),
             };
-            cx.call(Verb::Get, &target, None, &[200], |v| {
-                output::workspaces(v.as_array().map(Vec::as_slice).unwrap_or_default())
-            })
-            .await
+            cx.call_list(Verb::Get, &target, None, &[200], output::workspaces)
+                .await
         }
         WorkspaceCmd::Create {
             team,

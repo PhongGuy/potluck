@@ -233,7 +233,7 @@ impl Repos {
 
     /// Spawns `command` in its own process group, feeds it `stdin` and collects its output. A git
     /// still running `max_runtime` after spawn has its whole group killed and reaped: `Overran`.
-    async fn run(
+    pub(super) async fn run(
         &self,
         mut command: Command,
         path: &Path,
@@ -274,7 +274,7 @@ impl Repos {
         let Ok((fed, read_out, read_err, status)) = bounded else {
             kill_and_reap(&mut child, group).await;
             guard.disarm();
-            tracing::warn!(step, limit = ?self.max_runtime, "git ran past its run limit while making a repository; killed its process group");
+            tracing::warn!(step, limit = ?self.max_runtime, "git ran past its run limit; killed its process group");
             return Err(RepoError::Overran {
                 path: path.to_path_buf(),
                 step,

@@ -37,7 +37,7 @@ pub(super) async fn stream(
         .notices()
         .subscribe(ws.id(), user.user().id(), user.token_id());
     let repos = state.git().repos();
-    let refs = list_refs(repos.git(), &repos.path(&team_slug, &slug))
+    let refs = list_refs(repos, &repos.path(&team_slug, &slug))
         .await
         .map_err(|err| {
             tracing::error!(id = ws.id(), error = %err, "listing a workspace's refs failed");

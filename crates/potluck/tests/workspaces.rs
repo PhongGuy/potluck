@@ -8,8 +8,8 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::common::{
-    SEED_COMMIT, TestApp, api_admin, api_team, api_user, call, git, hanging_git, ok, parse_config,
-    repo_path, test_app,
+    SEED_COMMIT, TestApp, api_admin, api_team, api_user, call, git, hanging_git, hung_git_is_gone,
+    ok, parse_config, repo_path, test_app,
 };
 
 /// `git --git-dir=<repo> <args>`; panics with stderr on failure.
@@ -243,9 +243,8 @@ async fn a_hung_seed_git_is_killed_at_the_run_limit_and_does_not_hold_shutdown()
         !repo_path(&data, "acme", "ws").exists(),
         "the half-made repository is removed"
     );
-    let pid = std::fs::read_to_string(dir.path().join("hung.pid")).unwrap();
     assert!(
-        !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists(),
-        "the hung git is killed and reaped"
+        hung_git_is_gone(dir.path()),
+        "the hung git and its group child are killed and reaped"
     );
 }

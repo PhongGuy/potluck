@@ -9,7 +9,15 @@ use potluck::git::push::{
 };
 use potluck::slug::Slug;
 
-use crate::common::{git, ok, work_tree};
+use std::path::Path;
+use std::time::Duration;
+
+use potluck::server::{Running, start};
+
+use crate::common::{
+    api_admin, api_team, api_workspace, failed, git, hanging_git, hanging_git_on_call,
+    hung_git_is_gone, ok, parse_config, work_tree, write_hook,
+};
 
 const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -142,7 +150,7 @@ async fn list_refs_reads_a_bare_repository() {
         .await
         .unwrap();
     assert_eq!(
-        list_refs(repos.git(), &bare).await.unwrap(),
+        list_refs(&repos, &bare).await.unwrap(),
         BTreeMap::new(),
         "fresh repository"
     );
@@ -164,15 +172,124 @@ async fn list_refs_reads_a_bare_repository() {
             "main:refs/tags/v1",
         ],
     ));
-    let refs = list_refs(repos.git(), &bare).await.unwrap();
+    let refs = list_refs(&repos, &bare).await.unwrap();
     assert_eq!(refs.get("refs/heads/main"), Some(&tip));
     assert_eq!(refs.get("refs/tags/v1"), Some(&tip));
     assert_eq!(refs.len(), 2);
-    let err = list_refs(repos.git(), &dir.path().join("nope.git"))
+    let err = list_refs(&repos, &dir.path().join("nope.git"))
         .await
         .unwrap_err();
     assert!(
         matches!(err, potluck::git::GitError::Failed { .. }),
         "got {err:?}"
+    );
+}
+
+/// A server on `data` running `wrapper` as git with a 1 s run limit, workspace `core/api` and an
+/// accepting hook. Returns the server, an admin token and the workspace's git URL.
+async fn limited_server(data: &Path, wrapper: &Path) -> (Running, String, String) {
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data.to_str().unwrap(),
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--git",
+        wrapper.to_str().unwrap(),
+        "--git-max-runtime-secs",
+        "1",
+    ])
+    .unwrap();
+    let running = start(&config).await.unwrap();
+    let api = format!("http://{}/api/v1", running.http_addr());
+    let root = api_admin(running.db()).await;
+    api_team(&api, &root, "core").await;
+    api_workspace(&api, &root, "core", "api", false).await;
+    write_hook(&data.join("hooks"), "exit 0");
+    let url = format!("http://{}/git/core/api.git", running.http_addr());
+    (running, root, url)
+}
+
+/// Pushes `main` of a fresh work tree under `home` to `url` as `token`, off the runtime.
+async fn push_main(home: std::path::PathBuf, token: String, url: String) -> std::process::Output {
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    let push = tokio::task::spawn_blocking(move || {
+        git(
+            &home,
+            Some(&work),
+            Some(&token),
+            &["push", "-q", &url, "main"],
+        )
+    });
+    // Capped well past the 1 s limit, so a regression fails instead of hanging.
+    tokio::time::timeout(Duration::from_secs(15), push)
+        .await
+        .expect("the push outlived the git run limit")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_ref_listing_before_receive_pack_fails_the_push_at_the_run_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let wrapper = hanging_git(dir.path(), "for-each-ref");
+    let (running, root, url) = limited_server(&dir.path().join("data"), &wrapper).await;
+    let output = failed(push_main(dir.path().join("home"), root, url).await);
+    assert!(output.contains("500"), "{output}");
+    let stopped = tokio::time::timeout(Duration::from_secs(15), running.shutdown()).await;
+    assert!(stopped.is_ok(), "shutdown waited on the hung ref listing");
+    assert!(
+        hung_git_is_gone(dir.path()),
+        "the hung for-each-ref and its group child are killed and reaped"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_ref_listing_after_receive_pack_does_not_hold_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    // The first listing is the baseline before receive-pack; the second, in the reaper, hangs.
+    let wrapper = hanging_git_on_call(dir.path(), "for-each-ref", 2);
+    let (running, root, url) = limited_server(&dir.path().join("data"), &wrapper).await;
+    ok(push_main(dir.path().join("home"), root, url).await);
+    let stopped = tokio::time::timeout(Duration::from_secs(15), running.shutdown()).await;
+    assert!(
+        stopped.is_ok(),
+        "shutdown waited on the hung ref listing in the reaper"
+    );
+    assert!(
+        hung_git_is_gone(dir.path()),
+        "the hung for-each-ref and its group child are killed and reaped"
+    );
+}
+
+#[tokio::test]
+async fn list_refs_kills_a_git_past_the_run_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = Repos::new(dir.path().join("repos"), PathBuf::from("git"))
+        .init(
+            &Slug::parse("core").unwrap(),
+            &Slug::parse("api").unwrap(),
+            "main",
+        )
+        .await
+        .unwrap();
+    let wrapper = hanging_git(dir.path(), "for-each-ref");
+    let hung =
+        Repos::new(dir.path().join("repos"), wrapper).with_max_runtime(Duration::from_millis(500));
+    let began = std::time::Instant::now();
+    let err = list_refs(&hung, &bare).await.unwrap_err();
+    assert!(
+        matches!(err, potluck::git::GitError::Overran { service: "git-for-each-ref", limit } if limit == Duration::from_millis(500)),
+        "got {err:?}"
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "took {:?}",
+        began.elapsed()
+    );
+    assert!(
+        hung_git_is_gone(dir.path()),
+        "the hung for-each-ref and its group child are killed and reaped"
     );
 }

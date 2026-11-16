@@ -128,8 +128,9 @@ async fn rpc(
 /// record itself is spawned rather than awaited.
 fn observer(state: &AppState, ctx: PushContext) -> PushObserver {
     let state = state.clone();
+    let tasks = state.git().tasks().clone();
     Box::new(move |moves: Vec<RefMove>| {
-        tokio::spawn(crate::api::pushes::record(state, ctx, moves));
+        tasks.spawn(crate::api::pushes::record(state, ctx, moves));
     })
 }
 

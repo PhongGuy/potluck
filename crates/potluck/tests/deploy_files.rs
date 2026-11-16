@@ -172,6 +172,7 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
     assert_eq!(
         headings,
         [
+            "## Status",
             "## Run it",
             "## First admin",
             "## Reverse proxy and TLS",
@@ -200,6 +201,10 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
         "podman exec potluck potluck admin user create alice --server-admin",
         "docker exec potluck potluck admin user create alice --server-admin",
         "--password-stdin",
+        "not ready for use yet",
+        "https://github.com/PhongGuy/apinata",
+        "https://github.com/PhongGuy/dbento",
+        "podman build -t ghcr.io/phongguy/potluck:latest .",
     ] {
         assert!(readme.contains(needle), "README lacks {needle:?}");
     }

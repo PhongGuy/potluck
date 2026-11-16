@@ -16,6 +16,24 @@ tag_version() {
   echo "${BASH_REMATCH[1]}"
 }
 
+# Refuse TAG unless its version is the [workspace.package] version in TOML, so a
+# tag can never publish an image whose binaries report another version.
+check_version() {
+  local tag=$1 toml=$2 version workspace
+  version=$(tag_version "$tag") || return 1
+  # tomllib reads the table itself, so decoy version keys elsewhere never match.
+  if ! workspace=$(python3 -I -c 'import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    print(tomllib.load(f)["workspace"]["package"]["version"])' "$toml" 2>/dev/null); then
+    echo "release.sh: no [workspace.package] version in $toml" >&2
+    return 1
+  fi
+  if [[ $version != "$workspace" ]]; then
+    echo "release.sh: tag $tag is version $version but $toml has version $workspace" >&2
+    return 1
+  fi
+}
+
 # Write OUT, the release manifest for TAG whose image index is DIGEST. Both are
 # checked before OUT is touched, so a refusal leaves no file behind.
 release_manifest() {
@@ -153,6 +171,10 @@ main() {
     version)
       (($# == 2)) || usage
       tag_version "$2" || exit 1
+      ;;
+    check-version)
+      (($# == 2 || $# == 3)) || usage
+      check_version "$2" "${3:-$(dirname "$0")/../Cargo.toml}" || exit 1
       ;;
     manifest)
       (($# == 4)) || usage

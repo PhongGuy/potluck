@@ -381,3 +381,81 @@ fn manifest_refuses_a_malformed_digest_or_tag_and_writes_nothing() {
         assert!(!out_file.exists(), "{tag} {digest:?} wrote a manifest");
     }
 }
+
+/// A Cargo.toml whose only `[workspace.package]` version is 1.2.0, with decoy versions in
+/// the other sections a careless reader could pick up.
+const WORKSPACE_TOML: &str = "[package]\nname = \"decoy\"\nversion = \"9.9.9\"\n\n\
+[workspace]\nmembers = [\"a\"]\n\n\
+[workspace.package]\nedition = \"2024\"\nversion = \"1.2.0\" # the release version\n\n\
+[workspace.dependencies]\nversion = \"7.7.7\"\nfoo = { version = \"=3.0.0\" }\n";
+
+#[test]
+fn check_version_accepts_only_the_workspace_package_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml = dir.path().join("Cargo.toml");
+    fs::write(&toml, WORKSPACE_TOML).unwrap();
+    let toml = toml.to_str().unwrap();
+    let ok = release_sh(dir.path(), &["check-version", "v1.2.0", toml]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&ok.stdout), "");
+    for tag in ["v1.2.1", "v1.2.0-rc.1", "v9.9.9", "v7.7.7", "v3.0.0"] {
+        let out = release_sh(dir.path(), &["check-version", tag, toml]);
+        assert_eq!(out.status.code(), Some(1), "{tag} is refused");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains(tag) && err.contains("1.2.0"),
+            "{tag}: the refusal names both versions: {err}"
+        );
+    }
+}
+
+#[test]
+fn check_version_refuses_a_bad_tag_or_a_missing_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let no_version = dir.path().join("no-version.toml");
+    fs::write(
+        &no_version,
+        "[workspace]\nmembers = [\"a\"]\n\n[workspace.package]\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    let missing = dir.path().join("missing.toml");
+    let good = dir.path().join("Cargo.toml");
+    fs::write(&good, WORKSPACE_TOML).unwrap();
+    for (tag, toml, named) in [
+        ("v1.2.0", &no_version, "no-version.toml"),
+        ("v1.2.0", &missing, "missing.toml"),
+        ("release-1", &good, "release-1"),
+    ] {
+        let out = release_sh(dir.path(), &["check-version", tag, toml.to_str().unwrap()]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{tag} {} is refused",
+            toml.display()
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(named),
+            "{named}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn check_version_defaults_to_the_repository_cargo_toml() {
+    // Run from an unrelated directory: the default path follows the script, not the cwd.
+    let dir = tempfile::tempdir().unwrap();
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let ok = release_sh(dir.path(), &["check-version", &tag]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let off = release_sh(dir.path(), &["check-version", "v999.0.0"]);
+    assert_eq!(off.status.code(), Some(1));
+}

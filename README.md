@@ -153,6 +153,8 @@ docker compose pull
 docker compose up -d
 ```
 
+Outside a container, restart the server after replacing its binary. The push check runs the binary at the path the server started from, so a binary replaced while the server runs checks pushes for an older server until the restart. The container commands above restart it for you.
+
 ## Backups
 
 Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. The one-liners, `compose.yaml` and the Quadlet unit all use that same volume name. Stop the server so the copy is consistent, export the volume, then start it again.

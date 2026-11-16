@@ -1,10 +1,10 @@
 //! Grants, the highest-grant rule, and the armed-override lookup.
 
-use potluck::db::Db;
 use potluck::db::accounts::{NewUser, UserRecord};
 use potluck::db::grants::{GrantRecord, Subject};
 use potluck::db::teams::TeamRecord;
 use potluck::db::workspaces::{NewWorkspace, WorkspaceRecord};
+use potluck::db::{Db, DbError};
 use potluck::role::Role;
 use potluck::slug::Slug;
 
@@ -398,5 +398,43 @@ async fn list_grants_skips_a_grant_whose_subject_is_gone() {
         f.db.list_grants(f.api.id()).await.unwrap(),
         [GrantRecord::new(user("bob"), Role::Read)],
         "the dangling user and team grants are skipped, not an error"
+    );
+}
+
+/// Only a hand edit or a future migration can store a role outside read, write and admin; the
+/// lookups refuse it instead of reading it as `read`, even beside a valid higher grant.
+#[tokio::test]
+async fn an_unknown_grant_role_is_an_error_not_read() {
+    let (d, f) = fx().await;
+    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
+    f.db.put_grant(f.api.id(), team("core"), Role::Admin)
+        .await
+        .unwrap();
+    let c = raw(&d);
+    c.pragma_update(None, "ignore_check_constraints", true)
+        .unwrap();
+    for ws in [f.api.id(), f.docs.id()] {
+        c.execute(
+            "INSERT INTO grants (workspace_id, subject_kind, subject_id, role) \
+             VALUES (?1, 'user', ?2, 'owner')",
+            [ws, f.bob.id()],
+        )
+        .unwrap();
+    }
+    drop(c);
+    for (ws, what) in [(f.docs.id(), "alone"), (f.api.id(), "beside a team admin")] {
+        let err = f.db.role_for(ws, f.bob.id()).await.expect_err(what);
+        assert!(matches!(err, DbError::Sqlite(_)), "{what}: {err:?}");
+        assert!(err.to_string().contains("role"), "{what}: {err}");
+    }
+    let err =
+        f.db.workspaces_for_user(f.bob.id())
+            .await
+            .expect_err("held list");
+    assert!(matches!(err, DbError::Sqlite(_)), "{err:?}");
+    assert_eq!(
+        f.db.role_for(f.api.id(), f.ann.id()).await.unwrap(),
+        None,
+        "a user the bad rows do not reach is unaffected"
     );
 }

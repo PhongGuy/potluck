@@ -459,3 +459,28 @@ fn check_version_defaults_to_the_repository_cargo_toml() {
     let off = release_sh(dir.path(), &["check-version", "v999.0.0"]);
     assert_eq!(off.status.code(), Some(1));
 }
+
+/// The Downloads line naming the signed manifest the server's update check fetches.
+const MANIFEST_LINE: &str = "The signed release manifest, `potluck-release.json` with its minisign signature `potluck-release.json.sig`, is attached below; servers verify the signature before they announce a release.";
+
+#[test]
+fn downloads_name_the_signed_manifest_for_final_and_pre_releases() {
+    for tag in ["v0.2.0", "v0.2.0-rc.1"] {
+        let dir = repo_with(&["feat: x"], tag);
+        let (out, text) = notes(dir.path(), tag);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let downloads = text
+            .split("## Downloads\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .unwrap_or_else(|| panic!("no Downloads section: {text}"));
+        assert!(
+            downloads.lines().any(|l| l == MANIFEST_LINE),
+            "{tag}: {downloads}"
+        );
+    }
+}

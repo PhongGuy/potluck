@@ -135,6 +135,8 @@ release_notes() {
 
 Pinned: \`$IMAGE@$digest\`
 
+The signed release manifest, \`potluck-release.json\` with its minisign signature \`potluck-release.json.sig\`, is attached below; servers verify the signature before they announce a release.
+
 NOTES
     # latest moves only on a final vX.Y.Z, as the release workflow's merge job tags it.
     local pull="Pull with \`podman pull $IMAGE:$tag\` or \`docker pull $IMAGE:$tag\`"

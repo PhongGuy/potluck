@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
 
 use crate::api::{Actor, AppState};
-use crate::config::Config;
+use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
 use crate::notices::Notices;
 
@@ -66,13 +66,18 @@ pub enum ServerError {
     /// Opening or migrating `server.db` failed.
     #[error(transparent)]
     Db(#[from] DbError),
+    /// The configuration cannot be served, such as an admin socket path too long to bind.
+    #[error(transparent)]
+    Config(#[from] ConfigError),
 }
 
-/// Creates `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, locks `<data>/server.lock`
+/// Refuses an admin socket path too long to bind before creating anything, then creates
+/// `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, locks `<data>/server.lock`
 /// for the life of the server, sweeps what killed pushes left in its repositories, installs the
 /// pre-receive hook, opens and migrates the database, binds `config.listen()` and the admin
 /// socket, and serves the API on both.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
+    config.check_admin_socket()?;
     for path in [
         config.data().to_path_buf(),
         config.repos_dir(),

@@ -236,6 +236,8 @@ podman run -d --name potluck -p 127.0.0.1:8080:8080 -v ~/potluck-data:/data:Z -e
 
 The `:Z` suffix relabels the directory for SELinux hosts (Fedora, RHEL); it is harmless elsewhere. With docker, run `sudo chown 65532:65532 ~/potluck-data` instead and use `docker run` with the same `-v` option, keeping `:Z` only on SELinux hosts.
 
+The data directory must be on a local filesystem that supports file locks. On NFS without lock support, `serve` stops with "cannot take the lock on .../server.lock".
+
 ## License
 
 Licensed under either of MIT or Apache-2.0, at your option.

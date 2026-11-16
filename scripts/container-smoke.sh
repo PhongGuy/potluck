@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds the Potluck image and runs the spec's smoke test on 127.0.0.1: health over TCP,
-# `potluck health-check` inside the container, the non-root uid, git present, and the
-# HEALTHCHECK stored in the image. Usage: scripts/container-smoke.sh [build|smoke|all]
-# with ENGINE=podman|docker (auto-detected) and IMAGE (required for smoke; for build, the
-# tag to build, which is kept). Only `all` without IMAGE removes the image it built.
+# `potluck health-check` inside the container, the non-root uid, git present, the HEALTHCHECK
+# stored in the image, tini as PID 1 reaping orphans, and a graceful stop on SIGTERM.
+# Usage: scripts/container-smoke.sh [build|smoke|all] with ENGINE=podman|docker
+# (auto-detected) and IMAGE (required for smoke; for build, the tag to build, which is kept).
+# Only `all` without IMAGE removes the image it built.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -76,6 +77,18 @@ smoke() {
     run healthcheck run "$name" || fail "podman healthcheck run"
   fi
   run exec "$name" test -S /data/admin.sock || fail "admin.sock not under /data"
+  # tini is PID 1: a backgrounded child of an exec'd shell is re-parented to it and must not
+  # stay a zombie once it exits.
+  [[ $(run exec "$name" cat /proc/1/comm) == tini ]] || fail "PID 1 is not tini"
+  run exec "$name" sh -c 'sleep 0.2 & exit 0'
+  sleep 1
+  local zombies
+  zombies=$(run exec "$name" sh -c 'n=0; for f in /proc/[0-9]*/stat; do [ "$(cut -d" " -f3 "$f" 2> /dev/null)" = Z ] && n=$((n + 1)); done; echo $n')
+  [[ $zombies == 0 ]] || fail "$zombies zombie processes in the container"
+  # stop sends SIGTERM to PID 1; tini forwards it, so potluck exits well before the 20 s kill.
+  local stopped=$SECONDS
+  run stop -t 20 "$name" > /dev/null
+  ((SECONDS - stopped < 15)) || fail "stop took $((SECONDS - stopped)) s: SIGTERM did not reach potluck"
   echo "smoke: ok ($engine, $IMAGE on 127.0.0.1:$port)"
 }
 

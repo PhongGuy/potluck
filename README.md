@@ -10,6 +10,8 @@ Potluck is not ready for use yet, and may still change in ways that break existi
 
 The image will be `ghcr.io/phongguy/potluck:latest`, built for amd64 and arm64. It runs as a non-root user (uid 65532) and keeps everything it stores in one volume mounted at `/data`.
 
+The image starts potluck under tini, a minimal init that reaps stray processes and passes stop signals on, so it needs no `--init` flag or `init: true`.
+
 Until the first release, build the image yourself from a checkout of this repository, under the same name so the one-command and Compose examples below find it locally:
 
 ```sh

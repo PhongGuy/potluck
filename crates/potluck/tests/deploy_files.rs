@@ -412,3 +412,21 @@ fn the_smoke_test_checks_reaping_and_a_graceful_stop() {
         assert!(script.contains(needle), "smoke script lacks {needle:?}");
     }
 }
+
+#[test]
+fn the_readme_and_the_notices_cover_tini() {
+    let notices = fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
+    for needle in [
+        "## tini",
+        "Expat",
+        "/usr/share/doc/tini/copyright",
+        "https://deb.debian.org/debian/pool/main/t/tini/",
+    ] {
+        assert!(notices.contains(needle), "notices lack {needle:?}");
+    }
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let run_it = &readme[readme.find("## Run it").unwrap()..readme.find("## First admin").unwrap()];
+    for needle in ["tini", "--init"] {
+        assert!(run_it.contains(needle), "Run it lacks {needle:?}");
+    }
+}

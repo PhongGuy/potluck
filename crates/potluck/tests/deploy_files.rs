@@ -280,3 +280,84 @@ fn build_mode_tags_the_given_image_and_keeps_it() {
         "build mode removed its image: {calls}"
     );
 }
+
+const PODMAN_CLEAR: &str =
+    "podman run --rm -v potluck-data:/data debian:trixie-slim find /data -mindepth 1 -delete";
+const DOCKER_CLEAR: &str =
+    "docker run --rm -v potluck-data:/data debian:trixie-slim find /data -mindepth 1 -delete";
+const PODMAN_IMPORT: &str = "podman volume import potluck-data potluck-data.tar";
+const DOCKER_EXTRACT: &str = "debian:trixie-slim tar -C /data -xf /backup/potluck-data.tar";
+
+/// The bodies of the fenced code blocks in the README's `## Backups` section.
+fn backup_blocks(readme: &str) -> Vec<&str> {
+    let start = readme.find("## Backups").expect("Backups section");
+    let rest = &readme[start..];
+    let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+    section.split("```").skip(1).step_by(2).collect()
+}
+
+/// True when every needle occurs in `text`, each after the end of the one before it.
+fn in_order(text: &str, needles: &[&str]) -> bool {
+    let mut from = 0;
+    for needle in needles {
+        match text[from..].find(needle) {
+            Some(at) => from += at + needle.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// Import and `tar -x` merge into what the volume holds, so a stale `server.db-wal` would be
+/// replayed over the restored database; every restore must empty the volume first.
+#[test]
+fn the_readme_restores_only_into_an_emptied_volume() {
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let blocks = backup_blocks(&readme);
+    let restores: Vec<&str> = blocks
+        .iter()
+        .copied()
+        .filter(|b| b.contains(PODMAN_IMPORT) || b.contains(DOCKER_EXTRACT))
+        .collect();
+    assert_eq!(
+        restores.len(),
+        3,
+        "one restore block each for podman, docker and Quadlet: {blocks:#?}"
+    );
+    for block in &restores {
+        let (clear, write) = if block.contains(PODMAN_IMPORT) {
+            (PODMAN_CLEAR, PODMAN_IMPORT)
+        } else {
+            (DOCKER_CLEAR, DOCKER_EXTRACT)
+        };
+        assert!(
+            in_order(block, &[clear, write]),
+            "restore writes before emptying the volume: {block}"
+        );
+    }
+    for sequence in [
+        [
+            "podman stop potluck",
+            PODMAN_CLEAR,
+            PODMAN_IMPORT,
+            "podman start potluck",
+        ],
+        [
+            "docker stop potluck",
+            DOCKER_CLEAR,
+            DOCKER_EXTRACT,
+            "docker start potluck",
+        ],
+        [
+            "systemctl --user stop potluck",
+            PODMAN_CLEAR,
+            PODMAN_IMPORT,
+            "systemctl --user start potluck",
+        ],
+    ] {
+        assert!(
+            restores.iter().any(|b| in_order(b, &sequence)),
+            "no restore block runs {sequence:?}"
+        );
+    }
+}

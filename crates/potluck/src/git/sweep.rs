@@ -321,7 +321,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_dropped_leave_keeps_the_repository_closed_until_its_sweep_ends() {
-        use std::io::Write;
         use std::time::Duration;
         let dir = tempfile::tempdir().unwrap();
         let repo = locked_repo(dir.path());
@@ -339,14 +338,9 @@ mod tests {
         assert!(leaving.is_err(), "the sweep is stalled on the FIFO");
         let entered = tokio::time::timeout(Duration::from_millis(300), writers.enter(&repo)).await;
         // Unstall the sweep before asserting: the runtime's shutdown waits for blocking tasks.
-        // Read-write opens a FIFO without waiting for a reader, so this never blocks.
-        let mut fifo = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&keep)
-            .unwrap();
-        fifo.write_all(b"receive-pack 1 on host\n").unwrap();
-        drop(fifo);
+        // A write-only open waits for the sweep's reader, so the bytes cannot be lost.
+        let fifo = keep.clone();
+        std::thread::spawn(move || std::fs::write(fifo, b"receive-pack 1 on host\n"));
         assert!(
             entered.is_err(),
             "enter waits while the dropped leave's sweep still runs"

@@ -410,7 +410,8 @@ async fn overran(
 struct GroupKill(Option<rustix::process::Pid>);
 
 impl GroupKill {
-    /// Stops the drop from signalling; call only once the leader has been reaped.
+    /// Stops the drop from signalling. Call it once git is reaped or its group already killed,
+    /// so a reused pid is never signalled for the first time.
     fn disarm(mut self) {
         self.0 = None;
     }

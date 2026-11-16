@@ -152,14 +152,16 @@ impl Db {
         .await
     }
 
-    /// The workspace's grants: teams first, then users, each by name.
+    /// The workspace's grants: teams first, then users, each by name. A grant whose subject no
+    /// longer exists is left out.
     pub async fn list_grants(&self, workspace_id: i64) -> Result<Vec<GrantRecord>, DbError> {
         self.call(move |conn| {
             let mut stmt = conn.prepare(
                 "SELECT g.subject_kind, COALESCE(u.username, t.slug), g.role FROM grants g \
                  LEFT JOIN users u ON g.subject_kind = 'user' AND u.id = g.subject_id \
                  LEFT JOIN teams t ON g.subject_kind = 'team' AND t.id = g.subject_id \
-                 WHERE g.workspace_id = ?1 ORDER BY g.subject_kind, 2",
+                 WHERE g.workspace_id = ?1 AND COALESCE(u.username, t.slug) IS NOT NULL \
+                 ORDER BY g.subject_kind, 2",
             )?;
             let grants = stmt
                 .query_map([workspace_id], |row| {

@@ -7,6 +7,9 @@ use potluck::kinds::{Change, Code, Finding, RULES_ABI, RuleSet, SeedFile};
 pub enum Act {
     Panic,
     PanicInPathRule,
+    PanicInReads,
+    BadPathRuleName,
+    Plain,
     BadRuleName,
     Detail(&'static str),
     Elsewhere,
@@ -46,16 +49,22 @@ impl RuleSet for TestRules {
             !(self.act == Act::PanicInPathRule && path.ends_with(".t")),
             "PANIC-SECRET-TEXT in path_rule"
         );
-        None
+        (self.act == Act::BadPathRuleName && path.ends_with(".t"))
+            .then(|| Finding::new(Code::SecretValue, "Bad Path", path))
     }
     fn reads(&self, path: &str) -> bool {
+        assert!(
+            !(self.act == Act::PanicInReads && path.ends_with(".t")),
+            "PANIC-SECRET-TEXT in reads"
+        );
         path.ends_with(".t")
     }
     fn check(&self, change: &Change<'_>) -> Vec<Finding> {
         let p = change.path();
         match self.act {
             Act::Panic => panic!("PANIC-SECRET-TEXT in check"),
-            Act::PanicInPathRule => Vec::new(),
+            Act::PanicInPathRule | Act::PanicInReads | Act::BadPathRuleName => Vec::new(),
+            Act::Plain => vec![Finding::new(Code::SecretValue, "plain", p)],
             Act::BadRuleName => vec![Finding::new(Code::SecretValue, "Bad Rule", p)],
             Act::Detail(d) => {
                 vec![Finding::new(Code::SecretValue, "with_detail", p).with_detail(d)]

@@ -630,7 +630,7 @@ fn a_rule_set_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
     let tip = s.stage_commit("latin-1 name");
     let found = scan_with(
         &env(None),
-        Some(&rules(Act::Detail("k"))),
+        Some(&rules(Act::Plain)),
         &[update(&tip, "refs/heads/main")],
         &git_for(&s),
     )
@@ -639,7 +639,7 @@ fn a_rule_set_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
     report(&found, &mut out).unwrap();
     assert_eq!(
         String::from_utf8(out).unwrap(),
-        "potluck-reject secret_value refs/heads/main caf%E9.t with_detail\n"
+        "potluck-reject secret_value refs/heads/main caf%E9.t plain\n"
     );
 }
 
@@ -694,6 +694,33 @@ fn panic_child() {
     let tip = s.stage_commit("t");
     assert!(matches!(
         scan_rules(&s, &rules(Act::Panic), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_panic_in_reads_fails_closed() {
+    // A blob the server already has is content-checked at a new path only if the kind reads it,
+    // so copying a published `.t` file is what makes the scan ask `reads`.
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    s.commit("a");
+    s.publish("main");
+    s.write("b.t", b"x\n");
+    let tip = s.stage_commit("copy");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::PanicInReads), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_misnamed_path_rule_finding_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::BadPathRuleName), &tip),
         Err(ScanError::Rules)
     ));
 }

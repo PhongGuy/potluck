@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Release helpers for the release workflow: the version named by a tag, and the
-# draft release notes for the container image.
+# Release helpers for the release workflow: the version named by a tag, the
+# release manifest, and the draft release notes for the container image.
 set -euo pipefail
 
 readonly IMAGE=ghcr.io/phongguy/potluck
+readonly RELEASES=https://github.com/PhongGuy/potluck/releases/tag
 
 # Print X.Y.Z[-pre] for a tag vX.Y.Z[-pre] whose core numbers are written
 # without leading zeros; any other tag is refused.
@@ -13,6 +14,43 @@ tag_version() {
     return 1
   fi
   echo "${BASH_REMATCH[1]}"
+}
+
+# Refuse TAG unless its version is the [workspace.package] version in TOML, so a
+# tag can never publish an image whose binaries report another version.
+check_version() {
+  local tag=$1 toml=$2 version workspace
+  version=$(tag_version "$tag") || return 1
+  # Named here, since the read below discards python3's own stderr.
+  if ! command -v python3 > /dev/null; then
+    echo "release.sh: check-version needs python3" >&2
+    return 1
+  fi
+  # tomllib reads the table itself, so decoy version keys elsewhere never match.
+  if ! workspace=$(python3 -I -c 'import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    print(tomllib.load(f)["workspace"]["package"]["version"])' "$toml" 2>/dev/null); then
+    echo "release.sh: no [workspace.package] version in $toml" >&2
+    return 1
+  fi
+  if [[ $version != "$workspace" ]]; then
+    echo "release.sh: tag $tag is version $version but $toml has version $workspace" >&2
+    return 1
+  fi
+}
+
+# Write OUT, the release manifest for TAG whose image index is DIGEST. Both are
+# checked before OUT is touched, so a refusal leaves no file behind.
+release_manifest() {
+  local tag=$1 digest=$2 out=$3 version
+  version=$(tag_version "$tag") || return 1
+  if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "release.sh: '$digest' is not a sha256 image digest" >&2
+    return 1
+  fi
+  jq -n --arg version "$version" --arg image "$IMAGE" --arg digest "$digest" \
+    --arg published "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg notes_url "$RELEASES/$tag" \
+    '{$version, $image, $digest, $published, $notes_url}' >"$out"
 }
 
 # Print the user-facing feat and fix subjects in RANGE, oldest first, as
@@ -64,7 +102,7 @@ generated_changes() {
 # Write OUT, the draft notes for TAG in REPO (owner/name) whose image index is
 # DIGEST: the intro, What's Changed since the previous vX.Y.Z tag, the image to
 # pull, and the install and update notes. Runs in the repository, which needs
-# full history and tags. The attestation check is named only when ATTESTED=true.
+# full history and tags. The attestation checks are named only when ATTESTED=true.
 release_notes() {
   local tag=$1 repo=$2 digest=$3 out=$4
   local prev="" range=$tag first=true subjects changes feats fixes
@@ -102,6 +140,8 @@ release_notes() {
 
 Pinned: \`$IMAGE@$digest\`
 
+The signed release manifest, \`potluck-release.json\` with its minisign signature \`potluck-release.json.sig\`, is attached below; servers verify the signature before they announce a release.
+
 NOTES
     # latest moves only on a final vX.Y.Z, as the release workflow's merge job tags it.
     local pull="Pull with \`podman pull $IMAGE:$tag\` or \`docker pull $IMAGE:$tag\`"
@@ -112,6 +152,7 @@ NOTES
     fi
     if [[ ${ATTESTED:-} == true ]]; then
       echo "Check that this project's release workflow built it with \`gh attestation verify oci://$IMAGE:$tag --repo $repo\`."
+      echo "Check the signed release manifest the same way with \`gh attestation verify potluck-release.json --repo $repo\` and \`gh attestation verify potluck-release.json.sig --repo $repo\`."
     fi
     cat <<'NOTES'
 
@@ -129,7 +170,7 @@ NOTES
 }
 
 usage() {
-  echo "usage: release.sh version TAG | notes TAG REPO DIGEST OUT" >&2
+  echo "usage: release.sh version TAG | check-version TAG [CARGO_TOML] | manifest TAG DIGEST OUT | notes TAG REPO DIGEST OUT" >&2
   exit 2
 }
 
@@ -138,6 +179,14 @@ main() {
     version)
       (($# == 2)) || usage
       tag_version "$2" || exit 1
+      ;;
+    check-version)
+      (($# == 2 || $# == 3)) || usage
+      check_version "$2" "${3:-$(dirname "$0")/../Cargo.toml}" || exit 1
+      ;;
+    manifest)
+      (($# == 4)) || usage
+      release_manifest "$2" "$3" "$4" || exit 1
       ;;
     notes)
       (($# == 5)) || usage

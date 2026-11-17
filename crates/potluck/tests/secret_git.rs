@@ -313,8 +313,58 @@ fn blob_at_finds_a_root_file_and_nothing_else() {
     );
     assert_eq!(g.blob_at(&sha(&tip), "missing.yml").unwrap(), None);
     assert_eq!(
+        g.blob_at(&sha(&tip), "missing dir/x.yml").unwrap(),
+        None,
+        "git's missing line for a path with a space"
+    );
+    assert_eq!(
         g.blob_at(&sha(&tip), "dir.yml").unwrap(),
         None,
         "a tree is not a blob"
+    );
+}
+
+#[test]
+fn tip_diff_reads_a_gitlink_side_as_absent() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let seed = s.commit("seed");
+    s.write("sub", b"was a file\n");
+    let old = s.commit("old");
+    s.remove("sub");
+    s.git(Some(&s.work), &["rm", "-q", "--cached", "sub"]);
+    s.git(
+        Some(&s.work),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{seed},sub"),
+        ],
+    );
+    // Commit the index as it stands: `Scratch::commit` runs `add -A`, which drops a gitlink
+    // that has no work-tree directory.
+    s.git(Some(&s.work), &["commit", "-q", "-m", "new"]);
+    let new = s.work_git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        s.work_git(&["ls-tree", &new, "sub"]),
+        format!("160000 commit {seed}\tsub")
+    );
+    s.publish("main");
+    let got = git_for(&s).tip_diff(&sha(&old), &sha(&new)).unwrap();
+    let view: Vec<(String, Option<String>, Option<String>)> = got
+        .iter()
+        .map(|e| {
+            (
+                e.path_lossy(),
+                e.old().map(|x| x.as_str().to_owned()),
+                e.new().map(|x| x.as_str().to_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        [("sub".to_owned(), Some(s.blob(&old, "sub")), None)],
+        "a blob replaced by a gitlink has no blob on the new side"
     );
 }

@@ -378,6 +378,10 @@ impl Git {
         let input = format!("{rev}:{path}\n").into_bytes();
         let out = self.run(SUB, &[OsStr::new("--batch-check")], Some(input))?;
         let line = out.split(|&b| b == b'\n').next().unwrap_or_default();
+        // git echoes the asked name before ` missing`, and the path may hold spaces.
+        if line.ends_with(b" missing") {
+            return Ok(None);
+        }
         match parse_header(line) {
             Some(Header::Found { sha, kind, .. }) => Ok((kind == b"blob").then_some(sha)),
             Some(Header::Missing { .. }) => Ok(None),

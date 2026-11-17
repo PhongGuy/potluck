@@ -368,3 +368,47 @@ fn tip_diff_reads_a_gitlink_side_as_absent() {
         "a blob replaced by a gitlink has no blob on the new side"
     );
 }
+
+#[test]
+fn tip_diff_reads_a_gitlink_on_the_old_side_as_absent() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let seed = s.commit("seed");
+    s.git(
+        Some(&s.work),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{seed},sub"),
+        ],
+    );
+    // Commit the index as it stands: `Scratch::commit` runs `add -A`, which drops a gitlink
+    // that has no work-tree directory.
+    s.git(Some(&s.work), &["commit", "-q", "-m", "old"]);
+    let old = s.work_git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        s.work_git(&["ls-tree", &old, "sub"]),
+        format!("160000 commit {seed}\tsub")
+    );
+    s.git(Some(&s.work), &["rm", "-q", "--cached", "sub"]);
+    s.write("sub", b"now a file\n");
+    let new = s.commit("new");
+    s.publish("main");
+    let got = git_for(&s).tip_diff(&sha(&old), &sha(&new)).unwrap();
+    let view: Vec<(String, Option<String>, Option<String>)> = got
+        .iter()
+        .map(|e| {
+            (
+                e.path_lossy(),
+                e.old().map(|x| x.as_str().to_owned()),
+                e.new().map(|x| x.as_str().to_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        [("sub".to_owned(), None, Some(s.blob(&new, "sub")))],
+        "a gitlink replaced by a blob has no blob on the old side"
+    );
+}

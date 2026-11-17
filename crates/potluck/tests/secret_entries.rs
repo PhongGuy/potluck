@@ -208,6 +208,7 @@ fn a_path_with_a_newline_and_a_space_survives_and_a_gitlink_is_skipped() {
     s.write("README", b"r\n");
     let root = s.commit("seed");
     s.write("a\nb c.txt", b"x\n");
+    s.git(Some(&s.work), &["add", "-A"]);
     s.git(
         Some(&s.work),
         &[
@@ -217,7 +218,15 @@ fn a_path_with_a_newline_and_a_space_survives_and_a_gitlink_is_skipped() {
             &format!("160000,{root},sub"),
         ],
     );
-    let tip = s.commit("odd names");
+    // Commit the index as it stands: `Scratch::commit` runs `add -A`, which drops a gitlink
+    // that has no work-tree directory.
+    s.git(Some(&s.work), &["commit", "-q", "-m", "odd names"]);
+    let tip = s.work_git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        s.work_git(&["ls-tree", &tip, "sub"]),
+        format!("160000 commit {root}\tsub"),
+        "the gitlink is in the commit"
+    );
     s.stage("main");
     let git = git_for(&s);
     let tree = git.tree_entries(&sha(&tip)).unwrap();

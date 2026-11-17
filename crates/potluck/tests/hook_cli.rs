@@ -203,26 +203,38 @@ fn a_token_in_a_commit_message_is_reported_at_a_slash() {
 }
 
 #[test]
-fn a_ref_name_that_is_not_utf8_is_judged_on_content_and_reported_byte_exact() {
+fn a_ref_name_that_is_not_utf8_refuses_the_push_before_any_scan() {
     let s = Scratch::new();
     s.write("README", b"r\n");
     let clean = s.stage_commit("clean");
-    let mut input = format!("{ZERO} {clean} ").into_bytes();
-    input.extend_from_slice(b"refs/heads/caf\xe9\n");
-    let out = run_hook_bytes(&s, &[], &input);
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert!(out.stderr.is_empty(), "a clean push is silent");
+    let caf = |old: &str, new: &str| {
+        let mut l = format!("{old} {new} ").into_bytes();
+        l.extend_from_slice(b"refs/heads/caf\xe9\n");
+        l
+    };
+    // A creation, a deletion, and a creation beside a valid ref: each push is refused whole.
+    let mut beside = line(&clean).into_bytes();
+    beside.extend(caf(ZERO, &clean));
+    for input in [caf(ZERO, &clean), caf(&clean, ZERO), beside] {
+        let out = run_hook_bytes(&s, &[], &input);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert_eq!(stderr(&out), "ref name is not valid UTF-8\n");
+        assert!(out.stdout.is_empty(), "nothing on stdout");
+    }
+    // No git runs: a missing git gives the same line, not a potluck-error.
+    let out = run_hook_bytes(
+        &s,
+        &[("POTLUCK_GIT", "/nonexistent/git")],
+        &caf(ZERO, &clean),
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "ref name is not valid UTF-8\n");
+    // Secrets on such a ref add no potluck-reject lines: nothing is scanned.
     s.write("creds.txt", AWS);
     let bad = s.stage_commit("bad");
-    let mut input = format!("{ZERO} {bad} ").into_bytes();
-    input.extend_from_slice(b"refs/heads/caf\xe9\n");
-    let out = run_hook_bytes(&s, &[], &input);
+    let out = run_hook_bytes(&s, &[], &caf(ZERO, &bad));
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
-    assert_eq!(
-        stderr(&out),
-        "potluck-reject secret_pattern refs/heads/caf%E9 creds.txt aws\n",
-        "the reject line carries the exact ref bytes, percent-encoded"
-    );
+    assert_eq!(stderr(&out), "ref name is not valid UTF-8\n");
 }
 
 #[test]

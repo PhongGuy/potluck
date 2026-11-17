@@ -351,6 +351,17 @@ impl GitEngine {
         }
     }
 
+    /// A process slot, however long it takes to come free: every holder is bounded by
+    /// `max_runtime`. `None` only if the slots were closed, which the engine never does.
+    pub(crate) async fn slot(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.permits).acquire_owned().await.ok()
+    }
+
+    /// How long each git child may run from spawn.
+    pub(crate) fn max_runtime(&self) -> Duration {
+        self.max_runtime
+    }
+
     /// A process slot, or `Busy` once `queue_wait` has passed without one.
     async fn acquire(&self) -> Result<OwnedSemaphorePermit, GitError> {
         tokio::time::timeout(self.queue_wait, Arc::clone(&self.permits).acquire_owned())
@@ -2151,5 +2162,109 @@ mod tests {
                 "observe={observe}: the failed push ran the deferred sweep"
             );
         }
+    }
+
+    /// Every log line from any thread since the first call, for tests that read a line a
+    /// blocking thread wrote; tests tell their lines apart by a workspace id of their own.
+    fn global_logs() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+        use std::sync::{Arc, Mutex, OnceLock};
+        static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+        Arc::clone(LOGS.get_or_init(|| {
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let sink = Arc::clone(&logs);
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .with_writer(move || SharedSink(Arc::clone(&sink)))
+                .finish();
+            tracing::subscriber::set_global_default(subscriber).unwrap();
+            logs
+        }))
+    }
+
+    struct SharedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An engine whose git is the script `body` and whose limits are `limits`; no repository.
+    fn recheck_engine(dir: &Path, limits: GitLimits, body: &str) -> GitEngine {
+        let git = dir.join("recheck-git");
+        write_script(&git, &format!("#!/bin/sh\n{body}"), 0o755);
+        GitEngine::new(
+            Repos::new(dir.join("repos"), git),
+            dir.join("hooks"),
+            dir.join("tmp"),
+            1024 * 1024,
+            limits,
+        )
+    }
+
+    /// An update with a baseline, so the re-check's first step is a git call.
+    fn moved_update() -> Vec<crate::secret_check::git::RefUpdate> {
+        let line = format!("{} {} refs/heads/main", "a".repeat(40), "b".repeat(40));
+        vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()]
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_admin_recheck_waits_for_a_process_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran.log");
+        let body = format!("echo \"$1\" >> '{}'\nexit 128\n", ran.display());
+        let engine = Arc::new(recheck_engine(dir.path(), limits(1, 100), &body));
+        let held = engine.slot().await.unwrap();
+        let rules = crate::kinds::by_name("apinata").unwrap();
+        let task = {
+            let engine = Arc::clone(&engine);
+            let repo = dir.path().join("repo");
+            tokio::spawn(async move {
+                crate::api::pushes::recheck(&engine, 1, "admin", rules, repo, moved_update()).await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!ran.exists(), "no git runs while the only slot is held");
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(20), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(ran.exists(), "git runs once the slot frees");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_admin_recheck_stops_at_the_run_limit_and_warns() {
+        const WORKSPACE: i64 = 919_198;
+        let logs = global_logs();
+        let dir = tempfile::tempdir().unwrap();
+        let short = limits(1, 100).with_max_runtime(Duration::from_secs(1));
+        let engine = recheck_engine(dir.path(), short, "exec sleep 30\n");
+        let rules = crate::kinds::by_name("apinata").unwrap();
+        let started = std::time::Instant::now();
+        let repo = dir.path().join("repo");
+        let done = tokio::time::timeout(
+            Duration::from_secs(20),
+            crate::api::pushes::recheck(&engine, WORKSPACE, "admin", rules, repo, moved_update()),
+        )
+        .await;
+        assert!(done.is_ok(), "the re-check returned");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("could not re-check an accepted admin push")
+                    && l.contains(&format!("workspace_id={WORKSPACE}"))),
+            "{text}"
+        );
     }
 }

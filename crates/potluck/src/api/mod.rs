@@ -16,7 +16,7 @@ use crate::update::UpdateChecker;
 
 mod actor;
 pub mod auth;
-pub mod client_ip;
+pub(crate) mod client_ip;
 pub mod credential;
 pub mod error;
 mod events;

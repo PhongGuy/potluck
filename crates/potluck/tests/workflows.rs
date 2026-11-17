@@ -29,8 +29,8 @@ fn workflows() -> Vec<(PathBuf, String)> {
 fn ci_declares_the_gate_zizmor_and_container_jobs() {
     let text = fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
     let names: Vec<String> = jobs(&text).into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["gate", "zizmor", "container"]);
-    let (_, container) = &jobs(&text)[2];
+    assert_eq!(names, ["gate", "rules", "zizmor", "container"]);
+    let (_, container) = &jobs(&text)[3];
     assert!(container.contains("runs-on: ubuntu-26.04\n"), "{container}");
     assert!(
         container.contains("scripts/container-smoke.sh"),
@@ -60,6 +60,26 @@ fn the_gate_checks_the_public_api_after_the_tests() {
     assert!(
         !text.contains("RUSTC_BOOTSTRAP:"),
         "ci.yml sets RUSTC_BOOTSTRAP as an env key"
+    );
+}
+
+#[test]
+fn the_rules_job_tests_pinned_rules_crates_and_the_gate_checks_potluck_kinds_api() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
+    let (name, rules) = &jobs(&text)[1];
+    assert_eq!(name, "rules");
+    assert!(
+        rules.contains("scripts/rules-crates.sh test Cargo.lock"),
+        "{rules}"
+    );
+    let (_, gate) = &jobs(&text)[0];
+    assert!(
+        gate.contains("cargo rustdoc -p potluck-kind --lib --locked"),
+        "{gate}"
+    );
+    assert!(
+        gate.contains("scripts/check-public-api.sh target/doc/potluck_kind.json"),
+        "{gate}"
     );
 }
 

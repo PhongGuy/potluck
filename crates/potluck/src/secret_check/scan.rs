@@ -6,9 +6,10 @@
 use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Write;
 
-use potluck_kind::Role;
+use potluck_kind::{Code, Role};
 
 use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
+use crate::role::Role as AccessRole;
 use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
 
 /// What the server told the hook through its environment.
@@ -18,28 +19,43 @@ pub struct HookEnv {
     kind: Option<String>,
     import: bool,
     override_id: Option<String>,
+    role: AccessRole,
 }
 
 impl HookEnv {
-    /// Reads `POTLUCK_KIND` (non-empty), `POTLUCK_IMPORT` (`1` means import) and
-    /// `POTLUCK_OVERRIDE` (non-empty); an unset variable and an empty one mean the same.
+    /// Reads `POTLUCK_KIND` (non-empty), `POTLUCK_IMPORT` (`1` means import),
+    /// `POTLUCK_OVERRIDE` (non-empty) and `POTLUCK_ROLE`; an unset variable and an empty one mean
+    /// the same, and an unset or unknown role is `write`.
     pub fn from_env() -> HookEnv {
         let text = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
+        let role = text("POTLUCK_ROLE")
+            .as_deref()
+            .and_then(AccessRole::parse)
+            .unwrap_or(AccessRole::Write);
         HookEnv::new(
             text("POTLUCK_KIND").as_deref(),
             text("POTLUCK_IMPORT").as_deref() == Some("1"),
             text("POTLUCK_OVERRIDE").as_deref(),
         )
+        .with_role(role)
     }
 
-    /// Builds the environment from its parts; an empty kind or override counts as none.
+    /// Builds the environment from its parts; an empty kind or override counts as none, and the
+    /// pusher's role is `write` until `with_role` says otherwise.
     pub fn new(kind: Option<&str>, import: bool, override_id: Option<&str>) -> HookEnv {
         let non_empty = |v: Option<&str>| v.filter(|s| !s.is_empty()).map(str::to_owned);
         HookEnv {
             kind: non_empty(kind),
             import,
             override_id: non_empty(override_id),
+            role: AccessRole::Write,
         }
+    }
+
+    /// The same environment with the pusher's role set to `role`.
+    #[must_use]
+    pub fn with_role(self, role: AccessRole) -> HookEnv {
+        HookEnv { role, ..self }
     }
 
     /// The workspace kind, if one was given.
@@ -55,6 +71,11 @@ impl HookEnv {
     /// The admin override id, if one applies to this push.
     pub fn override_id(&self) -> Option<&str> {
         self.override_id.as_deref()
+    }
+
+    /// The pusher's role on the workspace.
+    pub fn role(&self) -> AccessRole {
+        self.role
     }
 }
 
@@ -143,6 +164,13 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// `scan` with the rule set given rather than looked up, and no override check. Every call into
 /// `rules` is panic-guarded; a panic, an `abi()` other than `RULES_ABI` (checked before any git
 /// call) or a finding whose rule is empty or not `[a-z0-9_]` fails with `ScanError::Rules`.
+/// After the history passes, every update whose old and new values both peel to commits gets a
+/// tip pass: `check` with `Change::tip` at each path between the two tips that the kind `reads`.
+/// Its findings sort after the ref's other hits, and one is dropped when its path already has a
+/// rejection anywhere in the push. When `env` names a kind and a rule set is given, every created
+/// or format-touching update to a commit gets a format pass: its `format_file` must hold a format
+/// the rule set lists, or the ref gets one `format_unsupported` finding, sorted last. A
+/// `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
     rules: Option<&dyn RuleSet>,
@@ -155,6 +183,7 @@ pub fn scan_with(
         return Err(ScanError::Rules);
     }
     let kind = GuardedRules(rules);
+    let role = kind_role(env.role());
     // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
     // path-rule hits first, then its content hits, each in entry order.
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
@@ -218,7 +247,7 @@ pub fn scan_with(
             }
         }
     }
-    content_pass(git, kind, updates, candidates, &mut hits)?;
+    content_pass(git, kind, role, updates, candidates, &mut hits)?;
     git.for_each_message(&messages, |sha, message| {
         if let (Some(&(ri, mi)), Some(finding)) =
             (message_slots.get(sha), generic::content_rule("/", message))
@@ -229,8 +258,201 @@ pub fn scan_with(
             ));
         }
     })?;
+    for (ri, update) in updates.iter().enumerate() {
+        for (ei, r) in tip_pass(kind, update, role, git)? {
+            hits.push(((ri, 3, ei), r));
+        }
+    }
+    // Only the server names a kind, so a rule set injected without one is never format-checked.
+    if env.kind().is_some() {
+        for (ri, update) in updates.iter().enumerate() {
+            if let Some(r) = format_pass(kind, update, git)? {
+                hits.push(((ri, 4, 0), r));
+            }
+        }
+    }
+    if role == Role::Admin {
+        hits.retain(|(_, r)| r.finding.code() != Code::SafetyRelaxation);
+    }
+    // A tip finding repeats nothing: a path refused by any other pass, or by an earlier ref's
+    // tip pass, is already in the output once.
+    let mut refused: HashSet<Vec<u8>> = hits
+        .iter()
+        .filter(|((_, pass, _), _)| *pass != 3)
+        .map(|(_, r)| r.path.clone())
+        .collect();
     hits.sort_by_key(|(key, _)| *key);
+    hits.retain(|((_, pass, _), r)| *pass != 3 || refused.insert(r.path.clone()));
     Ok(hits.into_iter().map(|(_, r)| r).collect())
+}
+
+/// The safety relaxations a push the server has already accepted would carry for a non-admin:
+/// the tip pass alone over `updates`, as `Role::Write`, keeping only `safety_relaxation`
+/// findings, in update order. Fails like `scan_with` on a git error or a failing rule set.
+pub fn accepted_relaxations(
+    rules: &dyn RuleSet,
+    updates: &[RefUpdate],
+    git: &Git,
+) -> Result<Vec<Rejection>, ScanError> {
+    if guarded(|| rules.abi())? != RULES_ABI {
+        return Err(ScanError::Rules);
+    }
+    let mut found = Vec::new();
+    for update in updates {
+        for (_, r) in tip_pass(GuardedRules(Some(rules)), update, Role::Write, git)? {
+            if r.finding.code() == Code::SafetyRelaxation {
+                found.push(r);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// The kind's view of the pusher's role.
+fn kind_role(role: AccessRole) -> Role {
+    match role {
+        AccessRole::Read => Role::Read,
+        AccessRole::Write => Role::Write,
+        AccessRole::Admin => Role::Admin,
+    }
+}
+
+/// Judges one update old tip against new tip: `check` with `Change::tip` at every path the
+/// kind `reads` among those `tip_diff` lists, as `(entry index, rejection)` in entry order. A
+/// delete, a created ref, an old or new value that is not a commit, and a push without a rule
+/// set yield nothing; a peel failure is a git error. Every finding is kept, whatever `role`.
+fn tip_pass(
+    kind: GuardedRules<'_>,
+    update: &RefUpdate,
+    role: Role,
+    git: &Git,
+) -> Result<Vec<(usize, Rejection)>, ScanError> {
+    if kind.0.is_none() || update.is_delete() || update.old().is_zero() {
+        return Ok(Vec::new());
+    }
+    let (old, old_type) = git.peel(update.old())?;
+    let (new, new_type) = git.peel(update.new())?;
+    if old_type != ObjectType::Commit || new_type != ObjectType::Commit {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for (ei, entry) in git.tip_diff(&old, &new)?.into_iter().enumerate() {
+        let lossy = entry.path_lossy();
+        if (entry.old().is_some() || entry.new().is_some()) && kind.reads(&lossy)? {
+            entries.push((ei, entry, lossy));
+        }
+    }
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Both sides of a change are needed at once, so the blobs at or under the cap are held in
+    // memory for this ref; the read stays on the kind's paths.
+    let names: HashSet<Sha> = entries
+        .iter()
+        .flat_map(|(_, e, _)| e.old().into_iter().chain(e.new()))
+        .cloned()
+        .collect();
+    let names: Vec<Sha> = names.into_iter().collect();
+    let sizes = git.blob_sizes(&names)?;
+    let mut small = Vec::with_capacity(names.len());
+    for sha in names {
+        match sizes.get(&sha) {
+            Some(&n) if n <= generic::MAX_CONTENT_BYTES => small.push(sha),
+            Some(_) => {}
+            None => return Err(no_size()),
+        }
+    }
+    let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(small.len());
+    git.for_each_blob(&small, |sha, bytes| {
+        read.insert(sha.clone(), bytes.to_vec());
+    })?;
+    // A blob git sized but did not stream fails closed, like a missing size.
+    let side = |sha: Option<&Sha>| -> Result<Option<Blob<'_>>, ScanError> {
+        let Some(sha) = sha else { return Ok(None) };
+        match read.get(sha) {
+            Some(bytes) => Ok(Some(Blob::Bytes(bytes))),
+            None if sizes
+                .get(sha)
+                .is_some_and(|&n| n > generic::MAX_CONTENT_BYTES) =>
+            {
+                Ok(Some(Blob::TooLarge))
+            }
+            None => Err(no_size()),
+        }
+    };
+    let mut found = Vec::new();
+    for (ei, entry, lossy) in &entries {
+        let change = Change::tip(lossy, side(entry.old())?, side(entry.new())?, role);
+        if let Some(finding) = kind.check(&change)? {
+            found.push((*ei, rejection(update.name(), entry.path(), lossy, finding)));
+        }
+    }
+    Ok(found)
+}
+
+/// Judges the workspace format at one update's new tip: `None` when the format file holds a
+/// version the rule set lists, else a `format_unsupported` rejection at the format file. Only a
+/// created ref (or one whose old value is not a commit) and an update whose tip diff lists the
+/// format file are judged; a delete, a tree or blob target and a push without a rule set are not.
+fn format_pass(
+    kind: GuardedRules<'_>,
+    update: &RefUpdate,
+    git: &Git,
+) -> Result<Option<Rejection>, ScanError> {
+    let Some(rules) = kind.0 else { return Ok(None) };
+    if update.is_delete() {
+        return Ok(None);
+    }
+    let (new, new_type) = git.peel(update.new())?;
+    if new_type != ObjectType::Commit {
+        return Ok(None);
+    }
+    let file = guarded(|| rules.format_file())?;
+    // An update that leaves the file alone keeps the format it was accepted with before.
+    if !update.old().is_zero() {
+        let (old, old_type) = git.peel(update.old())?;
+        if old_type == ObjectType::Commit
+            && !git
+                .tip_diff(&old, &new)?
+                .iter()
+                .any(|e| e.path() == file.as_bytes())
+        {
+            return Ok(None);
+        }
+    }
+    // A missing file, a directory in its place and a file over the cap all read as no format.
+    let mut version = None;
+    if let Some(sha) = git.blob_at(&new, file)? {
+        let shas = std::slice::from_ref(&sha);
+        match git.blob_sizes(shas)?.get(&sha) {
+            Some(&n) if n <= generic::MAX_CONTENT_BYTES => {
+                let mut bytes = None;
+                git.for_each_blob(shas, |_, b| bytes = Some(b.to_vec()))?;
+                let bytes = bytes.ok_or_else(no_size)?;
+                version = guarded(|| rules.detect_format(&bytes))?;
+            }
+            Some(_) => {}
+            None => return Err(no_size()),
+        }
+    }
+    let formats = guarded(|| rules.formats())?;
+    if version.is_some_and(|v| formats.contains(&v.as_str())) {
+        return Ok(None);
+    }
+    let finding = Finding::new(Code::FormatUnsupported, "format_unsupported", file);
+    Ok(Some(Rejection::new(
+        update.name(),
+        file.as_bytes(),
+        finding,
+    )))
+}
+
+/// Every blob a pass reads is one git has just named, so a missing size or body fails closed.
+fn no_size() -> ScanError {
+    ScanError::Git(GitCmdError::Output {
+        subcommand: "cat-file",
+        detail: "no blob size for a candidate".to_owned(),
+    })
 }
 
 /// Streams every candidate blob at or under the cap once and runs the content rules for each
@@ -239,6 +461,7 @@ pub fn scan_with(
 fn content_pass(
     git: &Git,
     kind: GuardedRules<'_>,
+    role: Role,
     updates: &[RefUpdate],
     candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
     hits: &mut Vec<((usize, u8, usize), Rejection)>,
@@ -254,7 +477,7 @@ fn content_pass(
                 for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
                     let lossy = String::from_utf8_lossy(path);
                     let finding = if kind.reads(&lossy)? {
-                        kind.check(&Change::history(&lossy, Blob::TooLarge, Role::Write))?
+                        kind.check(&Change::history(&lossy, Blob::TooLarge, role))?
                     } else {
                         None
                     };
@@ -266,12 +489,7 @@ fn content_pass(
                     }
                 }
             }
-            None => {
-                return Err(ScanError::Git(GitCmdError::Output {
-                    subcommand: "cat-file",
-                    detail: "no blob size for a candidate".to_owned(),
-                }));
-            }
+            None => return Err(no_size()),
         }
     }
     // The blob stream cannot stop early, so the first rule-set failure is kept and every later
@@ -288,8 +506,7 @@ fn content_pass(
             let lossy = String::from_utf8_lossy(path);
             let finding = match &generic_hit {
                 Some(f) => Some(Finding::new(f.code(), f.rule(), &lossy)),
-                None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), Role::Write))
-                {
+                None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), role)) {
                     Ok(finding) => finding,
                     Err(e) => {
                         failed = Some(e);

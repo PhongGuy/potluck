@@ -4,9 +4,11 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use potluck::role::Role;
 use potluck::secret_check::git::{Git, RefUpdate};
 use potluck::secret_check::scan::{HookEnv, Rejection, ScanError, report, scan, scan_with};
 
+use crate::common::APINATA_FORMAT;
 use crate::common::scratch::Scratch;
 use crate::test_rules::{Act, TestRules, rules};
 
@@ -48,6 +50,7 @@ fn scan_main(s: &Scratch, env: &HookEnv, tip: &str) -> Vec<String> {
 #[test]
 fn a_clean_push_is_accepted_and_a_root_commit_with_a_secret_is_not() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("README", b"hello\n");
     let clean = s.stage_commit("one");
     assert!(scan_main(&s, &env(Some("apinata")), &clean).is_empty());
@@ -104,6 +107,7 @@ fn a_secret_added_then_removed_in_one_push_is_refused_but_passes_as_an_import() 
 #[test]
 fn import_mode_still_refuses_a_secret_in_the_tip_tree() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write(".env", b"KEY=fixture\n");
     s.write("environments/dev.yml", ENV_YML);
     let tip = s.stage_commit("imported");
@@ -119,6 +123,7 @@ fn import_mode_still_refuses_a_secret_in_the_tip_tree() {
 #[test]
 fn what_the_server_already_has_is_not_rescanned() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write(".env", b"KEY=fixture\n");
     s.write("creds.txt", AWS);
     s.commit("already there");
@@ -131,6 +136,7 @@ fn what_the_server_already_has_is_not_rescanned() {
 #[test]
 fn kind_rules_follow_the_kind_and_the_generic_set_runs_for_all() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("environments/dev.yml", ENV_YML);
     s.write(".env", b"x\n");
     let tip = s.stage_commit("env");
@@ -270,6 +276,7 @@ fn a_git_failure_is_an_error() {
 #[test]
 fn a_blob_new_to_the_repository_is_checked_under_every_ref_that_brings_it() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("notes/dev.yml", ENV_YML);
     s.commit("notes");
     s.branch("feat");
@@ -321,6 +328,7 @@ fn plk() -> String {
 #[test]
 fn a_token_in_a_commit_message_is_refused_at_slash_after_the_content_hits() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("README", b"r\n");
     let clean = s.stage_commit("a clean message");
     assert!(scan_main(&s, &env(Some("apinata")), &clean).is_empty());
@@ -433,6 +441,7 @@ fn logged(log: &std::path::Path) -> Vec<String> {
 #[test]
 fn an_old_blob_moved_under_environments_is_checked_there_and_only_there() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("notes/x.txt", ENV_YML);
     s.write("README", b"seed\n");
     let first = s.stage_commit("notes");
@@ -475,6 +484,7 @@ fn an_old_blob_moved_under_environments_is_checked_there_and_only_there() {
 #[test]
 fn a_rename_inside_environments_rechecks_a_clean_file_and_passes() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("environments/dev.yml", b"name: dev\n");
     s.commit("env");
     s.publish("main");
@@ -504,6 +514,7 @@ fn a_rename_inside_environments_rechecks_a_clean_file_and_passes() {
 #[test]
 fn the_same_blob_and_path_pushed_under_two_refs_is_reported_once() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     s.write("README", b"seed\n");
     s.commit("seed");
     s.publish("main");
@@ -534,6 +545,7 @@ fn the_same_blob_and_path_pushed_under_two_refs_is_reported_once() {
 #[test]
 fn an_environment_file_over_the_cap_is_refused_as_unparsable_and_other_big_files_pass() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     let big = vec![b'a'; 1024 * 1024 + 1];
     s.write("environments/big.yml", &big);
     s.write("notes/big.bin", &big);
@@ -559,6 +571,7 @@ fn an_environment_file_over_the_cap_is_refused_as_unparsable_and_other_big_files
 #[test]
 fn an_old_blob_over_the_cap_moved_under_environments_is_refused_as_unparsable() {
     let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
     let big = vec![b'a'; 1024 * 1024 + 1];
     s.write("notes/big.bin", &big);
     let first = s.stage_commit("big note");
@@ -738,4 +751,272 @@ fn a_rule_set_detail_reaches_the_rejection() {
     )
     .unwrap();
     assert_eq!(r[0].finding().detail(), Some("key.path"));
+}
+
+fn moved(old: &str, new: &str, name: &str) -> RefUpdate {
+    RefUpdate::parse_line(format!("{old} {new} {name}").as_bytes()).unwrap()
+}
+
+fn relax_rows(s: &Scratch, role: Role, u: RefUpdate) -> Vec<String> {
+    let e = HookEnv::new(None, false, None).with_role(role);
+    rows(&scan_with(&e, Some(&rules(Act::Relax)), &[u], &git_for(s)).unwrap())
+}
+
+const RELAXED: &[&str] = &["refs/heads/main a.t safety_relaxation relax_test"];
+
+#[test]
+fn a_relaxing_update_is_refused_for_write_and_passes_for_admin() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.stage_commit("relax");
+    assert_eq!(
+        relax_rows(&s, Role::Write, moved(&old, &new, "refs/heads/main")),
+        RELAXED
+    );
+    assert_eq!(
+        relax_rows(&s, Role::Read, moved(&old, &new, "refs/heads/main")),
+        RELAXED
+    );
+    assert!(relax_rows(&s, Role::Admin, moved(&old, &new, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_created_ref_has_no_baseline_and_a_delete_is_not_checked() {
+    let s = Scratch::new();
+    s.write("a.t", b"relaxed\n");
+    let tip = s.stage_commit("relaxed from the start");
+    assert!(relax_rows(&s, Role::Write, update(&tip, "refs/heads/main")).is_empty());
+    assert!(relax_rows(&s, Role::Write, moved(&tip, ZERO, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_relax_then_restore_in_one_push_is_judged_by_its_net_result() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    s.commit("relax");
+    s.write("a.t", b"strict\n");
+    let new = s.stage_commit("restore");
+    assert!(relax_rows(&s, Role::Write, moved(&old, &new, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_force_push_to_unrelated_history_is_judged_old_against_new() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.git(Some(&s.work), &["checkout", "-q", "--orphan", "other"]);
+    s.write("a.t", b"relaxed\n");
+    s.commit("unrelated");
+    let new = s.stage("other");
+    assert_eq!(
+        relax_rows(&s, Role::Write, moved(&old, &new, "refs/heads/main")),
+        RELAXED
+    );
+}
+
+#[test]
+fn a_fast_forward_onto_another_refs_commits_is_re_judged() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    let old = s.commit("seed");
+    s.publish("main");
+    s.branch("feat");
+    s.write("environments/dev.yml", ENV_YML);
+    let feat = s.commit("accepted on feat under an override");
+    s.publish("feat");
+    assert_eq!(
+        scan_main_moved(&s, &old, &feat),
+        ["refs/heads/main environments/dev.yml secret_value secret_value"],
+        "no new commits, so only the tip pass sees it"
+    );
+}
+
+fn scan_main_moved(s: &Scratch, old: &str, new: &str) -> Vec<String> {
+    rows(
+        &scan(
+            &env(Some("apinata")),
+            &[moved(old, new, "refs/heads/main")],
+            &git_for(s),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn a_tip_finding_at_a_path_another_ref_already_reported_prints_once() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    let old = s.commit("seed");
+    s.publish("main");
+    s.write("environments/dev.yml", ENV_YML);
+    let tip = s.stage_commit("secret");
+    let both = [
+        update(&tip, "refs/heads/feat"),
+        moved(&old, &tip, "refs/heads/main"),
+    ];
+    assert_eq!(
+        rows(&scan(&env(Some("apinata")), &both, &git_for(&s)).unwrap()),
+        ["refs/heads/feat environments/dev.yml secret_value secret_value"],
+        "feat brings the commit; main's tip finding at the same path is not repeated"
+    );
+}
+
+#[test]
+fn a_tip_finding_already_reported_by_the_history_pass_prints_once() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    let old = s.commit("seed");
+    s.publish("main");
+    s.write("environments/dev.yml", ENV_YML);
+    let new = s.stage_commit("secret");
+    assert_eq!(
+        scan_main_moved(&s, &old, &new),
+        ["refs/heads/main environments/dev.yml secret_value secret_value"]
+    );
+}
+
+fn fmt_rows(s: &Scratch, u: RefUpdate) -> Vec<String> {
+    rows(&scan(&env(Some("apinata")), &[u], &git_for(s)).unwrap())
+}
+
+const UNSUPPORTED: &[&str] =
+    &["refs/heads/main opencollection.yml format_unsupported format_unsupported"];
+
+#[test]
+fn a_created_ref_without_a_listed_format_is_refused() {
+    for file in [
+        None,
+        Some(&b"opencollection: 9.9.9\n"[..]),
+        Some(b"name: x\n"),
+    ] {
+        let s = Scratch::new();
+        s.write("README", b"r\n");
+        if let Some(bytes) = file {
+            s.write("opencollection.yml", bytes);
+        }
+        let tip = s.stage_commit("c");
+        assert_eq!(
+            fmt_rows(&s, update(&tip, "refs/heads/main")),
+            UNSUPPORTED,
+            "{file:?}"
+        );
+    }
+    let s = Scratch::new();
+    s.write("opencollection.yml/inner", b"x\n");
+    let tip = s.stage_commit("a directory, not a file");
+    assert_eq!(fmt_rows(&s, update(&tip, "refs/heads/main")), UNSUPPORTED);
+}
+
+#[test]
+fn an_update_is_re_judged_only_when_it_touches_the_format_file() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 0.9.0\n");
+    let old = s.commit("old format, accepted before");
+    s.publish("main");
+    s.write("README", b"r\n");
+    let untouched = s.stage_commit("leaves the file alone");
+    assert!(fmt_rows(&s, moved(&old, &untouched, "refs/heads/main")).is_empty());
+    s.write("opencollection.yml", b"opencollection: \"1.0.0\"\n");
+    let migrated = s.stage_commit("migrates");
+    assert!(fmt_rows(&s, moved(&old, &migrated, "refs/heads/main")).is_empty());
+    s.write("opencollection.yml", b"opencollection: 2.0.0\n");
+    let ahead = s.stage_commit("too new");
+    assert_eq!(
+        fmt_rows(&s, moved(&old, &ahead, "refs/heads/main")),
+        UNSUPPORTED
+    );
+}
+
+#[test]
+fn without_a_kind_in_the_env_no_format_pass_runs() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("c");
+    assert!(scan_main(&s, &env(None), &tip).is_empty());
+    let injected = scan_with(
+        &env(None),
+        Some(&rules(Act::Relax)),
+        &[update(&tip, "refs/heads/main")],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert!(
+        injected.is_empty(),
+        "an injected rule set with no kind env is not format-checked"
+    );
+}
+
+#[test]
+fn accepted_relaxations_reports_only_the_relaxing_updates() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.commit("relax");
+    s.publish("main");
+    let got = potluck::secret_check::scan::accepted_relaxations(
+        &rules(Act::Relax),
+        &[
+            moved(&old, &new, "refs/heads/main"),
+            update(&new, "refs/heads/copy"),
+        ],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(rows(&got), RELAXED);
+}
+
+#[test]
+fn an_accepted_relaxation_is_logged_with_workspace_ref_user_and_rule() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.commit("relax");
+    s.publish("main");
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            &rules(Act::Relax),
+            &[moved(&old, &new, "refs/heads/main")],
+            &git_for(&s),
+        );
+    });
+    let line = text
+        .lines()
+        .find(|l| l.contains("safety relaxation accepted"))
+        .unwrap_or_else(|| panic!("{text}"));
+    for needle in [
+        " INFO ",
+        "workspace_id=7",
+        "alice",
+        "refs/heads/main",
+        "relax_test",
+    ] {
+        assert!(line.contains(needle), "{needle} in {line}");
+    }
+    let broken = Git::new(PathBuf::from("/nonexistent/git"), Some(s.bare.clone()));
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            &rules(Act::Relax),
+            &[moved(&old, &new, "refs/heads/main")],
+            &broken,
+        );
+    });
+    assert!(
+        text.contains(" WARN ") && text.contains("could not re-check an accepted admin push"),
+        "{text}"
+    );
 }

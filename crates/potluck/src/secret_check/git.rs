@@ -166,6 +166,40 @@ impl Entry {
     }
 }
 
+/// A path whose blob differs between two tips, with the blob on each side. A side is `None`
+/// when the path is absent there or is a gitlink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TipEntry {
+    path: Vec<u8>,
+    old: Option<Sha>,
+    new: Option<Sha>,
+}
+
+impl TipEntry {
+    /// The path's raw bytes.
+    pub fn path(&self) -> &[u8] {
+        &self.path
+    }
+
+    /// The path for rules and display: `String::from_utf8_lossy`.
+    pub fn path_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.path).into_owned()
+    }
+
+    /// The blob at the old tip; `None` when absent there or a gitlink.
+    pub fn old(&self) -> Option<&Sha> {
+        self.old.as_ref()
+    }
+
+    /// The blob at the new tip; `None` when absent there or a gitlink.
+    // An accessor paired with `old`, not a constructor.
+    #[allow(clippy::new_ret_no_self, clippy::wrong_self_convention)]
+    pub fn new(&self) -> Option<&Sha> {
+        self.new.as_ref()
+    }
+}
+
 /// Runs git against one repository. The child inherits this process's environment, so git's
 /// quarantine variables reach it; `git_dir`, when set, is passed as `GIT_DIR`.
 #[derive(Debug, Clone)]
@@ -289,6 +323,73 @@ impl Git {
             }
         }
         Ok(entries)
+    }
+
+    /// `diff-tree -r -z <old> <new>`: every path whose blob differs between the two trees,
+    /// statuses `A`, `M`, `T` and `D`, with each side's blob or `None`.
+    pub fn tip_diff(&self, old: &Sha, new: &Sha) -> Result<Vec<TipEntry>, GitCmdError> {
+        const SUB: &str = "diff-tree";
+        let args = ["-r", "-z", old.as_str(), new.as_str()].map(OsStr::new);
+        let out = self.run(SUB, &args, None)?;
+        let unexpected = |record: &[u8]| GitCmdError::Output {
+            subcommand: SUB,
+            detail: format!("{:?}", String::from_utf8_lossy(record)),
+        };
+        // The same header-then-path walk as `changed_entries`. A side that is all zeros (the
+        // path is absent there) or a gitlink carries no blob, so it reads as `None`.
+        let side = |mode: &[u8], sha: &[u8], record: &[u8]| -> Result<_, GitCmdError> {
+            let sha = parse_sha(sha).ok_or_else(|| unexpected(record))?;
+            let absent = mode == b"160000" || sha.as_str().bytes().all(|b| b == b'0');
+            Ok((!absent).then_some(sha))
+        };
+        let mut entries = Vec::new();
+        let mut records = out.split(|&b| b == 0).filter(|r| !r.is_empty());
+        while let Some(record) = records.next() {
+            let header = record
+                .strip_prefix(b":")
+                .ok_or_else(|| unexpected(record))?;
+            let path = records.next().ok_or_else(|| unexpected(record))?;
+            let fields: Vec<&[u8]> = header.split(|&b| b == b' ').collect();
+            let [old_mode, new_mode, old_sha, new_sha, status] = fields[..] else {
+                return Err(unexpected(record));
+            };
+            if !matches!(status, b"A" | b"M" | b"T" | b"D") {
+                continue;
+            }
+            entries.push(TipEntry {
+                path: path.to_vec(),
+                old: side(old_mode, old_sha, record)?,
+                new: side(new_mode, new_sha, record)?,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// `cat-file --batch-check` on `<rev>:<path>`: the blob there, `None` when the path is
+    /// absent or names something other than a blob. A path with a newline cannot be asked.
+    pub fn blob_at(&self, rev: &Sha, path: &str) -> Result<Option<Sha>, GitCmdError> {
+        const SUB: &str = "cat-file";
+        if path.contains('\n') {
+            return Err(GitCmdError::Output {
+                subcommand: SUB,
+                detail: format!("a path with a newline: {path:?}"),
+            });
+        }
+        let input = format!("{rev}:{path}\n").into_bytes();
+        let out = self.run(SUB, &[OsStr::new("--batch-check")], Some(input))?;
+        let line = out.split(|&b| b == b'\n').next().unwrap_or_default();
+        // git echoes the asked name before ` missing`, and the path may hold spaces.
+        if line.ends_with(b" missing") {
+            return Ok(None);
+        }
+        match parse_header(line) {
+            Some(Header::Found { sha, kind, .. }) => Ok((kind == b"blob").then_some(sha)),
+            Some(Header::Missing { .. }) => Ok(None),
+            None => Err(GitCmdError::Output {
+                subcommand: SUB,
+                detail: format!("{:?}", String::from_utf8_lossy(line)),
+            }),
+        }
     }
 
     /// `ls-tree -r -z <rev>`: every blob in the tree (mode 160000 left out); `rev` may be a

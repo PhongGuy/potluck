@@ -9,8 +9,8 @@ use potluck::server::start;
 use potluck::slug::Slug;
 
 use crate::common::{
-    GitServer, TestAccess, api_admin, api_team, api_workspace, client, failed, git, git_server, ok,
-    parse_config, work_tree, write_script,
+    APINATA_FORMAT, GitServer, TestAccess, api_admin, api_team, api_workspace, client, failed, git,
+    git_server, ok, parse_config, work_tree, write_script,
 };
 
 const TOKEN: &str = "plk_writer_token_000000000000000000000000000";
@@ -88,6 +88,8 @@ fn commit_all(home: &Path, work: &Path, message: &str) {
 async fn a_push_with_secrets_is_declined_with_the_contract_lines_and_a_clean_one_lands() {
     let (server, home, url) = apinata_server(&[]).await;
     let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
     std::fs::write(work.join(".env"), "KEY=fixture\n").unwrap();
     std::fs::create_dir_all(work.join("environments")).unwrap();
     std::fs::write(work.join("environments").join("dev.yml"), ENV_YML).unwrap();
@@ -180,6 +182,7 @@ async fn history_already_on_the_server_does_not_block_later_pushes() {
 async fn import_mode_scans_the_tip_tree_only() {
     let (server, home, url) = apinata_server(&[("POTLUCK_IMPORT", "1")]).await;
     let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
     std::fs::write(work.join("creds.txt"), AWS).unwrap();
     commit_all(&home, &work, "add");
     std::fs::remove_file(work.join("creds.txt")).unwrap();
@@ -230,6 +233,8 @@ async fn an_armed_override_passes_the_push_unscanned() {
 async fn a_missing_hook_file_fails_the_push_with_500() {
     let (server, home, url) = apinata_server(&[]).await;
     let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
     let hook = server.dir.path().join("hooks").join("pre-receive");
     std::fs::remove_file(&hook).unwrap();
     let output = failed(git(
@@ -262,6 +267,7 @@ async fn a_missing_hook_file_fails_the_push_with_500() {
 async fn a_blob_moved_into_environments_is_refused_under_its_new_path() {
     let (server, home, url) = apinata_server(&[]).await;
     let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
     std::fs::create_dir_all(work.join("notes")).unwrap();
     std::fs::write(work.join("notes").join("x.txt"), ENV_YML).unwrap();
     commit_all(&home, &work, "notes");
@@ -300,6 +306,8 @@ async fn a_blob_moved_into_environments_is_refused_under_its_new_path() {
 async fn an_environment_file_over_the_cap_is_refused_but_a_big_note_lands() {
     let (server, home, url) = apinata_server(&[]).await;
     let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
     let big = vec![b'a'; 1024 * 1024 + 1];
     std::fs::create_dir_all(work.join("environments")).unwrap();
     std::fs::write(work.join("environments").join("big.yml"), &big).unwrap();
@@ -385,6 +393,8 @@ async fn the_configured_git_reaches_the_installed_hook() {
     let home = dir.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
     let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
     let url = format!("http://{}/git/core/api.git", running.http_addr());
     let pushed = tokio::task::spawn_blocking(move || {
         git(

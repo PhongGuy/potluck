@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use potluck::secret_check::git::{Git, GitCmdError, ObjectType, ParseError, RefUpdate, Sha};
+use potluck::secret_check::git::{
+    Git, GitCmdError, ObjectType, ParseError, RefUpdate, Sha, TipEntry,
+};
 
 use crate::common::scratch::{Scratch, staged_history};
 
@@ -245,4 +247,124 @@ fn new_tags_list_the_pushed_tag_chain_and_skip_tags_the_server_has() {
         "+refs/tags/inner:refs/tags/inner",
     ]);
     assert_eq!(git.new_tags(&sha(&outer), &[]).unwrap(), [sha(&outer)]);
+}
+
+#[test]
+fn tip_diff_lists_added_changed_and_deleted_paths_with_both_blobs() {
+    let s = Scratch::new();
+    s.write("keep.txt", b"k\n");
+    s.write("change.t", b"strict\n");
+    s.write("gone.t", b"g\n");
+    let old = s.commit("old");
+    s.remove("gone.t");
+    s.write("change.t", b"relaxed\n");
+    s.write("new dir/added.t", b"a\n");
+    let new = s.commit("new");
+    s.publish("main");
+    let mut got = git_for(&s).tip_diff(&sha(&old), &sha(&new)).unwrap();
+    got.sort_by(|a, b| a.path().cmp(b.path()));
+    let view: Vec<(String, Option<String>, Option<String>)> = got
+        .iter()
+        .map(|e: &TipEntry| {
+            (
+                e.path_lossy(),
+                e.old().map(|x| x.as_str().to_owned()),
+                e.new().map(|x| x.as_str().to_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        [
+            (
+                "change.t".to_owned(),
+                Some(s.blob(&old, "change.t")),
+                Some(s.blob(&new, "change.t"))
+            ),
+            ("gone.t".to_owned(), Some(s.blob(&old, "gone.t")), None),
+            (
+                "new dir/added.t".to_owned(),
+                None,
+                Some(s.blob(&new, "new dir/added.t"))
+            ),
+        ]
+    );
+    assert!(
+        git_for(&s)
+            .tip_diff(&sha(&new), &sha(&new))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn blob_at_finds_a_root_file_and_nothing_else() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    s.write("dir.yml/inner", b"x\n");
+    let tip = s.commit("c");
+    s.publish("main");
+    let g = git_for(&s);
+    assert_eq!(
+        g.blob_at(&sha(&tip), "opencollection.yml")
+            .unwrap()
+            .map(|x| x.as_str().to_owned()),
+        Some(s.blob(&tip, "opencollection.yml"))
+    );
+    assert_eq!(g.blob_at(&sha(&tip), "missing.yml").unwrap(), None);
+    assert_eq!(
+        g.blob_at(&sha(&tip), "missing dir/x.yml").unwrap(),
+        None,
+        "git's missing line for a path with a space"
+    );
+    assert_eq!(
+        g.blob_at(&sha(&tip), "dir.yml").unwrap(),
+        None,
+        "a tree is not a blob"
+    );
+}
+
+#[test]
+fn tip_diff_reads_a_gitlink_side_as_absent() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let seed = s.commit("seed");
+    s.write("sub", b"was a file\n");
+    let old = s.commit("old");
+    s.remove("sub");
+    s.git(Some(&s.work), &["rm", "-q", "--cached", "sub"]);
+    s.git(
+        Some(&s.work),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{seed},sub"),
+        ],
+    );
+    // Commit the index as it stands: `Scratch::commit` runs `add -A`, which drops a gitlink
+    // that has no work-tree directory.
+    s.git(Some(&s.work), &["commit", "-q", "-m", "new"]);
+    let new = s.work_git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        s.work_git(&["ls-tree", &new, "sub"]),
+        format!("160000 commit {seed}\tsub")
+    );
+    s.publish("main");
+    let got = git_for(&s).tip_diff(&sha(&old), &sha(&new)).unwrap();
+    let view: Vec<(String, Option<String>, Option<String>)> = got
+        .iter()
+        .map(|e| {
+            (
+                e.path_lossy(),
+                e.old().map(|x| x.as_str().to_owned()),
+                e.new().map(|x| x.as_str().to_owned()),
+            )
+        })
+        .collect();
+    assert_eq!(
+        view,
+        [("sub".to_owned(), Some(s.blob(&old, "sub")), None)],
+        "a blob replaced by a gitlink has no blob on the new side"
+    );
 }

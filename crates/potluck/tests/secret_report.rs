@@ -41,6 +41,18 @@ fn hook_env_reads_the_three_variables() {
 }
 
 #[test]
+fn hook_env_role_defaults_to_write() {
+    use potluck::role::Role;
+    assert_eq!(HookEnv::new(None, false, None).role(), Role::Write);
+    assert_eq!(
+        HookEnv::new(None, false, None)
+            .with_role(Role::Admin)
+            .role(),
+        Role::Admin
+    );
+}
+
+#[test]
 fn rejection_accessors_round_trip() {
     let r = Rejection::new(
         b"refs/heads/x",

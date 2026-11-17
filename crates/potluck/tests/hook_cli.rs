@@ -266,3 +266,16 @@ fn each_hook_failure_writes_its_own_fixed_reason() {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     assert_eq!(stderr(&out), "potluck-error unreadable stdin\n");
 }
+
+#[test]
+fn an_unlisted_format_prints_the_format_code() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 9.9.9\n");
+    let tip = s.stage_commit("c");
+    let out = run_hook(&s, &[("POTLUCK_KIND", "apinata")], &line(&tip));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        "potluck-reject format_unsupported refs/heads/main opencollection.yml format_unsupported\n"
+    );
+}

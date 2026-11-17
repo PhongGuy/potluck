@@ -20,6 +20,7 @@ use crate::git::access::{Access, PushContext};
 use crate::git::engine::PushObserver;
 use crate::git::push::RefMove;
 use crate::git::{GitError, Service};
+use crate::role::Role;
 use crate::slug::Slug;
 
 /// `{team}` and `{repo}` from the URL, or the rejection, so a bad segment answers our 404.
@@ -107,7 +108,9 @@ async fn rpc(
     // Only a receive-pack the resolver tied to a workspace is watched; everything else is served
     // without bookkeeping.
     let on_push = match (service, access.push()) {
-        (Service::ReceivePack, Some(ctx)) => Some(observer(state, ctx.clone())),
+        (Service::ReceivePack, Some(ctx)) => {
+            Some(observer(state, ctx.clone(), repo.clone(), access.role()))
+        }
         _ => None,
     };
     let out = state
@@ -125,13 +128,18 @@ async fn rpc(
     Ok(git_response(service.result_type(), out))
 }
 
-/// Hands a push's confirmed moves to the bookkeeping. It runs on the reaper task, so the
-/// record itself is spawned rather than awaited.
-fn observer(state: &AppState, ctx: PushContext) -> PushObserver {
+/// Hands a push's confirmed moves to the bookkeeping, then to the admin re-check of `repo`. It
+/// runs on the reaper task, so both are spawned rather than awaited.
+fn observer(state: &AppState, ctx: PushContext, repo: PathBuf, role: Role) -> PushObserver {
     let state = state.clone();
     let tasks = state.git().tasks().clone();
     Box::new(move |moves: Vec<RefMove>| {
-        tasks.spawn(crate::api::pushes::record(state, ctx, moves));
+        // The re-check needs the moves after the record has consumed them.
+        let updates = crate::api::pushes::ref_updates(&moves);
+        tasks.spawn(async move {
+            crate::api::pushes::record(state.clone(), ctx.clone(), moves).await;
+            crate::api::pushes::recheck_admin_push(&state, &ctx, repo, role, updates).await;
+        });
     })
 }
 

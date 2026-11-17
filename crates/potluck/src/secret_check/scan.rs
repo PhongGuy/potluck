@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Write;
 
-use crate::kinds::{self, Finding, Kind, generic};
+use potluck_kind::Role;
+
+use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
 use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
 
 /// What the server told the hook through its environment.
@@ -91,26 +93,68 @@ impl Rejection {
     }
 }
 
+// A finding at the path the scan asked about keeps the entry's raw bytes, so a non-UTF-8
+// path survives; a finding a rule set placed elsewhere carries its own path.
+fn rejection(ref_name: &[u8], raw: &[u8], lossy: &str, finding: Finding) -> Rejection {
+    let path = if finding.path() == lossy {
+        raw.to_vec()
+    } else {
+        finding.path().as_bytes().to_vec()
+    };
+    Rejection {
+        ref_name: ref_name.to_vec(),
+        path,
+        finding,
+    }
+}
+
 /// The check for one push. `Ok(vec![])` accepts. An override accepts without touching git.
 /// Deletions are skipped. Per ref, in stdin order, the target is peeled: a commit yields its
 /// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
 /// kind) over every changed entry, and content rules over the entries whose blob is new to
-/// the repository or whose path the kind's `content_path` accepts, each `(blob, path)` pair
-/// once per push; in import mode the tip tree replaces both lists. A tree target is scanned
-/// whole (every entry a candidate); a blob target is one entry at path `/`. Blobs over
-/// `MAX_CONTENT_BYTES` are not read: the generic set skips them, and a kind refuses one at a
-/// path it owns through `over_cap_rule`. Per ref the path-rule rejections come first, then
-/// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
+/// the repository or whose path the kind `reads`, each `(blob, path)` pair once per push; in
+/// import mode the tip tree replaces both lists. A tree target is scanned whole (every entry a
+/// candidate); a blob target is one entry at path `/`. Blobs over `MAX_CONTENT_BYTES` are not
+/// read: the generic set skips them, and a kind may refuse one at a path it reads through
+/// `check` with `Blob::TooLarge`. Per ref the path-rule rejections come first, then the
+/// content-rule ones, in entry order; a path refused by a path rule is not content-checked.
 /// The generic content rules also run over the message of every new commit and every new
 /// annotated tag behind the ref (the pushed tag's chain included), each object once per push
 /// under the first ref that lists it, reported at path `/` after the ref's content hits; import
 /// mode scans no message. A commit or tag object over `MAX_CONTENT_BYTES` is skipped like a
-/// blob. An unknown or unset kind means generic rules only.
+/// blob. An unset kind means generic rules only; a kind the registry does not know refuses
+/// with `ScanError::UnsupportedKind` unless every update is a delete. The kind's rule set runs
+/// as `scan_with` describes.
 pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejection>, ScanError> {
     if env.override_id().is_some() {
         return Ok(Vec::new());
     }
-    let kind = env.kind().and_then(kinds::by_name);
+    let kind = match env.kind() {
+        None => None,
+        Some(name) => match kinds::by_name(name) {
+            Some(rules) => Some(rules),
+            None if updates.iter().all(RefUpdate::is_delete) => None,
+            None => return Err(ScanError::UnsupportedKind),
+        },
+    };
+    scan_with(env, kind, updates, git)
+}
+
+/// `scan` with the rule set given rather than looked up, and no override check. Every call into
+/// `rules` is panic-guarded; a panic, an `abi()` other than `RULES_ABI` (checked before any git
+/// call) or a finding whose rule is empty or not `[a-z0-9_]` fails with `ScanError::Rules`.
+pub fn scan_with(
+    env: &HookEnv,
+    rules: Option<&dyn RuleSet>,
+    updates: &[RefUpdate],
+    git: &Git,
+) -> Result<Vec<Rejection>, ScanError> {
+    if let Some(r) = rules
+        && guarded(|| r.abi())? != RULES_ABI
+    {
+        return Err(ScanError::Rules);
+    }
+    let kind = GuardedRules(rules);
     // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
     // path-rule hits first, then its content hits, each in entry order.
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
@@ -153,15 +197,17 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
         }
         for (ei, entry) in entries.into_iter().enumerate() {
             let path = entry.path_lossy();
-            let refused =
-                generic::path_rule(&path).or_else(|| kind.and_then(|k| k.path_rule(&path)));
+            let refused = match generic::path_rule(&path) {
+                Some(finding) => Some(finding),
+                None => kind.path_rule(&path)?,
+            };
             if let Some(finding) = refused {
                 hits.push((
                     (ri, 0, ei),
-                    Rejection::new(update.name(), entry.path(), finding),
+                    rejection(update.name(), entry.path(), &path, finding),
                 ));
             } else if (fresh.as_ref().is_none_or(|f| f.contains(entry.sha()))
-                || kind.is_some_and(|k| k.content_path(&path)))
+                || kind.reads(&path)?)
                 && queued.insert((entry.sha().clone(), entry.path().to_vec()))
             {
                 candidates.entry(entry.sha().clone()).or_default().push((
@@ -175,11 +221,11 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
     content_pass(git, kind, updates, candidates, &mut hits)?;
     git.for_each_message(&messages, |sha, message| {
         if let (Some(&(ri, mi)), Some(finding)) =
-            (message_slots.get(sha), generic::content_rule(message))
+            (message_slots.get(sha), generic::content_rule("/", message))
         {
             hits.push((
                 (ri, 2, mi),
-                Rejection::new(updates[ri].name(), b"/", finding),
+                rejection(updates[ri].name(), b"/", "/", finding),
             ));
         }
     })?;
@@ -188,11 +234,11 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 }
 
 /// Streams every candidate blob at or under the cap once and runs the content rules for each
-/// path it sits at: the generic set on the bytes, then the kind's rule with the path. A blob
-/// over the cap is never read; only the kind's `over_cap_rule` may refuse it, by path alone.
+/// path it sits at: the generic set on the bytes, then the kind's first `check` finding. A blob
+/// over the cap is never read; only the kind's `check` with `Blob::TooLarge` may refuse it.
 fn content_pass(
     git: &Git,
-    kind: Option<&'static dyn Kind>,
+    kind: GuardedRules<'_>,
     updates: &[RefUpdate],
     candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
     hits: &mut Vec<((usize, u8, usize), Rejection)>,
@@ -207,13 +253,15 @@ fn content_pass(
             Some(_) => {
                 for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
                     let lossy = String::from_utf8_lossy(path);
-                    if let Some(finding) = kind
-                        .filter(|k| k.content_path(&lossy))
-                        .and_then(|k| k.over_cap_rule(&lossy))
-                    {
+                    let finding = if kind.reads(&lossy)? {
+                        kind.check(&Change::history(&lossy, Blob::TooLarge, Role::Write))?
+                    } else {
+                        None
+                    };
+                    if let Some(finding) = finding {
                         hits.push((
                             (*ri, 1, *ei),
-                            Rejection::new(updates[*ri].name(), path, finding),
+                            rejection(updates[*ri].name(), path, &lossy, finding),
                         ));
                     }
                 }
@@ -226,22 +274,82 @@ fn content_pass(
             }
         }
     }
+    // The blob stream cannot stop early, so the first rule-set failure is kept and every later
+    // blob is skipped.
+    let mut failed = None;
     git.for_each_blob(&kept, |sha, bytes| {
-        let generic_hit = generic::content_rule(bytes);
+        if failed.is_some() {
+            return;
+        }
+        // The generic patterns depend on the bytes alone, so they run once per blob and the
+        // hit is re-placed at each path the blob sits at.
+        let generic_hit = generic::content_rule("", bytes);
         for (ri, ei, path) in candidates.get(sha).into_iter().flatten() {
             let lossy = String::from_utf8_lossy(path);
-            let finding = generic_hit
-                .clone()
-                .or_else(|| kind.and_then(|k| k.content_rule(&lossy, bytes)));
+            let finding = match &generic_hit {
+                Some(f) => Some(Finding::new(f.code(), f.rule(), &lossy)),
+                None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), Role::Write))
+                {
+                    Ok(finding) => finding,
+                    Err(e) => {
+                        failed = Some(e);
+                        return;
+                    }
+                },
+            };
             if let Some(finding) = finding {
                 hits.push((
                     (*ri, 1, *ei),
-                    Rejection::new(updates[*ri].name(), path, finding),
+                    rejection(updates[*ri].name(), path, &lossy, finding),
                 ));
             }
         }
     })?;
-    Ok(())
+    failed.map_or(Ok(()), Err)
+}
+
+/// Runs one call into a rule set, turning a panic into `ScanError::Rules`.
+fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, ScanError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ScanError::Rules)
+}
+
+/// The push's rule set, if any, reached only through guarded calls whose findings are checked.
+#[derive(Clone, Copy)]
+struct GuardedRules<'a>(Option<&'a dyn RuleSet>);
+
+impl GuardedRules<'_> {
+    fn path_rule(self, path: &str) -> Result<Option<Finding>, ScanError> {
+        let Some(r) = self.0 else { return Ok(None) };
+        guarded(|| r.path_rule(path))?.map(valid).transpose()
+    }
+
+    fn reads(self, path: &str) -> Result<bool, ScanError> {
+        self.0.map_or(Ok(false), |r| guarded(|| r.reads(path)))
+    }
+
+    /// The first finding of `check`, once every finding it returned has passed `valid`.
+    fn check(self, change: &Change<'_>) -> Result<Option<Finding>, ScanError> {
+        let Some(r) = self.0 else { return Ok(None) };
+        let findings = guarded(|| r.check(change))?;
+        let mut valid_findings = findings.into_iter().map(valid);
+        let first = valid_findings.next().transpose()?;
+        valid_findings.try_for_each(|f| f.map(drop))?;
+        Ok(first)
+    }
+}
+
+/// A rule name goes on the wire as one field, so it must be non-empty `[a-z0-9_]`.
+fn valid(finding: Finding) -> Result<Finding, ScanError> {
+    let rule = finding.rule();
+    let ok = !rule.is_empty()
+        && rule
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if ok {
+        Ok(finding)
+    } else {
+        Err(ScanError::Rules)
+    }
 }
 
 /// Why the check could not run.
@@ -251,10 +359,19 @@ pub enum ScanError {
     /// A plumbing call failed.
     #[error(transparent)]
     Git(#[from] GitCmdError),
+    /// The kind's rule set panicked, has another ABI or returned a malformed finding.
+    #[error("kind rules failed")]
+    Rules,
+    /// The workspace kind has no rule set on this server.
+    #[error("unsupported kind")]
+    UnsupportedKind,
 }
 
 /// How many `potluck-reject` lines are printed at most.
 pub const MAX_LINES: usize = 20;
+
+/// How many bytes of a finding's detail `report` prints at most.
+pub const MAX_DETAIL_BYTES: usize = 200;
 
 /// `potluck-reject <code> <ref> <path> <rule>\n` for the first `MAX_LINES` rejections, then
 /// `potluck-reject-more <n>\n` when `n` remain. The path and the ref are percent-encoded:
@@ -262,7 +379,9 @@ pub const MAX_LINES: usize = 20;
 /// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
 /// exactly five fields. A finding without a tree path (a commit or tag message, or a tag whose
 /// target is a blob) carries the path `/`, which the encoding leaves as is and which no git
-/// tree path can start with.
+/// tree path can start with. A finding with a detail is followed by
+/// `potluck-reject-detail <detail>\n`, the detail cut to at most `MAX_DETAIL_BYTES` on a
+/// character boundary and then encoded the same way; detail lines do not count toward the cap.
 pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result<()> {
     for r in rejections.iter().take(MAX_LINES) {
         writeln!(
@@ -273,6 +392,15 @@ pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result
             percent_encode(&r.path),
             r.finding.rule(),
         )?;
+        if let Some(detail) = r.finding.detail() {
+            // Cut before encoding, so the cap bounds the rule set's text, not its escapes.
+            let cut = &detail[..detail.floor_char_boundary(MAX_DETAIL_BYTES)];
+            writeln!(
+                out,
+                "potluck-reject-detail {}",
+                percent_encode(cut.as_bytes())
+            )?;
+        }
     }
     let rest = rejections.len().saturating_sub(MAX_LINES);
     if rest > 0 {

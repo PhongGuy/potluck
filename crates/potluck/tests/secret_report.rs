@@ -7,7 +7,7 @@ fn env_file(path: &[u8]) -> Rejection {
     Rejection::new(
         b"refs/heads/main",
         path,
-        Finding::new(Code::EnvFile, "env_file"),
+        Finding::new(Code::EnvFile, "env_file", &String::from_utf8_lossy(path)),
     )
 }
 
@@ -45,7 +45,7 @@ fn rejection_accessors_round_trip() {
     let r = Rejection::new(
         b"refs/heads/x",
         b"a/b",
-        Finding::new(Code::SecretPattern, "aws"),
+        Finding::new(Code::SecretPattern, "aws", "a/b"),
     );
     assert_eq!(
         (r.ref_name(), r.path(), r.finding().rule()),
@@ -58,7 +58,7 @@ fn report_prints_the_contract_lines_capped_at_twenty() {
     let one = Rejection::new(
         b"refs/heads/main",
         b"creds.txt",
-        Finding::new(Code::SecretPattern, "aws"),
+        Finding::new(Code::SecretPattern, "aws", "creds.txt"),
     );
     assert_eq!(
         text(&[one]),
@@ -109,7 +109,7 @@ fn report_percent_encodes_paths_and_ref_names() {
     let odd_ref = Rejection::new(
         b"refs/heads/a\nb",
         b".env",
-        Finding::new(Code::EnvFile, "env_file"),
+        Finding::new(Code::EnvFile, "env_file", ".env"),
     );
     assert_eq!(
         text(&[odd_ref]),
@@ -143,4 +143,66 @@ fn percent_encode_escapes_each_byte_of_a_truncated_sequence() {
         "%E2%82\u{e9}",
         "a valid character after the cut stays readable"
     );
+}
+
+fn detailed(path: &[u8], detail: &str) -> Rejection {
+    Rejection::new(
+        b"refs/heads/main",
+        path,
+        Finding::new(Code::SecretValue, "password_key", "x").with_detail(detail),
+    )
+}
+
+#[test]
+fn a_detail_line_follows_its_reject_line_encoded() {
+    assert_eq!(
+        text(&[
+            detailed(b"dbento.toml", "connections.prod password"),
+            env_file(b".env")
+        ]),
+        concat!(
+            "potluck-reject secret_value refs/heads/main dbento.toml password_key\n",
+            "potluck-reject-detail connections.prod%20password\n",
+            "potluck-reject secret_env_file refs/heads/main .env env_file\n",
+        )
+    );
+}
+
+#[test]
+fn a_detail_is_capped_at_200_bytes_on_a_character_boundary() {
+    let long = format!("{}\u{e9}tail", "a".repeat(199));
+    let out = text(&[detailed(b"f", &long)]);
+    let detail = out.lines().nth(1).unwrap();
+    assert_eq!(
+        detail,
+        format!("potluck-reject-detail {}", "a".repeat(199)),
+        "the 2-byte é would cross 200"
+    );
+    let exact = "b".repeat(250);
+    let out = text(&[detailed(b"f", &exact)]);
+    assert_eq!(
+        out.lines().nth(1).unwrap(),
+        format!("potluck-reject-detail {}", "b".repeat(200))
+    );
+}
+
+#[test]
+fn detail_lines_do_not_count_toward_twenty() {
+    let many: Vec<Rejection> = (0..22)
+        .map(|i| detailed(format!("f{i}").as_bytes(), "k"))
+        .collect();
+    let out = text(&many);
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.starts_with("potluck-reject "))
+            .count(),
+        MAX_LINES
+    );
+    assert_eq!(
+        out.lines()
+            .filter(|l| l.starts_with("potluck-reject-detail "))
+            .count(),
+        MAX_LINES
+    );
+    assert_eq!(out.lines().last(), Some("potluck-reject-more 2"));
 }

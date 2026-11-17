@@ -9,16 +9,19 @@ fn codes_carry_their_contract_names() {
     assert_eq!(Code::SecretValue.as_str(), "secret_value");
     assert_eq!(Code::SecretPattern.as_str(), "secret_pattern");
     assert_eq!(MAX_CONTENT_BYTES, 1024 * 1024);
-    let f = Finding::new(Code::SecretPattern, "aws");
+    let f = Finding::new(Code::SecretPattern, "aws", "x");
     assert_eq!((f.code(), f.rule()), (Code::SecretPattern, "aws"));
     assert_eq!(f.clone(), f);
 }
 
 #[test]
 fn only_a_file_named_dot_env_hits_the_path_rule() {
-    let hit = Some(Finding::new(Code::EnvFile, "env_file"));
     for p in [".env", "api/.env", "deep/er/.env"] {
-        assert_eq!(path_rule(p), hit, "{p}");
+        assert_eq!(
+            path_rule(p),
+            Some(Finding::new(Code::EnvFile, "env_file", p)),
+            "{p}"
+        );
     }
     for p in [
         ".env.example",
@@ -80,8 +83,8 @@ fn each_bad_fixture_hits_its_rule() {
     ];
     for (name, bytes, rule) in cases {
         assert_eq!(
-            content_rule(bytes),
-            Some(Finding::new(Code::SecretPattern, rule)),
+            content_rule("x", bytes),
+            Some(Finding::new(Code::SecretPattern, rule, "x")),
             "{name}"
         );
     }
@@ -98,9 +101,9 @@ fn good_fixtures_pass() {
         ("certificate.pem", fixture!("good", "certificate.pem")),
     ];
     for (name, bytes) in cases {
-        assert_eq!(content_rule(bytes), None, "{name}");
+        assert_eq!(content_rule("x", bytes), None, "{name}");
     }
-    assert_eq!(content_rule(b""), None);
+    assert_eq!(content_rule("x", b""), None);
 }
 
 #[test]
@@ -109,12 +112,12 @@ fn the_rule_runs_on_arbitrary_bytes() {
     bytes.extend_from_slice(b"AKIAIOSFODNN7EXAMPLE");
     bytes.push(0x80);
     assert_eq!(
-        content_rule(&bytes),
-        Some(Finding::new(Code::SecretPattern, "aws"))
+        content_rule("x", &bytes),
+        Some(Finding::new(Code::SecretPattern, "aws", "x"))
     );
     let mut noise = vec![0xff; 4096];
     noise[100] = b'A';
-    assert_eq!(content_rule(&noise), None);
+    assert_eq!(content_rule("x", &noise), None);
 }
 
 #[test]
@@ -122,7 +125,7 @@ fn a_blob_with_two_secrets_reports_the_first_rule_in_table_order() {
     let mut both = fixture!("bad", "slack-bot.txt").to_vec();
     both.extend_from_slice(fixture!("bad", "rsa-private-key.pem"));
     assert_eq!(
-        content_rule(&both),
-        Some(Finding::new(Code::SecretPattern, "private_key"))
+        content_rule("x", &both),
+        Some(Finding::new(Code::SecretPattern, "private_key", "x"))
     );
 }

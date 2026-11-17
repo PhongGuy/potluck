@@ -1,11 +1,14 @@
 //! The whole check over staged pushes.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use potluck::secret_check::git::{Git, RefUpdate};
-use potluck::secret_check::scan::{HookEnv, Rejection, ScanError, scan};
+use potluck::secret_check::scan::{HookEnv, Rejection, ScanError, report, scan, scan_with};
 
 use crate::common::scratch::Scratch;
+use crate::test_rules::{Act, TestRules, rules};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const AWS: &[u8] = include_bytes!("fixtures/secret-check/bad/aws-access-key.txt");
@@ -138,13 +141,11 @@ fn kind_rules_follow_the_kind_and_the_generic_set_runs_for_all() {
             "refs/heads/main environments/dev.yml secret_value secret_value",
         ]
     );
-    for kind in [None, Some("dbento")] {
-        assert_eq!(
-            scan_main(&s, &env(kind), &tip),
-            ["refs/heads/main .env secret_env_file env_file"],
-            "{kind:?}: generic only"
-        );
-    }
+    assert_eq!(
+        scan_main(&s, &env(None), &tip),
+        ["refs/heads/main .env secret_env_file env_file"],
+        "None: generic only"
+    );
 }
 
 #[test]
@@ -574,4 +575,167 @@ fn an_old_blob_over_the_cap_moved_under_environments_is_refused_as_unparsable() 
         ["refs/heads/main environments/big.yml secret_value env_unparsable"],
         "the blob the server already holds is refused at the kind's path"
     );
+}
+
+fn scan_rules(s: &Scratch, r: &TestRules, tip: &str) -> Result<Vec<String>, ScanError> {
+    scan_with(
+        &env(None),
+        Some(r),
+        &[update(tip, "refs/heads/main")],
+        &git_for(s),
+    )
+    .map(|x| rows(&x))
+}
+
+#[test]
+fn a_panicking_or_misnaming_or_mismatched_rule_set_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    for r in [
+        rules(Act::Panic),
+        rules(Act::PanicInPathRule),
+        rules(Act::BadRuleName),
+    ] {
+        assert!(
+            matches!(scan_rules(&s, &r, &tip), Err(ScanError::Rules)),
+            "{r:?}"
+        );
+    }
+    let wrong = TestRules {
+        act: Act::Detail("k"),
+        abi: potluck::kinds::RULES_ABI + 1,
+    };
+    assert!(matches!(
+        scan_rules(&s, &wrong, &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_finding_at_another_path_reports_that_path() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert_eq!(
+        scan_rules(&s, &rules(Act::Elsewhere), &tip).unwrap(),
+        ["refs/heads/main other/place.t secret_value elsewhere"]
+    );
+}
+
+#[test]
+fn a_rule_set_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
+    let s = Scratch::new();
+    std::fs::write(s.work.join(OsStr::from_bytes(b"caf\xe9.t")), b"x\n").unwrap();
+    let tip = s.stage_commit("latin-1 name");
+    let found = scan_with(
+        &env(None),
+        Some(&rules(Act::Plain)),
+        &[update(&tip, "refs/heads/main")],
+        &git_for(&s),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    report(&found, &mut out).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "potluck-reject secret_value refs/heads/main caf%E9.t plain\n"
+    );
+}
+
+#[test]
+fn an_unknown_kind_is_refused_unless_every_update_is_a_delete() {
+    let s = Scratch::new();
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("r");
+    let res = scan(
+        &env(Some("dbento")),
+        &[update(&tip, "refs/heads/main")],
+        &git_for(&s),
+    );
+    assert!(matches!(res, Err(ScanError::UnsupportedKind)));
+    let delete = RefUpdate::parse_line(format!("{tip} {ZERO} refs/heads/gone").as_bytes()).unwrap();
+    assert!(
+        scan(&env(Some("dbento")), &[delete], &git_for(&s))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Re-runs this test binary on `panic_child` with the quiet hook installed, and checks that the
+/// child's stderr never shows the panic message.
+#[test]
+fn a_rule_panic_prints_nothing_with_quiet_panics() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "secret_scan::panic_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("POTLUCK_TEST_PANIC_CHILD", "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("1 passed"), "the child ran: {stdout}");
+    assert!(!stderr.contains("PANIC-SECRET-TEXT"), "{stderr}");
+}
+
+#[test]
+fn panic_child() {
+    if std::env::var_os("POTLUCK_TEST_PANIC_CHILD").is_none() {
+        return;
+    }
+    potluck::secret_check::quiet_panics();
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::Panic), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_panic_in_reads_fails_closed() {
+    // A blob the server already has is content-checked at a new path only if the kind reads it,
+    // so copying a published `.t` file is what makes the scan ask `reads`.
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    s.commit("a");
+    s.publish("main");
+    s.write("b.t", b"x\n");
+    let tip = s.stage_commit("copy");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::PanicInReads), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_misnamed_path_rule_finding_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::BadPathRuleName), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_rule_set_detail_reaches_the_rejection() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    let r = scan_with(
+        &env(None),
+        Some(&rules(Act::Detail("key.path"))),
+        &[update(&tip, "refs/heads/main")],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(r[0].finding().detail(), Some("key.path"));
 }

@@ -78,7 +78,7 @@ pub(super) async fn create(
         noreply_host(state.config().public_url())
     );
     let row =
-        NewWorkspace::new(team.id(), &slug, &name, kind.name(), &branch).import_pending(!seed);
+        NewWorkspace::new(team.id(), &slug, &name, kind.kind(), &branch).import_pending(!seed);
     // A spawned task runs to its end even when axum drops this future on a disconnect, so a
     // claimed directory is always either completed with its row or removed again.
     let task = state.git().tasks().spawn(async move {
@@ -88,7 +88,7 @@ pub(super) async fn create(
                 let files = kind.seed();
                 let pairs: Vec<(&str, &[u8])> =
                     files.iter().map(|f| (f.path(), f.bytes())).collect();
-                let message = format!("Seed {} workspace", kind.name());
+                let message = format!("Seed {} workspace", kind.kind());
                 repos
                     .seed_commit(&repo, branch, &pairs, "Potluck", &email, &message)
                     .await

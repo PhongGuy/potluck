@@ -10,22 +10,16 @@ use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
 use crate::secret_check::scan::{HookEnv, ScanError, report, scan};
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
-/// `Git::from_env()`, writes the report to stderr. Exit 0 accepts; exit 1 refuses. A set but
-/// unknown `POTLUCK_KIND` first writes `potluck-warning unknown kind "<name>"; generic rules
-/// only`. A ref name that is not valid UTF-8 writes `ref name is not valid UTF-8` and exits 1
-/// before any scan or git call. A malformed line or a git failure writes one
-/// `potluck-error <reason>` line and exits 1 (fail closed). Never returns `Err`, so main prints
-/// nothing extra.
+/// `Git::from_env()`, writes the report to stderr. Exit 0 accepts; exit 1 refuses. A ref name
+/// that is not valid UTF-8 writes `ref name is not valid UTF-8` and exits 1 before any scan or
+/// git call. A malformed line, a git failure, a failing rule set or an unsupported kind writes
+/// one `potluck-error <reason>` line and exits 1 (fail closed). Panics print nothing. Never
+/// returns `Err`, so main prints nothing extra.
 pub fn run_pre_receive() -> ExitCode {
+    quiet_panics();
     let env = HookEnv::from_env();
     // A failed stderr write means git's end of the pipe is gone; the exit code still refuses.
     let mut err = std::io::stderr().lock();
-    if let Some(name) = env.kind().filter(|k| crate::kinds::by_name(k).is_none()) {
-        let _ = writeln!(
-            err,
-            "potluck-warning unknown kind {name:?}; generic rules only"
-        );
-    }
     match check(&env) {
         Ok(rejections) if rejections.is_empty() => ExitCode::SUCCESS,
         Ok(rejections) => {
@@ -41,6 +35,12 @@ pub fn run_pre_receive() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Installs a panic hook that prints nothing, so a rule set's panic message never reaches the
+/// pushing client; the scan reports the panic as `kind rules failed`.
+pub fn quiet_panics() {
+    std::panic::set_hook(Box::new(|_| {}));
 }
 
 /// Why `check` refused the push without a scan report.
@@ -73,13 +73,19 @@ fn check(env: &HookEnv) -> Result<Vec<scan::Rejection>, Refusal> {
     {
         return Err(Refusal::RefNameNotUtf8);
     }
-    scan(env, &updates, &Git::from_env()).map_err(|ScanError::Git(e)| {
+    scan(env, &updates, &Git::from_env()).map_err(|e| {
         Refusal::Error(match e {
-            GitCmdError::Spawn { subcommand, .. } => format!("cannot run git {subcommand}"),
-            GitCmdError::Failed { subcommand, .. } => format!("git {subcommand} failed"),
-            GitCmdError::Output { subcommand, .. } => {
+            ScanError::Git(GitCmdError::Spawn { subcommand, .. }) => {
+                format!("cannot run git {subcommand}")
+            }
+            ScanError::Git(GitCmdError::Failed { subcommand, .. }) => {
+                format!("git {subcommand} failed")
+            }
+            ScanError::Git(GitCmdError::Output { subcommand, .. }) => {
                 format!("unexpected git {subcommand} output")
             }
+            ScanError::Rules => "kind rules failed".to_owned(),
+            ScanError::UnsupportedKind => "unsupported kind".to_owned(),
         })
     })
 }

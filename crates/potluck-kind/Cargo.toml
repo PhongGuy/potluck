@@ -1,0 +1,18 @@
+[package]
+name = "potluck-kind"
+description = "The rule-set contract between Potluck and the apps whose workspaces it serves"
+# Versioned on its own: the potluck-kind tag tracks this crate, not the server release.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# One integration binary: tests/main.rs declares every test file as a module.
+autotests = false
+
+[[test]]
+name = "integration"
+path = "tests/main.rs"
+
+[lints]
+workspace = true

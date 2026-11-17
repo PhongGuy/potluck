@@ -4,9 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread::JoinHandle;
+use std::time::Duration;
+
+use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
 
 /// A hex object name: 40 (SHA-1) or 64 (SHA-256) lower-case hex digits.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -207,6 +212,7 @@ impl TipEntry {
 pub struct Git {
     binary: PathBuf,
     git_dir: Option<PathBuf>,
+    max_runtime: Option<Duration>,
 }
 
 /// What a git child's stderr is kept up to; the rest is read and dropped.
@@ -221,7 +227,19 @@ impl Git {
 
     /// A runner for `binary`, with `git_dir` passed as `GIT_DIR` when set.
     pub fn new(binary: PathBuf, git_dir: Option<PathBuf>) -> Git {
-        Git { binary, git_dir }
+        Git {
+            binary,
+            git_dir,
+            max_runtime: None,
+        }
+    }
+
+    /// The same runner, with every git child and its process group SIGKILLed once `limit` has
+    /// passed since it started; the killed call fails. Unset, a child runs as long as it likes.
+    #[must_use]
+    pub fn with_max_runtime(mut self, limit: Duration) -> Git {
+        self.max_runtime = Some(limit);
+        self
     }
 
     /// `cat-file --batch-check` on `<sha>^{}`: the peeled object and its type. A missing
@@ -574,7 +592,8 @@ impl Git {
     /// Starts `git <args>` with stdin, stdout and stderr piped, feeding `input` from its own
     /// thread and draining stderr on another (capped at STDERR_KEEP): git blocks once a pipe
     /// holds 64 KiB, so writing everything first and reading after deadlocks on large inputs or
-    /// outputs. The caller reads stdout, then calls `finish`.
+    /// outputs. With a run limit the child leads its own process group and a watchdog kills
+    /// that group once the limit passes. The caller reads stdout, then calls `finish`.
     fn spawn(
         &self,
         subcommand: &'static str,
@@ -584,6 +603,9 @@ impl Git {
         let mut cmd = Command::new(&self.binary);
         if let Some(dir) = &self.git_dir {
             cmd.env("GIT_DIR", dir);
+        }
+        if self.max_runtime.is_some() {
+            cmd.process_group(0);
         }
         cmd.arg(subcommand)
             .args(args)
@@ -597,6 +619,9 @@ impl Git {
         let mut child = cmd
             .spawn()
             .map_err(|source| GitCmdError::Spawn { subcommand, source })?;
+        let watchdog = self
+            .max_runtime
+            .and_then(|limit| Watchdog::start(&child, limit));
         let writer = input.and_then(|bytes| {
             let mut stdin = child.stdin.take()?;
             // EPIPE here means git quit early; its exit status says why.
@@ -618,6 +643,7 @@ impl Git {
             child,
             writer,
             drain,
+            watchdog,
         })
     }
 
@@ -761,19 +787,23 @@ fn read_reply(
     Ok(if kept { Reply::Kept } else { Reply::Skipped })
 }
 
-/// A git child with its two helper threads; `finish` joins them and checks the exit status.
+/// A git child with its two helper threads and, under a run limit, its watchdog; `finish`
+/// joins them and checks the exit status.
 struct Running {
     subcommand: &'static str,
     child: Child,
     writer: Option<JoinHandle<()>>,
     drain: JoinHandle<Vec<u8>>,
+    watchdog: Option<Watchdog>,
 }
 
 impl Running {
     /// Waits for git, joins the threads, and turns a non-zero exit into `Failed` with the
-    /// first kept stderr line. On an earlier parse failure call `abort` instead.
+    /// first kept stderr line; a child the watchdog killed exits on a signal and so fails too.
+    /// On an earlier parse failure call `abort` instead.
     fn finish(mut self) -> Result<(), GitCmdError> {
         let subcommand = self.subcommand;
+        self.stop_watchdog();
         let status = self.child.wait();
         let stderr = self.join();
         let status = status.map_err(|source| GitCmdError::Spawn { subcommand, source })?;
@@ -787,11 +817,35 @@ impl Running {
         })
     }
 
-    /// Kills git first, so a writer blocked on a full stdin pipe wakes up, then joins both threads.
+    /// Kills git first (its whole group under a run limit), so a writer blocked on a full stdin
+    /// pipe wakes up, then joins both threads.
     fn abort(mut self) {
-        let _ = self.child.kill();
+        match &self.watchdog {
+            // The child is not reaped yet, so its group id still names this group.
+            Some(dog) => kill_group(dog.group),
+            None => {
+                let _ = self.child.kill();
+            }
+        }
+        self.stop_watchdog();
         let _ = self.child.wait();
         self.join();
+    }
+
+    /// Waits for the child to exit without reaping it, then stops and joins the watchdog, so
+    /// the watchdog can only ever signal a group whose leader is still unreaped.
+    fn stop_watchdog(&mut self) {
+        let Some(dog) = self.watchdog.take() else {
+            return;
+        };
+        // Retried only on EINTR; any other result means the child exited or is already gone,
+        // and `wait` follows either way.
+        while let Err(rustix::io::Errno::INTR) = waitid(
+            WaitId::Pid(dog.group),
+            WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+        ) {}
+        drop(dog.stop);
+        let _ = dog.thread.join();
     }
 
     /// Joins the writer and the stderr drain; a panicked thread keeps nothing.
@@ -801,6 +855,38 @@ impl Running {
         }
         self.drain.join().unwrap_or_default()
     }
+}
+
+/// Kills a child's process group once its run limit passes, unless stopped first.
+struct Watchdog {
+    group: Pid,
+    /// Dropped to stop the watchdog before the limit.
+    stop: mpsc::Sender<()>,
+    thread: JoinHandle<()>,
+}
+
+impl Watchdog {
+    /// Starts the watchdog for `child`, spawned as its own group's leader; `None` when the
+    /// child's pid cannot name a group, which leaves it unlimited.
+    fn start(child: &Child, limit: Duration) -> Option<Watchdog> {
+        let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw)?;
+        let (stop, stopped) = mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            if let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(limit) {
+                kill_group(group);
+            }
+        });
+        Some(Watchdog {
+            group,
+            stop,
+            thread,
+        })
+    }
+}
+
+/// SIGKILL to every process in `group`; one already gone is fine.
+fn kill_group(group: Pid) {
+    let _ = kill_process_group(group, Signal::KILL);
 }
 
 /// Why a plumbing call failed.

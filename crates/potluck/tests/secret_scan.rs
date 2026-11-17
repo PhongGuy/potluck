@@ -832,6 +832,31 @@ fn a_relaxing_update_is_refused_for_write_and_passes_for_admin() {
 }
 
 #[test]
+fn a_history_pass_relaxation_is_refused_for_write_and_dropped_for_admin() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("created with a relaxation");
+    let scan_as = |role: Role| {
+        let e = HookEnv::new(None, false, None).with_role(role);
+        rows(
+            &scan_with(
+                &e,
+                Some(&rules(Act::RelaxAlways)),
+                &[update(&tip, "refs/heads/main")],
+                &git_for(&s),
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(
+        scan_as(Role::Write),
+        ["refs/heads/main a.t safety_relaxation relax_always"],
+        "a created ref gets no tip pass, so this is the history pass"
+    );
+    assert!(scan_as(Role::Admin).is_empty());
+}
+
+#[test]
 fn a_created_ref_has_no_baseline_and_a_delete_is_not_checked() {
     let s = Scratch::new();
     s.write("a.t", b"relaxed\n");

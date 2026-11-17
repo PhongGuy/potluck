@@ -14,6 +14,7 @@ pub enum Act {
     Detail(&'static str),
     Elsewhere,
     Relax,
+    RelaxAlways,
 }
 
 #[derive(Debug)]
@@ -85,6 +86,8 @@ impl RuleSet for TestRules {
                     Vec::new()
                 }
             }
+            // Reported at every path the kind reads, history and tip alike, whatever the role.
+            Act::RelaxAlways => vec![Finding::new(Code::SafetyRelaxation, "relax_always", p)],
         }
     }
     fn seed(&self) -> Vec<SeedFile> {

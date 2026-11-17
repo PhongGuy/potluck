@@ -1,4 +1,5 @@
-//! `GET /api/v1/update` and `POST /api/v1/update/check` over a router with a loopback source.
+//! `GET /api/v1/update` and `POST /api/v1/update/check` on a started server with a loopback
+//! release source.
 
 use potluck::api::AppState;
 use potluck::server::{Running, start_with};

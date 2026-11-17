@@ -23,8 +23,6 @@ fn hooks_dir(server: &GitServer) -> std::path::PathBuf {
     server.dir.path().join("hooks")
 }
 
-/// `dir` as a path relative to the working directory: `../` per cwd component, then the
-/// absolute path without its leading slash. Linux only, which is what the suite runs on.
 #[test]
 fn install_writes_a_script_that_execs_potluck_and_replaces_an_old_one() {
     let dir = tempfile::tempdir().unwrap();

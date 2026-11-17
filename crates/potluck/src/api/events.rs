@@ -13,13 +13,18 @@ use super::AppState;
 use super::auth::Authenticated;
 use super::error::{ApiError, ApiResult};
 use super::workspaces::{WsPath, load};
+use crate::clock;
 use crate::db::accounts::UserRecord;
 use crate::git::push::list_refs;
 use crate::slug::Slug;
 
+// Auth judges expiry on the wall clock, the timer is monotonic: close just past the instant.
+const EXPIRY_MARGIN: Duration = Duration::from_millis(50);
+
 /// `GET /workspaces/{team}/{ws}/events` (read; a user, so `System` is 403): `retry: 2000`, then
 /// one `ref` event per branch as the repository stands, then one per moved ref as pushes land,
-/// with the keep-alive comment every 15 s. Ends when the server closes it or the client lags.
+/// with the keep-alive comment every 15 s. Ends when the server closes it, when the token that
+/// opened it expires, or when the client lags.
 /// Access is re-checked once subscribed, so a grant lost meanwhile gets 401 or 404, not a stream.
 pub(super) async fn stream(
     State(state): State<AppState>,
@@ -33,7 +38,7 @@ pub(super) async fn stream(
         return Err(ApiError::internal("events could not be opened").into());
     };
     // Subscribe before the snapshot so a push landing in between still arrives live.
-    let subscription = state
+    let mut subscription = state
         .notices()
         .subscribe(ws.id(), user.user().id(), user.token_id());
     let repos = state.git().repos();
@@ -45,9 +50,9 @@ pub(super) async fn stream(
         })?;
     // A close that ran before `subscribe` missed this stream, so the access is checked again.
     let signed_out = || ApiError::unauthenticated("invalid or expired token");
-    if state.db().token_by_id(user.token_id()).await?.is_none() {
+    let Some(token) = state.db().token_by_id(user.token_id()).await? else {
         return Err(signed_out().into());
-    }
+    };
     let Some(owner) = state
         .db()
         .user_by_username(user.user().username())
@@ -67,6 +72,10 @@ pub(super) async fn stream(
         owner.server_admin() || state.db().role_for(ws.id(), owner.id()).await?.is_some();
     if !(still_there && readable) {
         return Err(ApiError::not_found("no such workspace").into());
+    }
+    // Scheduled from the wall clock now; an expiry that does not parse sets no lifetime.
+    if let Some(left) = token.expires_at().and_then(clock::until) {
+        subscription = subscription.close_after(left + EXPIRY_MARGIN);
     }
     let first: Vec<Result<Event, Infallible>> =
         std::iter::once(Event::default().retry(Duration::from_secs(2)))

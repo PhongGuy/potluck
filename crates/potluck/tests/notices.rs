@@ -153,3 +153,39 @@ async fn a_lagged_stream_does_not_resume() {
         "a lagged stream does not pick up again"
     );
 }
+
+#[tokio::test]
+async fn a_stream_given_a_lifetime_ends_when_it_runs_out() {
+    let n = Notices::new();
+    let mut lasting = n.subscribe(1, 10, 100);
+    let started = tokio::time::Instant::now();
+    let mut short = n
+        .subscribe(1, 10, 101)
+        .close_after(Duration::from_millis(300));
+    n.publish(1, &[mv("refs/heads/main")]);
+    assert_eq!(
+        short.next().await,
+        Some(mv("refs/heads/main")),
+        "moves flow until then"
+    );
+    assert!(ended(&mut short).await, "the lifetime ends the stream");
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "not before it runs out"
+    );
+    assert!(ended(&mut short).await, "and it stays ended");
+    n.publish(1, &[mv("refs/heads/topic")]);
+    assert_eq!(lasting.next().await, Some(mv("refs/heads/main")));
+    assert_eq!(
+        lasting.next().await,
+        Some(mv("refs/heads/topic")),
+        "a stream without a lifetime keeps going"
+    );
+}
+
+#[tokio::test]
+async fn a_lifetime_already_spent_ends_the_stream_at_once() {
+    let n = Notices::new();
+    let mut sub = n.subscribe(1, 10, 100).close_after(Duration::ZERO);
+    assert!(ended(&mut sub).await);
+}

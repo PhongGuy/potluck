@@ -74,6 +74,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "apinata-format"
+version = "0.1.0"
+source = "git+https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#29c85938c279f7b274568eb76e58ebe79808294a"
+dependencies = [
+ "saphyr-parser",
+ "yaml_serde",
+]
+
+[[package]]
+name = "apinata-rules"
+version = "0.1.0"
+source = "git+https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#29c85938c279f7b274568eb76e58ebe79808294a"
+dependencies = [
+ "apinata-format",
+ "potluck-kind",
+ "yaml_serde",
+]
+
+[[package]]
 name = "argon2"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -84,6 +103,12 @@ dependencies = [
  "cpufeatures 0.3.1",
  "password-hash",
 ]
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "async-compression"
@@ -1287,6 +1312,7 @@ name = "potluck"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apinata-rules",
  "argon2",
  "async-compression",
  "axum",
@@ -1686,6 +1712,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "saphyr-parser"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48cf5a82d41247a625f040af08e91008fec945bce3b0bffba992c44af092caa2"
+dependencies = [
+ "arraydeque",
+ "thiserror",
 ]
 
 [[package]]

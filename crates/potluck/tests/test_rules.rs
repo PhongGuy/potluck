@@ -1,6 +1,6 @@
 //! Rule sets that misbehave or report the new codes, for the scan and hook tests.
 
-use potluck::kinds::{Change, Code, Finding, RULES_ABI, RuleSet, SeedFile};
+use potluck::kinds::{Blob, Change, Code, Finding, RULES_ABI, RuleSet, SeedFile};
 
 /// What a `TestRules` does when `check` sees a file whose path ends in `.t`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +13,7 @@ pub enum Act {
     BadRuleName,
     Detail(&'static str),
     Elsewhere,
+    Relax,
 }
 
 #[derive(Debug)]
@@ -74,6 +75,16 @@ impl RuleSet for TestRules {
                 "elsewhere",
                 "other/place.t",
             )],
+            // Reported for every role; Potluck decides. Only a tip change whose new side says
+            // "relaxed" while the old side did not is a relaxation.
+            Act::Relax => {
+                let says = |b: Option<Blob<'_>>| matches!(b, Some(Blob::Bytes(x)) if x.starts_with(b"relaxed"));
+                if change.has_baseline() && says(change.new_blob()) && !says(change.old_blob()) {
+                    vec![Finding::new(Code::SafetyRelaxation, "relax_test", p)]
+                } else {
+                    Vec::new()
+                }
+            }
         }
     }
     fn seed(&self) -> Vec<SeedFile> {

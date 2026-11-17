@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Write;
 
-use potluck_kind::Role;
+use potluck_kind::{Code, Role};
 
 use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
 use crate::role::Role as AccessRole;
@@ -164,6 +164,10 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// `scan` with the rule set given rather than looked up, and no override check. Every call into
 /// `rules` is panic-guarded; a panic, an `abi()` other than `RULES_ABI` (checked before any git
 /// call) or a finding whose rule is empty or not `[a-z0-9_]` fails with `ScanError::Rules`.
+/// After the history passes, every update whose old and new values both peel to commits gets a
+/// tip pass: `check` with `Change::tip` at each path between the two tips that the kind `reads`.
+/// Its findings sort after the ref's other hits, and one is dropped when its path already has a
+/// rejection anywhere in the push. A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
     rules: Option<&dyn RuleSet>,
@@ -176,6 +180,7 @@ pub fn scan_with(
         return Err(ScanError::Rules);
     }
     let kind = GuardedRules(rules);
+    let role = kind_role(env.role());
     // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
     // path-rule hits first, then its content hits, each in entry order.
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
@@ -239,7 +244,7 @@ pub fn scan_with(
             }
         }
     }
-    content_pass(git, kind, updates, candidates, &mut hits)?;
+    content_pass(git, kind, role, updates, candidates, &mut hits)?;
     git.for_each_message(&messages, |sha, message| {
         if let (Some(&(ri, mi)), Some(finding)) =
             (message_slots.get(sha), generic::content_rule("/", message))
@@ -250,8 +255,114 @@ pub fn scan_with(
             ));
         }
     })?;
+    for (ri, update) in updates.iter().enumerate() {
+        for (ei, r) in tip_pass(kind, update, role, git)? {
+            hits.push(((ri, 3, ei), r));
+        }
+    }
+    if role == Role::Admin {
+        hits.retain(|(_, r)| r.finding.code() != Code::SafetyRelaxation);
+    }
+    // A tip finding repeats nothing: a path refused by any other pass, or by an earlier ref's
+    // tip pass, is already in the output once.
+    let mut refused: HashSet<Vec<u8>> = hits
+        .iter()
+        .filter(|((_, pass, _), _)| *pass != 3)
+        .map(|(_, r)| r.path.clone())
+        .collect();
     hits.sort_by_key(|(key, _)| *key);
+    hits.retain(|((_, pass, _), r)| *pass != 3 || refused.insert(r.path.clone()));
     Ok(hits.into_iter().map(|(_, r)| r).collect())
+}
+
+/// The kind's view of the pusher's role.
+fn kind_role(role: AccessRole) -> Role {
+    match role {
+        AccessRole::Read => Role::Read,
+        AccessRole::Write => Role::Write,
+        AccessRole::Admin => Role::Admin,
+    }
+}
+
+/// Judges one update old tip against new tip: `check` with `Change::tip` at every path the
+/// kind `reads` among those `tip_diff` lists, as `(entry index, rejection)` in entry order. A
+/// delete, a created ref, an old or new value that is not a commit, and a push without a rule
+/// set yield nothing; a peel failure is a git error. Every finding is kept, whatever `role`.
+fn tip_pass(
+    kind: GuardedRules<'_>,
+    update: &RefUpdate,
+    role: Role,
+    git: &Git,
+) -> Result<Vec<(usize, Rejection)>, ScanError> {
+    if kind.0.is_none() || update.is_delete() || update.old().is_zero() {
+        return Ok(Vec::new());
+    }
+    let (old, old_type) = git.peel(update.old())?;
+    let (new, new_type) = git.peel(update.new())?;
+    if old_type != ObjectType::Commit || new_type != ObjectType::Commit {
+        return Ok(Vec::new());
+    }
+    let mut entries = Vec::new();
+    for (ei, entry) in git.tip_diff(&old, &new)?.into_iter().enumerate() {
+        let lossy = entry.path_lossy();
+        if (entry.old().is_some() || entry.new().is_some()) && kind.reads(&lossy)? {
+            entries.push((ei, entry, lossy));
+        }
+    }
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Both sides of a change are needed at once, so the blobs at or under the cap are held in
+    // memory for this ref; the read stays on the kind's paths.
+    let names: HashSet<Sha> = entries
+        .iter()
+        .flat_map(|(_, e, _)| e.old().into_iter().chain(e.new()))
+        .cloned()
+        .collect();
+    let names: Vec<Sha> = names.into_iter().collect();
+    let sizes = git.blob_sizes(&names)?;
+    let mut small = Vec::with_capacity(names.len());
+    for sha in names {
+        match sizes.get(&sha) {
+            Some(&n) if n <= generic::MAX_CONTENT_BYTES => small.push(sha),
+            Some(_) => {}
+            None => return Err(no_size()),
+        }
+    }
+    let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(small.len());
+    git.for_each_blob(&small, |sha, bytes| {
+        read.insert(sha.clone(), bytes.to_vec());
+    })?;
+    // A blob git sized but did not stream fails closed, like a missing size.
+    let side = |sha: Option<&Sha>| -> Result<Option<Blob<'_>>, ScanError> {
+        let Some(sha) = sha else { return Ok(None) };
+        match read.get(sha) {
+            Some(bytes) => Ok(Some(Blob::Bytes(bytes))),
+            None if sizes
+                .get(sha)
+                .is_some_and(|&n| n > generic::MAX_CONTENT_BYTES) =>
+            {
+                Ok(Some(Blob::TooLarge))
+            }
+            None => Err(no_size()),
+        }
+    };
+    let mut found = Vec::new();
+    for (ei, entry, lossy) in &entries {
+        let change = Change::tip(lossy, side(entry.old())?, side(entry.new())?, role);
+        if let Some(finding) = kind.check(&change)? {
+            found.push((*ei, rejection(update.name(), entry.path(), lossy, finding)));
+        }
+    }
+    Ok(found)
+}
+
+/// Every blob a pass reads is one git has just named, so a missing size or body fails closed.
+fn no_size() -> ScanError {
+    ScanError::Git(GitCmdError::Output {
+        subcommand: "cat-file",
+        detail: "no blob size for a candidate".to_owned(),
+    })
 }
 
 /// Streams every candidate blob at or under the cap once and runs the content rules for each
@@ -260,6 +371,7 @@ pub fn scan_with(
 fn content_pass(
     git: &Git,
     kind: GuardedRules<'_>,
+    role: Role,
     updates: &[RefUpdate],
     candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
     hits: &mut Vec<((usize, u8, usize), Rejection)>,
@@ -275,7 +387,7 @@ fn content_pass(
                 for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
                     let lossy = String::from_utf8_lossy(path);
                     let finding = if kind.reads(&lossy)? {
-                        kind.check(&Change::history(&lossy, Blob::TooLarge, Role::Write))?
+                        kind.check(&Change::history(&lossy, Blob::TooLarge, role))?
                     } else {
                         None
                     };
@@ -287,12 +399,7 @@ fn content_pass(
                     }
                 }
             }
-            None => {
-                return Err(ScanError::Git(GitCmdError::Output {
-                    subcommand: "cat-file",
-                    detail: "no blob size for a candidate".to_owned(),
-                }));
-            }
+            None => return Err(no_size()),
         }
     }
     // The blob stream cannot stop early, so the first rule-set failure is kept and every later
@@ -309,8 +416,7 @@ fn content_pass(
             let lossy = String::from_utf8_lossy(path);
             let finding = match &generic_hit {
                 Some(f) => Some(Finding::new(f.code(), f.rule(), &lossy)),
-                None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), Role::Write))
-                {
+                None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), role)) {
                     Ok(finding) => finding,
                     Err(e) => {
                         failed = Some(e);

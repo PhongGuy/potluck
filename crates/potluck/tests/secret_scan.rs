@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
+use potluck::role::Role;
 use potluck::secret_check::git::{Git, RefUpdate};
 use potluck::secret_check::scan::{HookEnv, Rejection, ScanError, report, scan, scan_with};
 
@@ -738,4 +739,133 @@ fn a_rule_set_detail_reaches_the_rejection() {
     )
     .unwrap();
     assert_eq!(r[0].finding().detail(), Some("key.path"));
+}
+
+fn moved(old: &str, new: &str, name: &str) -> RefUpdate {
+    RefUpdate::parse_line(format!("{old} {new} {name}").as_bytes()).unwrap()
+}
+
+fn relax_rows(s: &Scratch, role: Role, u: RefUpdate) -> Vec<String> {
+    let e = HookEnv::new(None, false, None).with_role(role);
+    rows(&scan_with(&e, Some(&rules(Act::Relax)), &[u], &git_for(s)).unwrap())
+}
+
+const RELAXED: &[&str] = &["refs/heads/main a.t safety_relaxation relax_test"];
+
+#[test]
+fn a_relaxing_update_is_refused_for_write_and_passes_for_admin() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.stage_commit("relax");
+    assert_eq!(
+        relax_rows(&s, Role::Write, moved(&old, &new, "refs/heads/main")),
+        RELAXED
+    );
+    assert_eq!(
+        relax_rows(&s, Role::Read, moved(&old, &new, "refs/heads/main")),
+        RELAXED
+    );
+    assert!(relax_rows(&s, Role::Admin, moved(&old, &new, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_created_ref_has_no_baseline_and_a_delete_is_not_checked() {
+    let s = Scratch::new();
+    s.write("a.t", b"relaxed\n");
+    let tip = s.stage_commit("relaxed from the start");
+    assert!(relax_rows(&s, Role::Write, update(&tip, "refs/heads/main")).is_empty());
+    assert!(relax_rows(&s, Role::Write, moved(&tip, ZERO, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_relax_then_restore_in_one_push_is_judged_by_its_net_result() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    s.commit("relax");
+    s.write("a.t", b"strict\n");
+    let new = s.stage_commit("restore");
+    assert!(relax_rows(&s, Role::Write, moved(&old, &new, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_force_push_to_unrelated_history_is_judged_old_against_new() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.git(Some(&s.work), &["checkout", "-q", "--orphan", "other"]);
+    s.write("a.t", b"relaxed\n");
+    s.commit("unrelated");
+    let new = s.stage("other");
+    assert_eq!(
+        relax_rows(&s, Role::Write, moved(&old, &new, "refs/heads/main")),
+        RELAXED
+    );
+}
+
+#[test]
+fn a_fast_forward_onto_another_refs_commits_is_re_judged() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    let old = s.commit("seed");
+    s.publish("main");
+    s.branch("feat");
+    s.write("environments/dev.yml", ENV_YML);
+    let feat = s.commit("accepted on feat under an override");
+    s.publish("feat");
+    assert_eq!(
+        scan_main_moved(&s, &old, &feat),
+        ["refs/heads/main environments/dev.yml secret_value secret_value"],
+        "no new commits, so only the tip pass sees it"
+    );
+}
+
+fn scan_main_moved(s: &Scratch, old: &str, new: &str) -> Vec<String> {
+    rows(
+        &scan(
+            &env(Some("apinata")),
+            &[moved(old, new, "refs/heads/main")],
+            &git_for(s),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn a_tip_finding_at_a_path_another_ref_already_reported_prints_once() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    let old = s.commit("seed");
+    s.publish("main");
+    s.write("environments/dev.yml", ENV_YML);
+    let tip = s.stage_commit("secret");
+    let both = [
+        update(&tip, "refs/heads/feat"),
+        moved(&old, &tip, "refs/heads/main"),
+    ];
+    assert_eq!(
+        rows(&scan(&env(Some("apinata")), &both, &git_for(&s)).unwrap()),
+        ["refs/heads/feat environments/dev.yml secret_value secret_value"],
+        "feat brings the commit; main's tip finding at the same path is not repeated"
+    );
+}
+
+#[test]
+fn a_tip_finding_already_reported_by_the_history_pass_prints_once() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", b"opencollection: 1.0.0\n");
+    let old = s.commit("seed");
+    s.publish("main");
+    s.write("environments/dev.yml", ENV_YML);
+    let new = s.stage_commit("secret");
+    assert_eq!(
+        scan_main_moved(&s, &old, &new),
+        ["refs/heads/main environments/dev.yml secret_value secret_value"]
+    );
 }

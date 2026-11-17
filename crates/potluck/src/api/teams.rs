@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::events;
 use super::json::ApiJson;
 use super::objects::TeamJson;
@@ -27,7 +27,7 @@ pub(super) struct CreateTeam {
 pub(super) async fn list(
     State(state): State<AppState>,
     auth: Authenticated,
-) -> Result<Json<Vec<TeamJson>>, ApiError> {
+) -> ApiResult<Json<Vec<TeamJson>>> {
     auth.require_server_admin()?;
     let mut teams = Vec::new();
     for team in state.db().list_teams().await? {
@@ -41,8 +41,8 @@ pub(super) async fn list(
 pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
-    body: Result<ApiJson<CreateTeam>, ApiError>,
-) -> Result<(StatusCode, Json<TeamJson>), ApiError> {
+    body: Result<ApiJson<CreateTeam>, ErrorResponse>,
+) -> ApiResult<(StatusCode, Json<TeamJson>)> {
     // The body is extracted as a `Result` so a non-admin's bad body still answers 403.
     auth.require_server_admin()?;
     let ApiJson(body) = body?;
@@ -58,7 +58,7 @@ pub(super) async fn add_member(
     State(state): State<AppState>,
     auth: Authenticated,
     Path((team, username)): Path<(String, String)>,
-) -> Result<Json<TeamJson>, ApiError> {
+) -> ApiResult<Json<TeamJson>> {
     auth.require_server_admin()?;
     let (team, user) = team_and_user(&state, &team, &username).await?;
     state.db().add_member(team.id(), user.id()).await?;
@@ -71,11 +71,11 @@ pub(super) async fn remove_member(
     State(state): State<AppState>,
     auth: Authenticated,
     Path((team, username)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
+) -> ApiResult<StatusCode> {
     auth.require_server_admin()?;
     let (team, user) = team_and_user(&state, &team, &username).await?;
     if !state.db().remove_member(team.id(), user.id()).await? {
-        return Err(ApiError::not_found("no such member"));
+        return Err(ApiError::not_found("no such member").into());
     }
     // The membership is gone either way; a failed reap is logged rather than answered as 500.
     if let Err(err) = events::reap_unreadable(&state, std::slice::from_ref(&user)).await {

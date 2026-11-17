@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult};
 use super::json::ApiJson;
 use super::objects::{IdentityJson, TokenJson, UserJson, WorkspaceJson, identity};
 use super::{validate, workspaces};
@@ -41,7 +41,7 @@ pub(super) struct CreatedToken {
 pub(super) async fn me(
     State(state): State<AppState>,
     auth: Authenticated,
-) -> Result<Json<MeResponse>, ApiError> {
+) -> ApiResult<Json<MeResponse>> {
     let user = auth.require_user()?.user();
     Ok(Json(MeResponse {
         user: UserJson::from(user),
@@ -54,9 +54,9 @@ pub(super) async fn me(
 pub(super) async fn list(
     State(state): State<AppState>,
     auth: Authenticated,
-) -> Result<Json<Vec<TokenJson>>, ApiError> {
+) -> ApiResult<Json<Vec<TokenJson>>> {
     let user_id = auth.require_user()?.user().id();
-    token_list(&state, user_id).await
+    Ok(token_list(&state, user_id).await?)
 }
 
 /// `POST /tokens` (self) `{name, expires_at?}`: `name` 1..=100 chars trimmed (422 `name`);
@@ -66,7 +66,7 @@ pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
     ApiJson(body): ApiJson<CreateToken>,
-) -> Result<(StatusCode, Json<CreatedToken>), ApiError> {
+) -> ApiResult<(StatusCode, Json<CreatedToken>)> {
     let user_id = auth.require_user()?.user().id();
     let name = validate::token_name("name", &body.name)?;
     // Normalised stamps compare chronologically as strings, so "after now" is a string compare.
@@ -78,7 +78,8 @@ pub(super) async fn create(
                 return Err(ApiError::invalid_value(
                     "expires_at",
                     "expires_at must be an RFC 3339 time in the future",
-                ));
+                )
+                .into());
             }
         },
     };
@@ -120,7 +121,7 @@ pub(super) async fn revoke(
     State(state): State<AppState>,
     auth: Authenticated,
     Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+) -> ApiResult<StatusCode> {
     // A server admin may revoke anything; anyone else only their own, and others' tokens answer
     // like missing ones so their ids are not confirmed.
     let owner = if auth.actor().is_server_admin() {
@@ -132,13 +133,13 @@ pub(super) async fn revoke(
     let id = id.parse::<i64>().map_err(|_| missing())?;
     let token = state.db().token_by_id(id).await?.ok_or_else(missing)?;
     if owner.is_some_and(|owner| owner != token.user_id()) {
-        return Err(missing());
+        return Err(missing().into());
     }
     if state.db().delete_token(id).await? {
         state.notices().close_token(id);
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(missing())
+        Err(missing().into())
     }
 }
 
@@ -147,14 +148,14 @@ pub(super) async fn list_for_user(
     State(state): State<AppState>,
     auth: Authenticated,
     Path(username): Path<String>,
-) -> Result<Json<Vec<TokenJson>>, ApiError> {
+) -> ApiResult<Json<Vec<TokenJson>>> {
     auth.require_server_admin()?;
     let user = state
         .db()
         .user_by_username(&username)
         .await?
         .ok_or_else(|| ApiError::not_found("no such user"))?;
-    token_list(&state, user.id()).await
+    Ok(token_list(&state, user.id()).await?)
 }
 
 async fn token_list(state: &AppState, user_id: i64) -> Result<Json<Vec<TokenJson>>, ApiError> {

@@ -104,7 +104,9 @@ impl ReleaseServer {
         let app = axum::Router::new()
             .route("/dl/{file}", axum::routing::get(reply))
             .with_state(Arc::clone(&served));
-        let (addr, task) = crate::common::serve(app).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         ReleaseServer {
             addr,
             served,

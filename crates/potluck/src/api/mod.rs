@@ -16,18 +16,20 @@ use crate::update::UpdateChecker;
 
 mod actor;
 pub mod auth;
-pub mod client_ip;
+pub(crate) mod client_ip;
 pub mod credential;
 pub mod error;
 mod events;
 mod grants;
-pub mod json;
+pub(crate) mod json;
 pub mod objects;
 mod overrides;
 pub(crate) mod pushes;
 mod session;
 mod system;
 mod teams;
+#[cfg(test)]
+mod test_support;
 mod tokens;
 mod update;
 mod users;
@@ -35,7 +37,7 @@ mod validate;
 pub(crate) mod workspaces;
 
 pub use actor::{Actor, AuthUser};
-use error::ApiError;
+use error::{ApiError, ErrorResponse};
 
 /// What every handler can reach: the database handle, the validated config, the git access
 /// resolver, the git engine, the password hasher, the sign-in rate limiters and, when a release
@@ -157,7 +159,7 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
 
 /// Every route under `/api/v1` and the git smart HTTP routes under `/git`; unknown paths and
 /// wrong methods answer `not_found`.
-pub fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/health", get(system::health))
         .route("/server", get(system::server))
@@ -205,6 +207,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn not_found() -> ApiError {
-    ApiError::not_found("no such route")
+async fn not_found() -> ErrorResponse {
+    ApiError::not_found("no such route").into()
 }

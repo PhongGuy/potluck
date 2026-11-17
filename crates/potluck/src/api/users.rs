@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer};
 
 use super::AppState;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult};
 use super::events;
 use super::json::ApiJson;
 use super::objects::UserJson;
@@ -54,7 +54,7 @@ fn double_option<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String
 pub(super) async fn list(
     State(state): State<AppState>,
     auth: Authenticated,
-) -> Result<Json<Vec<UserJson>>, ApiError> {
+) -> ApiResult<Json<Vec<UserJson>>> {
     auth.require_server_admin()?;
     let users = state.db().list_users().await?;
     Ok(Json(users.iter().map(UserJson::from).collect()))
@@ -67,7 +67,7 @@ pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
     ApiJson(body): ApiJson<CreateUser>,
-) -> Result<(StatusCode, Json<UserJson>), ApiError> {
+) -> ApiResult<(StatusCode, Json<UserJson>)> {
     auth.require_server_admin()?;
     // The whole body is checked before hashing, so a refusal costs no argon2 work.
     check_username(&body.username)?;
@@ -107,7 +107,7 @@ pub(super) async fn patch(
     auth: Authenticated,
     Path(username): Path<String>,
     ApiJson(body): ApiJson<PatchUser>,
-) -> Result<Json<UserJson>, ApiError> {
+) -> ApiResult<Json<UserJson>> {
     // Admins reach anyone; everyone else only themself, and another user is not even readable.
     let admin = auth.actor().is_server_admin();
     let caller = if admin {
@@ -118,16 +118,17 @@ pub(super) async fn patch(
     let is_self = caller.is_some_and(|user| user.user().username() == username);
     if !admin {
         if !is_self {
-            return Err(ApiError::not_found("no such user"));
+            return Err(ApiError::not_found("no such user").into());
         }
         if body.server_admin.is_some() || body.disabled.is_some() {
             return Err(ApiError::forbidden(
                 "only a server admin may change server_admin or disabled",
-            ));
+            )
+            .into());
         }
     }
     let Some(target) = state.db().user_by_username(&username).await? else {
-        return Err(ApiError::not_found("no such user"));
+        return Err(ApiError::not_found("no such user").into());
     };
 
     if let Some(name) = &body.display_name {
@@ -145,7 +146,7 @@ pub(super) async fn patch(
         // Changing one's own password proves the current one, rate limited like a sign-in.
         if is_self {
             let Some(current) = body.current_password else {
-                return Err(ApiError::unauthenticated("current_password is required"));
+                return Err(ApiError::unauthenticated("current_password is required").into());
             };
             state
                 .session_limits()
@@ -153,7 +154,7 @@ pub(super) async fn patch(
                 .check(&username)
                 .map_err(ApiError::rate_limited)?;
             let Some(phc) = target.password_hash().map(str::to_owned) else {
-                return Err(ApiError::unauthenticated("current_password is wrong"));
+                return Err(ApiError::unauthenticated("current_password is wrong").into());
             };
             let passwords = state.passwords().clone();
             let verified = tokio::task::spawn_blocking(move || passwords.verify(&current, &phc))
@@ -161,7 +162,7 @@ pub(super) async fn patch(
                 .map_err(|_| ApiError::internal("password check failed"))?
                 .map_err(|_| ApiError::internal("password check failed"))?;
             if !verified {
-                return Err(ApiError::unauthenticated("current_password is wrong"));
+                return Err(ApiError::unauthenticated("current_password is wrong").into());
             }
         }
         let passwords = state.passwords().clone();
@@ -184,7 +185,7 @@ pub(super) async fn patch(
         patch = patch.disabled(yes);
     }
     let Some(user) = state.db().update_user(&username, patch).await? else {
-        return Err(ApiError::not_found("no such user"));
+        return Err(ApiError::not_found("no such user").into());
     };
     if body.disabled == Some(true) {
         state.notices().close_user(user.id());

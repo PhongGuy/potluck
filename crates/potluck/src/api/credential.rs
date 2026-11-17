@@ -34,7 +34,7 @@ impl std::fmt::Debug for Credential {
 /// Reads `Authorization: Bearer <token>` or `Authorization: Basic base64(<anything>:<token>)`.
 /// `Ok(None)` when the header is absent; `Err(unauthenticated)` when present but unusable
 /// (unknown scheme, bad base64, no colon, empty token). The scheme is case-insensitive.
-pub fn credential_from_headers(headers: &HeaderMap) -> Result<Option<Credential>, ApiError> {
+pub(crate) fn credential_from_headers(headers: &HeaderMap) -> Result<Option<Credential>, ApiError> {
     let Some(value) = headers.get(AUTHORIZATION) else {
         return Ok(None);
     };
@@ -59,4 +59,77 @@ fn token_from_value(value: &str) -> Option<String> {
     let decoded = String::from_utf8(STANDARD.decode(rest).ok()?).ok()?;
     let (_user, token) = decoded.split_once(':')?;
     Some(token.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::error::ErrorCode;
+    use axum::http::HeaderValue;
+    use base64::Engine;
+
+    fn headers(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("authorization", HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    #[test]
+    fn bearer_and_basic_yield_the_token() {
+        let bearer = credential_from_headers(&headers("Bearer plk_abc"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bearer.secret(), "plk_abc");
+        let basic = base64::engine::general_purpose::STANDARD.encode("anyone:plk_abc");
+        let from_basic = credential_from_headers(&headers(&format!("Basic {basic}")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            from_basic.secret(),
+            bearer.secret(),
+            "the username is ignored"
+        );
+        let lower = credential_from_headers(&headers("bearer plk_abc"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lower.secret(),
+            bearer.secret(),
+            "schemes are case-insensitive"
+        );
+        let colon = base64::engine::general_purpose::STANDARD.encode("user:plk_a:b");
+        assert_eq!(
+            credential_from_headers(&headers(&format!("Basic {colon}")))
+                .unwrap()
+                .unwrap()
+                .secret(),
+            "plk_a:b",
+            "split at the first colon"
+        );
+    }
+
+    #[test]
+    fn absent_is_none_and_malformed_is_401() {
+        assert!(
+            credential_from_headers(&HeaderMap::new())
+                .unwrap()
+                .is_none()
+        );
+        let no_colon = base64::engine::general_purpose::STANDARD.encode("justatoken");
+        let empty_pw = base64::engine::general_purpose::STANDARD.encode("user:");
+        for bad in [
+            "Digest abc",
+            "Bearer",
+            "Bearer ",
+            "Basic !!!",
+            &format!("Basic {no_colon}"),
+            &format!("Basic {empty_pw}"),
+        ] {
+            let err = credential_from_headers(&headers(bad))
+                .err()
+                .unwrap_or_else(|| panic!("{bad:?} accepted"));
+            assert_eq!(err.status(), 401, "{bad:?}");
+            assert_eq!(err.code(), ErrorCode::Unauthenticated, "{bad:?}");
+        }
+    }
 }

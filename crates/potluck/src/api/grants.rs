@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::AppState;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::events;
 use super::json::ApiJson;
 use super::objects::GrantJson;
@@ -31,7 +31,7 @@ pub(super) async fn list(
     State(state): State<AppState>,
     auth: Authenticated,
     path: WsPath,
-) -> Result<Json<Vec<GrantJson>>, ApiError> {
+) -> ApiResult<Json<Vec<GrantJson>>> {
     let (ws, role) = load(&state, &auth, path).await?;
     require(role, Role::Admin, "manage grants")?;
     let grants = state.db().list_grants(ws.id()).await?;
@@ -45,19 +45,16 @@ pub(super) async fn put(
     State(state): State<AppState>,
     auth: Authenticated,
     path: GrantPath,
-    body: Result<ApiJson<PutGrant>, ApiError>,
-) -> Result<Json<GrantJson>, ApiError> {
+    body: Result<ApiJson<PutGrant>, ErrorResponse>,
+) -> ApiResult<Json<GrantJson>> {
     let (ws, subject) = load_subject(&state, &auth, path).await?;
     let ApiJson(body) = body?;
     let Some(role) = Role::parse(&body.role) else {
-        return Err(ApiError::invalid_value(
-            "role",
-            "role must be read, write or admin",
-        ));
+        return Err(ApiError::invalid_value("role", "role must be read, write or admin").into());
     };
     match state.db().put_grant(ws.id(), subject, role).await? {
         Some(grant) => Ok(Json(GrantJson::from(&grant))),
-        None => Err(ApiError::not_found("no such user or team")),
+        None => Err(ApiError::not_found("no such user or team").into()),
     }
 }
 
@@ -66,10 +63,10 @@ pub(super) async fn delete(
     State(state): State<AppState>,
     auth: Authenticated,
     path: GrantPath,
-) -> Result<StatusCode, ApiError> {
+) -> ApiResult<StatusCode> {
     let (ws, subject) = load_subject(&state, &auth, path).await?;
     if !state.db().delete_grant(ws.id(), subject.clone()).await? {
-        return Err(ApiError::not_found("no such grant"));
+        return Err(ApiError::not_found("no such grant").into());
     }
     // Everyone who held the grant may have lost their last way in; their streams close here.
     let names = match subject {

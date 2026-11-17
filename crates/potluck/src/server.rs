@@ -89,7 +89,7 @@ pub enum ServerError {
 /// pre-receive hook, opens and migrates the database, binds `config.listen()` and the admin
 /// socket, and serves the API on both. The update endpoints report the check off.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
-    start_inner(config, None).await
+    start_inner(config, Serve::Fresh(None)).await
 }
 
 /// As `start`, with an update checker over `source` for the running version; the daily check
@@ -98,13 +98,24 @@ pub async fn start_with_updates(
     config: &Config,
     source: UpdateSource,
 ) -> Result<Running, ServerError> {
-    start_inner(config, Some(source)).await
+    start_inner(config, Serve::Fresh(Some(source))).await
 }
 
-async fn start_inner(
-    config: &Config,
-    source: Option<UpdateSource>,
-) -> Result<Running, ServerError> {
+/// As `start`, serving `state` as given: its database (migrated here), resolver, limits,
+/// hashing and update checker. `config` supplies the data dir, lock, hooks, listen address and
+/// admin socket, and should be the config `state` was built from. No daily update loop runs.
+pub async fn start_with(config: &Config, state: AppState) -> Result<Running, ServerError> {
+    start_inner(config, Serve::Given(state)).await
+}
+
+/// What a start serves: a state built here from the config, optionally with an update checker
+/// over a source, or a state the caller prepared.
+enum Serve {
+    Fresh(Option<UpdateSource>),
+    Given(AppState),
+}
+
+async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerError> {
     config.check_admin_socket()?;
     for path in [
         config.data().to_path_buf(),
@@ -142,8 +153,17 @@ async fn start_inner(
             path: hooks_dir,
             source,
         })?;
-    let db = Db::open(&config.db_path())?;
-    db.migrate().await?;
+    let (db, source, given) = match serve {
+        Serve::Fresh(source) => {
+            let db = Db::open(&config.db_path())?;
+            db.migrate().await?;
+            (db, source, None)
+        }
+        Serve::Given(state) => {
+            state.db().migrate().await?;
+            (state.db().clone(), None, Some(state))
+        }
+    };
     let addr = config.listen();
     // Keep a duplicate of the listening socket so shutdown can take it out of LISTEN itself.
     let listen = |source| ServerError::Listen { addr, source };
@@ -170,7 +190,7 @@ async fn start_inner(
     // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
     let (stop, rx) = watch::channel(false);
-    let mut state = AppState::new(db.clone(), config.clone());
+    let mut state = given.unwrap_or_else(|| AppState::new(db.clone(), config.clone()));
     state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
     let git_tasks = state.git().tasks().clone();
@@ -506,6 +526,23 @@ mod tests {
             assert_eq!(running.git_tasks.len(), loops, "{flags:?}");
             running.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn start_with_never_spawns_the_daily_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(dir.path(), &[]);
+        let source = UpdateSource::github().unwrap();
+        let checker = UpdateChecker::new(source, env!("CARGO_PKG_VERSION")).unwrap();
+        let db = Db::open(&config.db_path()).unwrap();
+        let state = AppState::new(db, config.clone()).with_updates(checker);
+        let running = start_with(&config, state).await.unwrap();
+        assert_eq!(
+            running.git_tasks.len(),
+            0,
+            "a given state gets no daily loop"
+        );
+        running.shutdown().await;
     }
 
     // A second fd on the lock's open file description stands in for a child forked by another

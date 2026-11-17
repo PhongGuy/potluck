@@ -64,8 +64,14 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) Individual contributors
 - `anyhow` 1.0.104: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
+- `apinata-format` 0.1.0 (https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#29c85938): MIT OR Apache-2.0
+  - Copyright (c) 2026 The Apinata authors
+- `apinata-rules` 0.1.0 (https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#29c85938): MIT OR Apache-2.0
+  - Copyright (c) 2026 The Apinata authors
 - `argon2` 0.6.0: MIT OR Apache-2.0
   - Copyright (c) 2021-2026 The RustCrypto Project Developers
+- `arraydeque` 0.5.1: MIT/Apache-2.0
+  - Copyright (c) 2018 Andy Lok <andylokandy@hotmail.com>
 - `async-compression` 0.4.52: MIT OR Apache-2.0
   - Copyright (c) 2018 the rustasync developers
 - `atomic-waker` 1.1.2: Apache-2.0 OR MIT
@@ -308,6 +314,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>
 - `ryu` 1.0.23: Apache-2.0 OR BSL-1.0
   - Authors: David Tolnay <dtolnay@gmail.com>
+- `saphyr-parser` 0.3.3: MIT OR Apache-2.0
+  - Authors: Ethiraric <ethiraric@gmail.com>, David Aguilar <davvid@gmail.com>, Yuheng Chen <yuhengchen@sensetime.com>
 - `semver` 1.0.28: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
 - `serde_core` 1.0.229: MIT OR Apache-2.0

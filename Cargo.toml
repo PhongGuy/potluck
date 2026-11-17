@@ -11,6 +11,7 @@ repository = "https://github.com/PhongGuy/potluck"
 
 [workspace.dependencies]
 anyhow = "=1.0.104"
+apinata-rules = { git = "https://github.com/PhongGuy/apinata", tag = "apinata-rules-v0.1.0" }
 argon2 = "=0.6.0"
 async-compression = { version = "=0.4.52", features = ["tokio", "gzip"] }
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
@@ -40,7 +41,9 @@ tokio-util = { version = "=0.7.20", features = ["io-util", "rt"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"
-yaml_serde = "=0.10.7"
+
+[patch."https://github.com/PhongGuy/potluck"]
+potluck-kind = { path = "crates/potluck-kind" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

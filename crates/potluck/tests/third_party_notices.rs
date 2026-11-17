@@ -505,6 +505,11 @@ fn the_committed_crate_list_is_current() {
         "- `aws-lc-sys` ",
         "- `rustls` ",
         "- `minisign-verify` ",
+        "- `apinata-rules` 0.1.0 (https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#",
+        "- `apinata-format` 0.1.0 (https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#",
+        "- `saphyr-parser` ",
+        "- `arraydeque` ",
+        "- `yaml_serde` ",
     ] {
         assert!(list.contains(present), "list lacks {present:?}");
     }

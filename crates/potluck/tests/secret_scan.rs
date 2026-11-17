@@ -161,14 +161,15 @@ fn a_token_in_an_environment_file_with_a_valued_secret_reports_the_generic_rule(
     let s = Scratch::new();
     s.write("opencollection.yml", APINATA_FORMAT);
     let both = [ENV_YML, b"# AKIAIOSFODNN7EXAMPLE\n"].concat();
+    let kind = potluck::kinds::by_name("apinata").expect("apinata is registered");
+    let found = kind.check(&potluck_kind::Change::history(
+        "environments/dev.yml",
+        potluck_kind::Blob::Bytes(&both),
+        potluck_kind::Role::Write,
+    ));
     assert_eq!(
-        potluck::kinds::apinata::environment_rule(
-            "environments/dev.yml",
-            &both,
-            potluck::kinds::apinata::NODE_CAP
-        )
-        .map(|f| f.rule()),
-        Some("secret_value"),
+        found.iter().map(|f| f.rule()).collect::<Vec<_>>(),
+        ["secret_value"],
         "the kind's rule must refuse this file too, or the test proves nothing"
     );
     s.write("environments/dev.yml", &both);
@@ -177,6 +178,23 @@ fn a_token_in_an_environment_file_with_a_valued_secret_reports_the_generic_rule(
         scan_main(&s, &env(Some("apinata")), &tip),
         ["refs/heads/main environments/dev.yml secret_pattern aws"]
     );
+}
+
+#[test]
+fn every_kind_accepts_a_new_workspace_holding_its_own_seed() {
+    // A created ref runs the path, history and format passes over exactly the seed.
+    for k in potluck::kinds::all() {
+        let s = Scratch::new();
+        for f in k.seed() {
+            s.write(f.path(), f.bytes());
+        }
+        let tip = s.stage_commit("seed");
+        assert!(
+            scan_main(&s, &env(Some(k.kind())), &tip).is_empty(),
+            "{} refuses its own seed",
+            k.kind()
+        );
+    }
 }
 
 #[test]

@@ -42,6 +42,13 @@ async fn apinata_server(extra_env: &[(&str, &str)]) -> (GitServer, std::path::Pa
     (server, home, url)
 }
 
+/// The line after the first line containing `needle`, without git's sideband padding.
+fn next_line<'a>(output: &'a str, needle: &str) -> Option<&'a str> {
+    let mut lines = output.lines();
+    lines.find(|l| l.contains(needle))?;
+    lines.next().map(str::trim_end)
+}
+
 fn repo(server: &GitServer) -> std::path::PathBuf {
     server
         .repos
@@ -108,6 +115,11 @@ async fn a_push_with_secrets_is_declined_with_the_contract_lines_and_a_clean_one
         output.contains(
             "remote: potluck-reject secret_value refs/heads/main environments/dev.yml secret_value"
         ),
+        "{output}"
+    );
+    assert_eq!(
+        next_line(&output, "environments/dev.yml secret_value"),
+        Some("remote: potluck-reject-detail api_key"),
         "{output}"
     );
     assert!(output.contains("pre-receive hook declined"), "{output}");
@@ -296,6 +308,11 @@ async fn a_blob_moved_into_environments_is_refused_under_its_new_path() {
         "{output}"
     );
     assert_eq!(
+        next_line(&output, "environments/dev.yml secret_value"),
+        Some("remote: potluck-reject-detail api_key"),
+        "{output}"
+    );
+    assert_eq!(
         server_main(&server, &home),
         Some(landed),
         "the ref did not move"
@@ -322,6 +339,11 @@ async fn an_environment_file_over_the_cap_is_refused_but_a_big_note_lands() {
         output.contains(
             "remote: potluck-reject secret_value refs/heads/main environments/big.yml env_unparsable"
         ),
+        "{output}"
+    );
+    assert_eq!(
+        next_line(&output, "environments/big.yml env_unparsable"),
+        Some("remote: potluck-reject-detail too%20large%20to%20check"),
         "{output}"
     );
     assert_eq!(server_main(&server, &home), None, "nothing landed");

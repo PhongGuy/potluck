@@ -44,7 +44,6 @@ mod health_check;
 mod hook_cli;
 mod hook_push;
 mod hooks;
-mod kinds_apinata;
 mod kinds_generic;
 mod kinds_rule_set;
 mod logs;

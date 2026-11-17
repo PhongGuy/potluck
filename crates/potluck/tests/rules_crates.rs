@@ -268,3 +268,53 @@ fn list_refuses_a_tag_git_could_misread() {
         assert_eq!(stdout(&out), "", "{lock}");
     }
 }
+
+/// The crate-scoped tag the workspace pins apinata-rules at.
+const APINATA_RULES_TAG: &str = "apinata-rules-v0.1.0";
+
+#[test]
+fn the_real_lock_pins_apinata_rules_at_its_tag() {
+    let out = Command::new(repo_root().join("scripts/rules-crates.sh"))
+        .args(["list", repo_root().join("Cargo.lock").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = stdout(&out);
+    assert_eq!(text.lines().count(), 1, "one rules crate pinned: {text}");
+    let fields: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(
+        fields[..3],
+        [
+            "apinata-rules",
+            "https://github.com/PhongGuy/apinata",
+            APINATA_RULES_TAG
+        ],
+        "{text}"
+    );
+    assert!(
+        fields[3].len() == 40 && fields[3].bytes().all(|b| b.is_ascii_hexdigit()),
+        "{text}"
+    );
+}
+
+#[test]
+fn every_git_source_in_the_real_lock_is_public_https() {
+    let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).unwrap();
+    let sources: Vec<&str> = lock
+        .lines()
+        .filter_map(|l| l.strip_prefix("source = \"git+"))
+        .collect();
+    assert!(
+        !sources.is_empty(),
+        "no git source: the rules crate pin is missing"
+    );
+    for src in sources {
+        assert!(src.starts_with("https://github.com/PhongGuy/"), "{src}");
+        assert!(!src.contains('@'), "credentials in {src}");
+    }
+}

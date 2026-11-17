@@ -21,13 +21,15 @@ pub mod credential;
 pub mod error;
 mod events;
 mod grants;
-pub mod json;
+pub(crate) mod json;
 pub mod objects;
 mod overrides;
 pub(crate) mod pushes;
 mod session;
 mod system;
 mod teams;
+#[cfg(test)]
+mod test_support;
 mod tokens;
 mod update;
 mod users;

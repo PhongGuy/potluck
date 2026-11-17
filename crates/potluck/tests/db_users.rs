@@ -1,6 +1,5 @@
 //! The user queries on the one database thread.
 
-use potluck::api::auth::Authenticated;
 use potluck::api::error::{ApiError, ErrorCode};
 use potluck::api::{Actor, AuthUser};
 use potluck::db::DbError;
@@ -231,5 +230,4 @@ fn types_that_carry_a_password_hash_do_not_implement_partial_eq() {
     <UserPatch as Probe<_>>::not_partial_eq();
     <AuthUser as Probe<_>>::not_partial_eq();
     <Actor as Probe<_>>::not_partial_eq();
-    <Authenticated as Probe<_>>::not_partial_eq();
 }

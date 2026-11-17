@@ -8,7 +8,7 @@ use std::io::Write;
 
 use potluck_kind::Role;
 
-use crate::kinds::{self, Blob, Change, Finding, RuleSet, generic};
+use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
 use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
 
 /// What the server told the hook through its environment.
@@ -122,12 +122,39 @@ fn rejection(ref_name: &[u8], raw: &[u8], lossy: &str, finding: Finding) -> Reje
 /// annotated tag behind the ref (the pushed tag's chain included), each object once per push
 /// under the first ref that lists it, reported at path `/` after the ref's content hits; import
 /// mode scans no message. A commit or tag object over `MAX_CONTENT_BYTES` is skipped like a
-/// blob. An unknown or unset kind means generic rules only.
+/// blob. An unset kind means generic rules only; a kind the registry does not know refuses
+/// with `ScanError::UnsupportedKind` unless every update is a delete. The kind's rule set runs
+/// as `scan_with` describes.
 pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejection>, ScanError> {
     if env.override_id().is_some() {
         return Ok(Vec::new());
     }
-    let kind = env.kind().and_then(kinds::by_name);
+    let kind = match env.kind() {
+        None => None,
+        Some(name) => match kinds::by_name(name) {
+            Some(rules) => Some(rules),
+            None if updates.iter().all(RefUpdate::is_delete) => None,
+            None => return Err(ScanError::UnsupportedKind),
+        },
+    };
+    scan_with(env, kind, updates, git)
+}
+
+/// `scan` with the rule set given rather than looked up, and no override check. Every call into
+/// `rules` is panic-guarded; a panic, an `abi()` other than `RULES_ABI` (checked before any git
+/// call) or a finding whose rule is empty or not `[a-z0-9_]` fails with `ScanError::Rules`.
+pub fn scan_with(
+    env: &HookEnv,
+    rules: Option<&dyn RuleSet>,
+    updates: &[RefUpdate],
+    git: &Git,
+) -> Result<Vec<Rejection>, ScanError> {
+    if let Some(r) = rules
+        && guarded(|| r.abi())? != RULES_ABI
+    {
+        return Err(ScanError::Rules);
+    }
+    let kind = GuardedRules(rules);
     // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
     // path-rule hits first, then its content hits, each in entry order.
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
@@ -170,15 +197,17 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
         }
         for (ei, entry) in entries.into_iter().enumerate() {
             let path = entry.path_lossy();
-            let refused =
-                generic::path_rule(&path).or_else(|| kind.and_then(|k| k.path_rule(&path)));
+            let refused = match generic::path_rule(&path) {
+                Some(finding) => Some(finding),
+                None => kind.path_rule(&path)?,
+            };
             if let Some(finding) = refused {
                 hits.push((
                     (ri, 0, ei),
                     rejection(update.name(), entry.path(), &path, finding),
                 ));
             } else if (fresh.as_ref().is_none_or(|f| f.contains(entry.sha()))
-                || kind.is_some_and(|k| k.reads(&path)))
+                || kind.reads(&path)?)
                 && queued.insert((entry.sha().clone(), entry.path().to_vec()))
             {
                 candidates.entry(entry.sha().clone()).or_default().push((
@@ -209,7 +238,7 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// over the cap is never read; only the kind's `check` with `Blob::TooLarge` may refuse it.
 fn content_pass(
     git: &Git,
-    kind: Option<&'static dyn RuleSet>,
+    kind: GuardedRules<'_>,
     updates: &[RefUpdate],
     candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
     hits: &mut Vec<((usize, u8, usize), Rejection)>,
@@ -224,10 +253,12 @@ fn content_pass(
             Some(_) => {
                 for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
                     let lossy = String::from_utf8_lossy(path);
-                    if let Some(finding) = kind.filter(|k| k.reads(&lossy)).and_then(|k| {
-                        let change = Change::history(&lossy, Blob::TooLarge, Role::Write);
-                        k.check(&change).into_iter().next()
-                    }) {
+                    let finding = if kind.reads(&lossy)? {
+                        kind.check(&Change::history(&lossy, Blob::TooLarge, Role::Write))?
+                    } else {
+                        None
+                    };
+                    if let Some(finding) = finding {
                         hits.push((
                             (*ri, 1, *ei),
                             rejection(updates[*ri].name(), path, &lossy, finding),
@@ -243,7 +274,13 @@ fn content_pass(
             }
         }
     }
+    // The blob stream cannot stop early, so the first rule-set failure is kept and every later
+    // blob is skipped.
+    let mut failed = None;
     git.for_each_blob(&kept, |sha, bytes| {
+        if failed.is_some() {
+            return;
+        }
         // The generic patterns depend on the bytes alone, so they run once per blob and the
         // hit is re-placed at each path the blob sits at.
         let generic_hit = generic::content_rule("", bytes);
@@ -251,10 +288,14 @@ fn content_pass(
             let lossy = String::from_utf8_lossy(path);
             let finding = match &generic_hit {
                 Some(f) => Some(Finding::new(f.code(), f.rule(), &lossy)),
-                None => kind.and_then(|k| {
-                    let change = Change::history(&lossy, Blob::Bytes(bytes), Role::Write);
-                    k.check(&change).into_iter().next()
-                }),
+                None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), Role::Write))
+                {
+                    Ok(finding) => finding,
+                    Err(e) => {
+                        failed = Some(e);
+                        return;
+                    }
+                },
             };
             if let Some(finding) = finding {
                 hits.push((
@@ -264,7 +305,51 @@ fn content_pass(
             }
         }
     })?;
-    Ok(())
+    failed.map_or(Ok(()), Err)
+}
+
+/// Runs one call into a rule set, turning a panic into `ScanError::Rules`.
+fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, ScanError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ScanError::Rules)
+}
+
+/// The push's rule set, if any, reached only through guarded calls whose findings are checked.
+#[derive(Clone, Copy)]
+struct GuardedRules<'a>(Option<&'a dyn RuleSet>);
+
+impl GuardedRules<'_> {
+    fn path_rule(self, path: &str) -> Result<Option<Finding>, ScanError> {
+        let Some(r) = self.0 else { return Ok(None) };
+        guarded(|| r.path_rule(path))?.map(valid).transpose()
+    }
+
+    fn reads(self, path: &str) -> Result<bool, ScanError> {
+        self.0.map_or(Ok(false), |r| guarded(|| r.reads(path)))
+    }
+
+    /// The first finding of `check`, once every finding it returned has passed `valid`.
+    fn check(self, change: &Change<'_>) -> Result<Option<Finding>, ScanError> {
+        let Some(r) = self.0 else { return Ok(None) };
+        let findings = guarded(|| r.check(change))?;
+        let mut valid_findings = findings.into_iter().map(valid);
+        let first = valid_findings.next().transpose()?;
+        valid_findings.try_for_each(|f| f.map(drop))?;
+        Ok(first)
+    }
+}
+
+/// A rule name goes on the wire as one field, so it must be non-empty `[a-z0-9_]`.
+fn valid(finding: Finding) -> Result<Finding, ScanError> {
+    let rule = finding.rule();
+    let ok = !rule.is_empty()
+        && rule
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+    if ok {
+        Ok(finding)
+    } else {
+        Err(ScanError::Rules)
+    }
 }
 
 /// Why the check could not run.
@@ -274,6 +359,12 @@ pub enum ScanError {
     /// A plumbing call failed.
     #[error(transparent)]
     Git(#[from] GitCmdError),
+    /// The kind's rule set panicked, has another ABI or returned a malformed finding.
+    #[error("kind rules failed")]
+    Rules,
+    /// The workspace kind has no rule set on this server.
+    #[error("unsupported kind")]
+    UnsupportedKind,
 }
 
 /// How many `potluck-reject` lines are printed at most.

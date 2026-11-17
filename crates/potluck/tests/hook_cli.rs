@@ -8,7 +8,6 @@ use crate::common::scratch::Scratch;
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const AWS: &[u8] = include_bytes!("fixtures/secret-check/bad/aws-access-key.txt");
-const ENV_YML: &[u8] = include_bytes!("fixtures/secret-check/bad/env-secret-valued.yml");
 
 /// Runs the hook against the scratch server repository with `env` on top of git's variables.
 /// `HOME` and the two config variables keep git off the real user and system config.
@@ -72,21 +71,13 @@ fn a_clean_push_and_an_empty_input_exit_0_silently() {
 }
 
 #[test]
-fn an_unknown_kind_warns_once_and_scans_generic_only() {
+fn an_unknown_kind_refuses_with_one_error_line() {
     let s = Scratch::new();
-    s.write("environments/dev.yml", ENV_YML);
-    let tip = s.stage_commit("env");
+    s.write("README", b"r\n");
+    let tip = s.stage_commit("r");
     let out = run_hook(&s, &[("POTLUCK_KIND", "dbento")], &line(&tip));
-    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-    assert_eq!(
-        stderr(&out),
-        "potluck-warning unknown kind \"dbento\"; generic rules only\n"
-    );
-    let out = run_hook(&s, &[("POTLUCK_KIND", "apinata")], &line(&tip));
-    assert_eq!(
-        stderr(&out),
-        "potluck-reject secret_value refs/heads/main environments/dev.yml secret_value\n"
-    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stderr(&out), "potluck-error unsupported kind\n");
 }
 
 #[test]

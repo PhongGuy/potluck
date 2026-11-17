@@ -262,7 +262,7 @@ fn sign_attests_only_a_public_repository_but_always_signs() {
             .any(|l| l.starts_with("    if:") && l.contains("private")),
         "a private repository would skip signing"
     );
-    for uses in ["docker/login-action@", "actions/attest@"] {
+    for uses in ["docker/login-action@", "subject-digest:", "subject-path:"] {
         assert!(
             step(sign, uses).contains(public),
             "{uses} runs in a private repository"
@@ -278,8 +278,38 @@ fn sign_attests_only_a_public_repository_but_always_signs() {
             "{unconditional} is conditional"
         );
     }
-    assert!(step(sign, "actions/attest@").contains("id: attest"));
-    assert!(sign.contains("attested: ${{ steps.attest.outcome == 'success' }}"));
+    assert!(step(sign, "subject-digest:").contains("id: attest\n"));
+    assert!(sign.contains(
+        "attested: ${{ steps.attest.outcome == 'success' && steps.attest-files.outcome == 'success' }}"
+    ));
+}
+
+#[test]
+fn sign_attests_the_signed_manifest_files_in_a_public_repository() {
+    let jobs = release();
+    let sign = job(&jobs, "sign");
+    let files = step(sign, "id: attest-files");
+    for needle in [
+        "if: ${{ !github.event.repository.private }}",
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2",
+        "subject-path: |\n",
+        "            ${{ runner.temp }}/release/potluck-release.json\n",
+        "            ${{ runner.temp }}/release/potluck-release.json.sig\n",
+    ] {
+        assert!(
+            files.contains(needle),
+            "the file attestation lacks {needle:?}: {files}"
+        );
+    }
+    // Only after the .sig exists, so the attestation covers what the draft attaches.
+    let signed = sign
+        .find("base64 -w0 potluck-release.json.minisig")
+        .unwrap();
+    assert!(
+        signed < sign.find("id: attest-files").unwrap(),
+        "attests before signing"
+    );
+    assert_eq!(sign.matches("actions/attest@").count(), 2);
 }
 
 #[test]
@@ -335,5 +365,64 @@ fn the_signing_secrets_reach_minisign_only_through_env_and_pipes() {
     assert_eq!(
         run.matches("\"$CARGO_PACKAGER_SIGN_PRIVATE_KEY\"").count(),
         1
+    );
+}
+
+#[test]
+fn sign_checks_the_manifest_names_this_tag_and_digest_before_signing() {
+    let jobs = release();
+    let sign = job(&jobs, "sign");
+    let check = step(
+        sign,
+        "'.version == $v and .digest == $d' potluck-release.json",
+    );
+    for needle in [
+        "REF_NAME: ${{ github.ref_name }}",
+        "DIGEST: ${{ needs.merge.outputs.digest }}",
+        "jq -e --arg v \"${REF_NAME#v}\" --arg d \"$DIGEST\"",
+    ] {
+        assert!(
+            check.contains(needle),
+            "the check lacks {needle:?}: {check}"
+        );
+    }
+    assert!(!check.contains("if:"), "the check is conditional: {check}");
+    assert!(
+        !check.contains("CARGO_PACKAGER_SIGN"),
+        "the check sees the key"
+    );
+    let run = &check[check.find("run: |").expect("no run block")..];
+    assert!(
+        !run.contains("${{"),
+        "the check interpolates an expression: {run}"
+    );
+    let at = sign.find("'.version == $v and .digest == $d'").unwrap();
+    assert!(
+        at < sign.find("minisign -S").unwrap(),
+        "the check comes after signing"
+    );
+}
+
+#[test]
+fn the_manifest_artifacts_expire_after_a_day() {
+    let jobs = release();
+    for (name, artifact) in [
+        ("manifest", "name: manifest-unsigned"),
+        ("sign", "name: manifest-signed"),
+    ] {
+        let upload = step(job(&jobs, name), artifact);
+        assert!(upload.contains("actions/upload-artifact@"), "{upload}");
+        assert!(upload.contains("retention-days: 1\n"), "{name}: {upload}");
+    }
+}
+
+#[test]
+fn the_dry_run_input_says_it_skips_signing() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml")).unwrap();
+    assert!(
+        text.contains(
+            "description: Build and smoke-test only; push, sign, attest and draft nothing\n"
+        ),
+        "{text}"
     );
 }

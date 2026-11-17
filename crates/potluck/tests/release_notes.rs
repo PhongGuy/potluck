@@ -210,6 +210,39 @@ fn the_attestation_check_appears_only_when_attested() {
 }
 
 #[test]
+fn attested_notes_name_the_manifest_file_check_and_unattested_notes_name_none() {
+    const FILES: &str = "Check the signed release manifest the same way with `gh attestation verify potluck-release.json --repo PhongGuy/potluck` and `gh attestation verify potluck-release.json.sig --repo PhongGuy/potluck`.";
+    for attested in [true, false] {
+        let dir = repo_with(&["feat: x"], "v0.2.0");
+        let gh = stub_gh(dir.path());
+        let out_file = dir.path().join("notes-out.md");
+        let mut cmd = Command::new(script());
+        cmd.current_dir(dir.path())
+            .env("GH", &gh)
+            .env_remove("ATTESTED");
+        if attested {
+            cmd.env("ATTESTED", "true");
+        }
+        let out = cmd
+            .args(["notes", "v0.2.0", "PhongGuy/potluck", DIGEST])
+            .arg(&out_file)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = fs::read_to_string(&out_file).unwrap();
+        if attested {
+            assert!(text.lines().any(|l| l == FILES), "{text}");
+        } else {
+            assert!(!text.contains("gh attestation"), "{text}");
+        }
+    }
+}
+
+#[test]
 fn a_first_release_has_no_previous_tag() {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);
@@ -443,6 +476,58 @@ fn check_version_refuses_a_bad_tag_or_a_missing_version() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+}
+
+/// A `tomllib` that reports 6.6.6 for any file, for python3 to pick up if it is not isolated.
+const DECOY_TOMLLIB: &str =
+    "def load(f):\n    return {\"workspace\": {\"package\": {\"version\": \"6.6.6\"}}}\n";
+
+#[test]
+fn check_version_ignores_a_tomllib_in_the_cwd_or_on_pythonpath() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("tomllib.py"), DECOY_TOMLLIB).unwrap();
+    let toml = dir.path().join("Cargo.toml");
+    fs::write(&toml, WORKSPACE_TOML).unwrap();
+    let out = Command::new(script())
+        .current_dir(dir.path())
+        .env("PYTHONPATH", dir.path())
+        .args(["check-version", "v1.2.0", toml.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "a decoy tomllib was read: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn check_version_names_python3_when_it_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    // A PATH holding only bash, so the script starts but finds no python3.
+    let bash = Command::new("bash")
+        .args(["-c", "command -v bash"])
+        .output()
+        .unwrap();
+    let bash = String::from_utf8(bash.stdout).unwrap();
+    std::os::unix::fs::symlink(bash.trim(), bin.join("bash")).unwrap();
+    let toml = dir.path().join("Cargo.toml");
+    fs::write(&toml, WORKSPACE_TOML).unwrap();
+    let out = Command::new(script())
+        .current_dir(dir.path())
+        .env("PATH", &bin)
+        .args(["check-version", "v1.2.0", toml.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("python3"),
+        "the refusal does not name python3: {err}"
+    );
+    assert!(!err.contains("no [workspace.package] version"), "{err}");
 }
 
 #[test]

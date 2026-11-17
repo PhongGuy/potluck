@@ -21,6 +21,11 @@ tag_version() {
 check_version() {
   local tag=$1 toml=$2 version workspace
   version=$(tag_version "$tag") || return 1
+  # Named here, since the read below discards python3's own stderr.
+  if ! command -v python3 > /dev/null; then
+    echo "release.sh: check-version needs python3" >&2
+    return 1
+  fi
   # tomllib reads the table itself, so decoy version keys elsewhere never match.
   if ! workspace=$(python3 -I -c 'import sys, tomllib
 with open(sys.argv[1], "rb") as f:
@@ -97,7 +102,7 @@ generated_changes() {
 # Write OUT, the draft notes for TAG in REPO (owner/name) whose image index is
 # DIGEST: the intro, What's Changed since the previous vX.Y.Z tag, the image to
 # pull, and the install and update notes. Runs in the repository, which needs
-# full history and tags. The attestation check is named only when ATTESTED=true.
+# full history and tags. The attestation checks are named only when ATTESTED=true.
 release_notes() {
   local tag=$1 repo=$2 digest=$3 out=$4
   local prev="" range=$tag first=true subjects changes feats fixes
@@ -147,6 +152,7 @@ NOTES
     fi
     if [[ ${ATTESTED:-} == true ]]; then
       echo "Check that this project's release workflow built it with \`gh attestation verify oci://$IMAGE:$tag --repo $repo\`."
+      echo "Check the signed release manifest the same way with \`gh attestation verify potluck-release.json --repo $repo\` and \`gh attestation verify potluck-release.json.sig --repo $repo\`."
     fi
     cat <<'NOTES'
 

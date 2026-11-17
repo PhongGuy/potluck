@@ -39,6 +39,26 @@ fn ci_declares_the_gate_zizmor_and_container_jobs() {
 }
 
 #[test]
+fn the_gate_checks_the_public_api_after_the_tests() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
+    let (name, gate) = &jobs(&text)[0];
+    assert_eq!(name, "gate");
+    let at = |needle: &str| {
+        gate.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in {gate}"))
+    };
+    let test = at("cargo test --workspace --locked");
+    let json = at(
+        "RUSTC_BOOTSTRAP=1 cargo rustdoc -p potluck --lib --locked -- -Z unstable-options --output-format json",
+    );
+    let check = at("scripts/check-public-api.sh target/doc/potluck.json");
+    assert!(
+        test < json && json < check,
+        "test, JSON, check in order: {gate}"
+    );
+}
+
+#[test]
 fn every_action_is_pinned_to_a_full_sha_with_a_version_comment() {
     for (path, text) in workflows() {
         for line in text.lines().filter(|l| {

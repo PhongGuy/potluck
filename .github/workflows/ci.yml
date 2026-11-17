@@ -39,6 +39,11 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -Dwarnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Public API
+        # rustdoc's JSON output is unstable; RUSTC_BOOTSTRAP lets the stable toolchain emit it.
+        run: |
+          RUSTC_BOOTSTRAP=1 cargo rustdoc -p potluck --lib --locked -- -Z unstable-options --output-format json
+          scripts/check-public-api.sh target/doc/potluck.json
 
   # Audits every workflow for injection, credential and pinning mistakes.
   zizmor:

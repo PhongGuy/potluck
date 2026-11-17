@@ -9,7 +9,19 @@ use axum::response::sse::{Event, Sse};
 use axum::routing::get;
 use futures_util::stream;
 
-use crate::common::{SseReader, ref_event, serve};
+use crate::common::{SseReader, ref_event};
+
+/// Serves `router` on an ephemeral loopback port for the life of the returned task.
+async fn serve(router: Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("serve");
+    });
+    (addr, task)
+}
 
 async fn events() -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     Sse::new(stream::iter([

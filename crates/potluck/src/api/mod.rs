@@ -159,7 +159,7 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
 
 /// Every route under `/api/v1` and the git smart HTTP routes under `/git`; unknown paths and
 /// wrong methods answer `not_found`.
-pub fn router(state: AppState) -> Router {
+pub(crate) fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/health", get(system::health))
         .route("/server", get(system::server))

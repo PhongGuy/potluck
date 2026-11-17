@@ -71,18 +71,6 @@ pub fn config_listening_on(dir: &Path, listen: SocketAddr) -> Config {
     .expect("test config")
 }
 
-/// Serves `router` on an ephemeral loopback port for the life of the returned task.
-pub async fn serve(router: axum::Router) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind loopback");
-    let addr = listener.local_addr().expect("local addr");
-    let task = tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("serve");
-    });
-    (addr, task)
-}
-
 /// A plain HTTP client for requests to a test server.
 pub fn client() -> reqwest::Client {
     reqwest::Client::new()

@@ -351,8 +351,10 @@ impl GitEngine {
         }
     }
 
-    /// A process slot, however long it takes to come free: every holder is bounded by
-    /// `max_runtime`. `None` only if the slots were closed, which the engine never does.
+    /// A process slot, however long it takes to come free. The wait is bounded only as long as
+    /// each holder is: a request's single git child by `max_runtime`, and the admin re-check by
+    /// `max_runtime` per git child plus the rule set's CPU between them. `None` only if the
+    /// slots were closed, which the engine never does.
     pub(crate) async fn slot(&self) -> Option<OwnedSemaphorePermit> {
         Arc::clone(&self.permits).acquire_owned().await.ok()
     }
@@ -2164,8 +2166,9 @@ mod tests {
         }
     }
 
-    /// Every log line from any thread since the first call, for tests that read a line a
-    /// blocking thread wrote; tests tell their lines apart by a workspace id of their own.
+    /// Every log line from any thread since the first call. Process-wide, since a failed
+    /// re-check is logged by `log_accepted_relaxations` on its `spawn_blocking` thread, which a
+    /// thread-scoped subscriber never sees; tests tell their lines apart by workspace id.
     fn global_logs() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
         use std::sync::{Arc, Mutex, OnceLock};
         static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();

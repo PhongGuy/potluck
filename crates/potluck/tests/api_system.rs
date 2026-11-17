@@ -1,25 +1,29 @@
 //! `/api/v1/health` and `/api/v1/server` over loopback TCP, and the router's fallbacks.
 
-use potluck::api::{AppState, router};
+use potluck::api::AppState;
+use potluck::server::{Running, start_with};
 use serde_json::{Value, json};
 
-use crate::common::{config_for, migrated_db, serve};
+use crate::common::{config_for, migrated_db};
 
 async fn get(addr: std::net::SocketAddr, path: &str) -> (u16, Value) {
     let response = reqwest::get(format!("http://{addr}{path}")).await.unwrap();
     (response.status().as_u16(), response.json().await.unwrap())
 }
 
-/// A served router over a migrated database; the dir keeps the files alive.
+/// A started server over a migrated database; the dir keeps the files alive.
 async fn app() -> (
     tempfile::TempDir,
     potluck::db::Db,
     std::net::SocketAddr,
-    tokio::task::JoinHandle<()>,
+    Running,
 ) {
     let (dir, db) = migrated_db().await;
-    let (addr, task) = serve(router(AppState::new(db.clone(), config_for(dir.path())))).await;
-    (dir, db, addr, task)
+    let config = config_for(dir.path());
+    let running = start_with(&config, AppState::new(db.clone(), config.clone()))
+        .await
+        .expect("start");
+    (dir, db, running.http_addr(), running)
 }
 
 #[tokio::test]

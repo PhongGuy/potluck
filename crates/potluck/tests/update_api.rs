@@ -1,12 +1,13 @@
 //! `GET /api/v1/update` and `POST /api/v1/update/check` over a router with a loopback source.
 
-use potluck::api::{AppState, router};
+use potluck::api::AppState;
+use potluck::server::{Running, start_with};
 use potluck::update::UpdateChecker;
 use reqwest::Method;
 use serde_json::json;
 
 use crate::common::release::{DIGEST, ReleaseServer, TestKey, manifest};
-use crate::common::{api_admin, api_user, call, fast_passwords, migrated_db, parse_config, serve};
+use crate::common::{api_admin, api_user, call, fast_passwords, migrated_db, parse_config};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -14,7 +15,7 @@ struct App {
     _dir: tempfile::TempDir,
     db: potluck::db::Db,
     addr: std::net::SocketAddr,
-    _task: tokio::task::JoinHandle<()>,
+    _running: Running,
 }
 
 impl App {
@@ -23,11 +24,13 @@ impl App {
     }
 }
 
-/// A served router whose config adds `flags`, holding `checker` when given.
+/// A started server whose config adds `flags`, holding `checker` when given.
 async fn app(flags: &[&str], checker: Option<UpdateChecker>) -> App {
     let (dir, db) = migrated_db().await;
     let data = dir.path().to_str().unwrap().to_owned();
     let mut args = vec![
+        "--listen",
+        "127.0.0.1:0",
         "--data",
         data.as_str(),
         "--public-url",
@@ -35,16 +38,16 @@ async fn app(flags: &[&str], checker: Option<UpdateChecker>) -> App {
     ];
     args.extend_from_slice(flags);
     let config = parse_config(&args).unwrap();
-    let mut state = AppState::new(db.clone(), config).with_passwords(fast_passwords());
+    let mut state = AppState::new(db.clone(), config.clone()).with_passwords(fast_passwords());
     if let Some(checker) = checker {
         state = state.with_updates(checker);
     }
-    let (addr, task) = serve(router(state)).await;
+    let running = start_with(&config, state).await.expect("start");
     App {
         _dir: dir,
         db,
-        addr,
-        _task: task,
+        addr: running.http_addr(),
+        _running: running,
     }
 }
 

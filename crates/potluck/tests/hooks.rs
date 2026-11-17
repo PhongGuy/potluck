@@ -25,12 +25,6 @@ fn hooks_dir(server: &GitServer) -> std::path::PathBuf {
 
 /// `dir` as a path relative to the working directory: `../` per cwd component, then the
 /// absolute path without its leading slash. Linux only, which is what the suite runs on.
-fn relative_to_cwd(dir: &std::path::Path) -> String {
-    let cwd = std::env::current_dir().unwrap();
-    let ups = "../".repeat(cwd.components().count() - 1);
-    format!("{ups}{}", dir.strip_prefix("/").unwrap().display())
-}
-
 #[test]
 fn install_writes_a_script_that_execs_potluck_and_replaces_an_old_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -192,13 +186,21 @@ async fn a_relative_data_dir_still_runs_the_hook() {
     // `--data` as seen from the test's cwd; `Config` makes it absolute, so `core.hooksPath` is
     // absolute too. Without that, git resolves a relative hooksPath against the repository and
     // the declining hook below is never run (measured).
-    // The data dir sits deeper than the cwd, so the `../` prefix cannot overshoot `/` and land
-    // on the right directory from inside the repository by accident.
-    let dir = tempfile::tempdir().unwrap();
-    let cwd_depth = std::env::current_dir().unwrap().components().count();
-    let data = (0..cwd_depth).fold(dir.path().to_path_buf(), |d, i| d.join(format!("d{i}")));
-    std::fs::create_dir_all(&data).unwrap();
-    let relative = relative_to_cwd(&data);
+    // The data dir is a cwd-relative path inside the crate dir, which does not exist relative to
+    // the repository git runs the hook from.
+    let cwd = std::env::current_dir().unwrap();
+    let dir = tempfile::Builder::new()
+        .prefix(".rel-")
+        .tempdir_in(&cwd)
+        .unwrap();
+    let relative = dir
+        .path()
+        .strip_prefix(&cwd)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let data = dir.path().to_path_buf();
     assert!(!relative.starts_with('/'), "{relative}");
     let access =
         TestAccess::new()

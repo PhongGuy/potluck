@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use potluck::admin::AdminError;
+use potluck::api::AppState;
 use potluck::api::credential::Credential;
 use potluck::api::error::ApiError;
-use potluck::api::{AppState, router};
 use potluck::auth::password::Passwords;
 use potluck::auth::token::MintedToken;
 use potluck::cli::{Cli, Command as CliCommand};
@@ -23,7 +23,7 @@ use potluck::git::access::{Access, BoxFuture, GitAccess, PushContext};
 use potluck::git::{GitLimits, Repos};
 use potluck::notices::Notices;
 use potluck::role::Role;
-use potluck::server::{Running, start};
+use potluck::server::{Running, start, start_with};
 use potluck::slug::Slug;
 use reqwest::Method;
 use serde_json::Value;
@@ -309,7 +309,7 @@ impl GitAccess for TestAccess {
     }
 }
 
-/// A served router with the git routes over a temp data dir and a `TestAccess`. The data dir
+/// A started server with the git routes over a temp data dir and a `TestAccess`. The data dir
 /// is `dir`, so the hooks dir is `dir.path().join("hooks")`. No field without a reader: this is
 /// a test binary, where an unread field warns even when `pub`.
 pub struct GitServer {
@@ -318,7 +318,7 @@ pub struct GitServer {
     pub repos: Repos,
     pub db: Db,
     pub notices: Notices,
-    _task: tokio::task::JoinHandle<()>,
+    _running: Running,
 }
 
 impl GitServer {
@@ -359,46 +359,48 @@ pub async fn git_server_at(
     ];
     args.extend_from_slice(extra);
     let config = parse_config(&args).expect("test config");
-    for d in [config.hooks_dir(), config.repos_dir(), config.tmp_dir()] {
-        std::fs::create_dir_all(d).expect("data subdir");
+    std::fs::create_dir_all(config.data()).expect("data dir");
+    let db = Db::open(&config.db_path()).expect("open");
+    let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
+    let mut state = AppState::new(db.clone(), config.clone()).with_git_access(Arc::new(access));
+    if let Some(limits) = limits {
+        state = state.with_git_limits(limits);
     }
+    let notices = state.notices().clone();
+    let running = start_with(&config, state).await.expect("start");
+    install_binary_hook(&config);
+    GitServer {
+        dir,
+        base: format!("http://{}", running.http_addr()),
+        repos,
+        db,
+        notices,
+        _running: running,
+    }
+}
+
+/// Replaces the hook `start_with` installed, which execs this test binary, with one that runs
+/// the built `potluck` binary's secret check.
+fn install_binary_hook(config: &Config) {
     write_script(
         &config.hooks_dir().join("pre-receive"),
         &potluck::hooks::script(Path::new(env!("CARGO_BIN_EXE_potluck")), config.git())
             .expect("hook script"),
     );
-    let db = Db::open(&config.db_path()).expect("open");
-    db.migrate().await.expect("migrate");
-    let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
-    let mut state = AppState::new(db.clone(), config).with_git_access(Arc::new(access));
-    if let Some(limits) = limits {
-        state = state.with_git_limits(limits);
-    }
-    let notices = state.notices().clone();
-    let (addr, task) = serve(router(state)).await;
-    GitServer {
-        dir,
-        base: format!("http://{addr}"),
-        repos,
-        db,
-        notices,
-        _task: task,
-    }
 }
 
 /// `server` served again on a new port with `access` as its resolver; the data dir, database
-/// and repositories are the same. The old listener task is aborted first, so no stray server
-/// outlives the test.
+/// and repositories are the same. The old server shuts down first, releasing the data dir lock
+/// and closing its database, which is opened again here.
 pub async fn git_server_with(server: GitServer, access: TestAccess) -> GitServer {
     let GitServer {
         dir,
         repos,
-        db,
-        _task: old,
+        _running: old,
         ..
     } = server;
-    old.abort();
-    // The hook is installed and the database migrated already; only the router is new.
+    old.shutdown().await;
+    // The data dir, repositories and migrated database carry over; the server and resolver are new.
     let data = dir.path().to_str().expect("utf-8 temp path").to_owned();
     let config = parse_config(&[
         "--listen",
@@ -409,16 +411,18 @@ pub async fn git_server_with(server: GitServer, access: TestAccess) -> GitServer
         "http://127.0.0.1:8080",
     ])
     .expect("test config");
-    let state = AppState::new(db.clone(), config).with_git_access(Arc::new(access));
+    let db = Db::open(&config.db_path()).expect("open");
+    let state = AppState::new(db.clone(), config.clone()).with_git_access(Arc::new(access));
     let notices = state.notices().clone();
-    let (addr, task) = serve(router(state)).await;
+    let running = start_with(&config, state).await.expect("start");
+    install_binary_hook(&config);
     GitServer {
         dir,
-        base: format!("http://{addr}"),
+        base: format!("http://{}", running.http_addr()),
         repos,
         db,
         notices,
-        _task: task,
+        _running: running,
     }
 }
 
@@ -594,12 +598,13 @@ pub fn columns(line: &str) -> Vec<&str> {
         .collect()
 }
 
-/// A served API over a migrated database with fast hashing; the dir and the task live as long as it.
+/// A started server over a migrated database with fast hashing; the dir and the server live as
+/// long as it.
 pub struct TestApp {
     pub _dir: tempfile::TempDir,
     pub db: Db,
     pub addr: SocketAddr,
-    pub _task: tokio::task::JoinHandle<()>,
+    pub _running: Running,
 }
 
 impl TestApp {
@@ -610,12 +615,14 @@ impl TestApp {
 
 pub async fn test_app() -> TestApp {
     let (dir, db, state) = test_state().await;
-    let (addr, task) = serve(potluck::api::router(state)).await;
+    let running = start_with(&config_for(dir.path()), state)
+        .await
+        .expect("start");
     TestApp {
         _dir: dir,
         db,
-        addr,
-        _task: task,
+        addr: running.http_addr(),
+        _running: running,
     }
 }
 

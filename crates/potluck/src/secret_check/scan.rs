@@ -3,6 +3,7 @@
 //! Content over `MAX_CONTENT_BYTES`, blob or commit and tag message alike, is path-ruled but
 //! never content-scanned: the cap bounds the hook's cost per push.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Write;
 
@@ -584,9 +585,24 @@ fn content_pass(
     failed.map_or(Ok(()), Err)
 }
 
-/// Runs one call into a rule set, turning a panic into `ScanError::Rules`.
+thread_local! {
+    /// Set while this thread is inside a guarded rule-set call, for the quiet panic hook.
+    static IN_RULE_CALL: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the current thread is inside a guarded rule-set call.
+pub(crate) fn in_rule_call() -> bool {
+    IN_RULE_CALL.try_with(Cell::get).unwrap_or(false)
+}
+
+/// Runs one call into a rule set, turning a panic into `ScanError::Rules`. The thread is
+/// marked as in a rule call meanwhile; catch_unwind returns on unwind too, so the mark is
+/// always restored.
 fn guarded<T>(f: impl FnOnce() -> T) -> Result<T, ScanError> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| ScanError::Rules)
+    let outer = IN_RULE_CALL.replace(true);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    IN_RULE_CALL.set(outer);
+    result.map_err(|_| ScanError::Rules)
 }
 
 /// The push's rule set, if any, reached only through guarded calls whose findings are checked.

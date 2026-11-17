@@ -95,6 +95,8 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .with_ansi(std::io::stderr().is_terminal())
         .try_init()
         .map_err(|err| anyhow::anyhow!(err))?;
+    // A rule set's panic message may quote pushed content; the re-check logs the failure itself.
+    crate::secret_check::quiet_rule_panics();
     // Both handlers go in before start, so a SIGTERM or Ctrl-C during startup still reaches
     // shutdown; `ctrl_c()` would only register once polled.
     let mut terminate = signal(SignalKind::terminate())?;

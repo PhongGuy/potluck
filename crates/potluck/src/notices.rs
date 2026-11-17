@@ -1,7 +1,9 @@
 //! Ref notices: who listens to which workspace, and how a listener is told to stop.
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::time::Duration;
 
 use tokio::sync::{broadcast, oneshot};
 
@@ -46,6 +48,8 @@ pub struct Subscription {
     // receivers.
     moves: broadcast::Receiver<RefMove>,
     closed: oneshot::Receiver<()>,
+    // When set, the stream ends as this timer fires, through the same path as a close.
+    lifetime: Option<Pin<Box<tokio::time::Sleep>>>,
     // Set once `next` has returned `None`: a finished oneshot panics if polled again, and a
     // lagged receiver would otherwise resume.
     ended: bool,
@@ -79,14 +83,28 @@ impl Drop for Guard {
 }
 
 impl Subscription {
-    /// The next move; `None` once the server closed this stream, once it lagged by more than
-    /// `CAPACITY` moves, or once the registry is gone.
+    /// This stream, ending once `after` has passed from now; moves before then arrive as usual.
+    pub fn close_after(mut self, after: Duration) -> Subscription {
+        self.lifetime = Some(Box::pin(tokio::time::sleep(after)));
+        self
+    }
+
+    /// The next move; `None` once the server closed this stream, once its lifetime ran out,
+    /// once it lagged by more than `CAPACITY` moves, or once the registry is gone.
     pub async fn next(&mut self) -> Option<RefMove> {
         if self.ended {
             return None;
         }
+        let timer = self.lifetime.as_mut();
+        let lifetime = async move {
+            match timer {
+                Some(sleep) => sleep.await,
+                None => std::future::pending().await,
+            }
+        };
         let next = tokio::select! {
             _ = &mut self.closed => None,
+            () = lifetime => None,
             // A lag ends the stream too: the client's reconnect snapshot resynchronises it.
             r = self.moves.recv() => r.ok(),
         };
@@ -135,6 +153,7 @@ impl Notices {
         Subscription {
             moves,
             closed,
+            lifetime: None,
             ended: false,
             _guard: Guard {
                 id,

@@ -6,7 +6,9 @@
 use std::collections::{HashMap, HashSet, hash_map};
 use std::io::Write;
 
-use crate::kinds::{self, Finding, Kind, generic};
+use potluck_kind::Role;
+
+use crate::kinds::{self, Blob, Change, Finding, RuleSet, generic};
 use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
 
 /// What the server told the hook through its environment.
@@ -91,16 +93,31 @@ impl Rejection {
     }
 }
 
+// A finding at the path the scan asked about keeps the entry's raw bytes, so a non-UTF-8
+// path survives; a finding a rule set placed elsewhere carries its own path.
+fn rejection(ref_name: &[u8], raw: &[u8], lossy: &str, finding: Finding) -> Rejection {
+    let path = if finding.path() == lossy {
+        raw.to_vec()
+    } else {
+        finding.path().as_bytes().to_vec()
+    };
+    Rejection {
+        ref_name: ref_name.to_vec(),
+        path,
+        finding,
+    }
+}
+
 /// The check for one push. `Ok(vec![])` accepts. An override accepts without touching git.
 /// Deletions are skipped. Per ref, in stdin order, the target is peeled: a commit yields its
 /// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
 /// kind) over every changed entry, and content rules over the entries whose blob is new to
-/// the repository or whose path the kind's `content_path` accepts, each `(blob, path)` pair
-/// once per push; in import mode the tip tree replaces both lists. A tree target is scanned
-/// whole (every entry a candidate); a blob target is one entry at path `/`. Blobs over
-/// `MAX_CONTENT_BYTES` are not read: the generic set skips them, and a kind refuses one at a
-/// path it owns through `over_cap_rule`. Per ref the path-rule rejections come first, then
-/// the content-rule ones, in entry order; a path refused by a path rule is not content-checked.
+/// the repository or whose path the kind `reads`, each `(blob, path)` pair once per push; in
+/// import mode the tip tree replaces both lists. A tree target is scanned whole (every entry a
+/// candidate); a blob target is one entry at path `/`. Blobs over `MAX_CONTENT_BYTES` are not
+/// read: the generic set skips them, and a kind may refuse one at a path it reads through
+/// `check` with `Blob::TooLarge`. Per ref the path-rule rejections come first, then the
+/// content-rule ones, in entry order; a path refused by a path rule is not content-checked.
 /// The generic content rules also run over the message of every new commit and every new
 /// annotated tag behind the ref (the pushed tag's chain included), each object once per push
 /// under the first ref that lists it, reported at path `/` after the ref's content hits; import
@@ -158,10 +175,10 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
             if let Some(finding) = refused {
                 hits.push((
                     (ri, 0, ei),
-                    Rejection::new(update.name(), entry.path(), finding),
+                    rejection(update.name(), entry.path(), &path, finding),
                 ));
             } else if (fresh.as_ref().is_none_or(|f| f.contains(entry.sha()))
-                || kind.is_some_and(|k| k.content_path(&path)))
+                || kind.is_some_and(|k| k.reads(&path)))
                 && queued.insert((entry.sha().clone(), entry.path().to_vec()))
             {
                 candidates.entry(entry.sha().clone()).or_default().push((
@@ -175,11 +192,11 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
     content_pass(git, kind, updates, candidates, &mut hits)?;
     git.for_each_message(&messages, |sha, message| {
         if let (Some(&(ri, mi)), Some(finding)) =
-            (message_slots.get(sha), generic::content_rule(message))
+            (message_slots.get(sha), generic::content_rule("/", message))
         {
             hits.push((
                 (ri, 2, mi),
-                Rejection::new(updates[ri].name(), b"/", finding),
+                rejection(updates[ri].name(), b"/", "/", finding),
             ));
         }
     })?;
@@ -188,11 +205,11 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 }
 
 /// Streams every candidate blob at or under the cap once and runs the content rules for each
-/// path it sits at: the generic set on the bytes, then the kind's rule with the path. A blob
-/// over the cap is never read; only the kind's `over_cap_rule` may refuse it, by path alone.
+/// path it sits at: the generic set on the bytes, then the kind's first `check` finding. A blob
+/// over the cap is never read; only the kind's `check` with `Blob::TooLarge` may refuse it.
 fn content_pass(
     git: &Git,
-    kind: Option<&'static dyn Kind>,
+    kind: Option<&'static dyn RuleSet>,
     updates: &[RefUpdate],
     candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
     hits: &mut Vec<((usize, u8, usize), Rejection)>,
@@ -207,13 +224,13 @@ fn content_pass(
             Some(_) => {
                 for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
                     let lossy = String::from_utf8_lossy(path);
-                    if let Some(finding) = kind
-                        .filter(|k| k.content_path(&lossy))
-                        .and_then(|k| k.over_cap_rule(&lossy))
-                    {
+                    if let Some(finding) = kind.filter(|k| k.reads(&lossy)).and_then(|k| {
+                        let change = Change::history(&lossy, Blob::TooLarge, Role::Write);
+                        k.check(&change).into_iter().next()
+                    }) {
                         hits.push((
                             (*ri, 1, *ei),
-                            Rejection::new(updates[*ri].name(), path, finding),
+                            rejection(updates[*ri].name(), path, &lossy, finding),
                         ));
                     }
                 }
@@ -227,16 +244,22 @@ fn content_pass(
         }
     }
     git.for_each_blob(&kept, |sha, bytes| {
-        let generic_hit = generic::content_rule(bytes);
+        // The generic patterns depend on the bytes alone, so they run once per blob and the
+        // hit is re-placed at each path the blob sits at.
+        let generic_hit = generic::content_rule("", bytes);
         for (ri, ei, path) in candidates.get(sha).into_iter().flatten() {
             let lossy = String::from_utf8_lossy(path);
-            let finding = generic_hit
-                .clone()
-                .or_else(|| kind.and_then(|k| k.content_rule(&lossy, bytes)));
+            let finding = match &generic_hit {
+                Some(f) => Some(Finding::new(f.code(), f.rule(), &lossy)),
+                None => kind.and_then(|k| {
+                    let change = Change::history(&lossy, Blob::Bytes(bytes), Role::Write);
+                    k.check(&change).into_iter().next()
+                }),
+            };
             if let Some(finding) = finding {
                 hits.push((
                     (*ri, 1, *ei),
-                    Rejection::new(updates[*ri].name(), path, finding),
+                    rejection(updates[*ri].name(), path, &lossy, finding),
                 ));
             }
         }

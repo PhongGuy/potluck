@@ -9,20 +9,20 @@ use super::{Code, Finding};
 /// Blobs above this size skip content rules; path rules still apply.
 pub const MAX_CONTENT_BYTES: u64 = 1024 * 1024;
 
-/// `env_file`: a basename of exactly `.env`, at any depth.
+/// `env_file` at `path`: a basename of exactly `.env`, at any depth.
 pub fn path_rule(path: &str) -> Option<Finding> {
     // Only the exact name: `.env.example` and friends are committed on purpose.
-    (path.rsplit('/').next() == Some(".env")).then(|| Finding::new(Code::EnvFile, "env_file"))
+    (path.rsplit('/').next() == Some(".env")).then(|| Finding::new(Code::EnvFile, "env_file", path))
 }
 
-/// The first pattern that matches, in table order: `private_key`, `aws`, `github`, `slack`,
-/// `potluck`; all under `Code::SecretPattern`.
-pub fn content_rule(blob: &[u8]) -> Option<Finding> {
+/// The first pattern that matches `blob`, in table order: `private_key`, `aws`, `github`,
+/// `slack`, `potluck`; all under `Code::SecretPattern`, reported at `path`.
+pub fn content_rule(path: &str, blob: &[u8]) -> Option<Finding> {
     // A set reports every pattern that matched; the lowest index is the earliest table row.
     let first = PATTERN_SET.matches(blob).iter().next()?;
     PATTERNS
         .get(first)
-        .map(|(rule, _)| Finding::new(Code::SecretPattern, rule))
+        .map(|(rule, _)| Finding::new(Code::SecretPattern, rule, path))
 }
 
 /// `(rule, pattern)` rows; order decides which rule a blob with several secrets reports.

@@ -14,7 +14,7 @@ use yaml_serde::mapping::Entry;
 use yaml_serde::value::{Tag, TaggedValue};
 use yaml_serde::{Mapping, Value};
 
-use super::{Code, Finding, Kind, SeedFile};
+use super::{Blob, Change, Code, Finding, RULES_ABI, RuleSet, SeedFile};
 
 /// The rule name of a `secret: true` variable carrying a value.
 pub const SECRET_VALUE: &str = "secret_value";
@@ -25,49 +25,13 @@ pub const ENV_UNPARSABLE: &str = "env_unparsable";
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Apinata;
 
-impl Kind for Apinata {
-    fn name(&self) -> &'static str {
-        "apinata"
-    }
-
-    /// No path rule of its own: `.env` belongs to the generic set.
-    fn path_rule(&self, _path: &str) -> Option<Finding> {
-        None
-    }
-
-    /// Environment files: `env_unparsable` if the blob is not exactly one YAML document yaml_serde
-    /// reads within `NODE_CAP` nodes or has a merge key it cannot apply; `secret_value` if, merged,
-    /// it or any node in it, keys included, is a mapping with `secret: true` (the boolean) and a
-    /// non-null `value`.
-    fn content_rule(&self, path: &str, blob: &[u8]) -> Option<Finding> {
-        is_environment_file(path)
-            .then(|| environment_rule(blob, NODE_CAP))
-            .flatten()
-    }
-
-    /// The environment files, the only paths `content_rule` reads.
-    fn content_path(&self, path: &str) -> bool {
-        is_environment_file(path)
-    }
-
-    /// An environment file over the cap is `env_unparsable`: none is that large, and an
-    /// unread file cannot be vouched for.
-    fn over_cap_rule(&self, path: &str) -> Option<Finding> {
-        is_environment_file(path).then(|| Finding::new(Code::SecretValue, ENV_UNPARSABLE))
-    }
-
-    fn seed(&self) -> Vec<SeedFile> {
-        seed()
-    }
-}
-
-impl potluck_kind::RuleSet for Apinata {
+impl RuleSet for Apinata {
     fn kind(&self) -> &'static str {
         "apinata"
     }
 
     fn abi(&self) -> u32 {
-        potluck_kind::RULES_ABI
+        RULES_ABI
     }
 
     fn formats(&self) -> &'static [&'static str] {
@@ -83,7 +47,7 @@ impl potluck_kind::RuleSet for Apinata {
     }
 
     /// No path rule of its own: `.env` belongs to the generic set.
-    fn path_rule(&self, _path: &str) -> Option<potluck_kind::Finding> {
+    fn path_rule(&self, _path: &str) -> Option<Finding> {
         None
     }
 
@@ -93,36 +57,22 @@ impl potluck_kind::RuleSet for Apinata {
 
     /// The environment rule on the new side of an environment file; a deleted file passes.
     /// Baseline and role do not matter, and a blob the hook did not read is `env_unparsable`.
-    fn check(&self, change: &potluck_kind::Change<'_>) -> Vec<potluck_kind::Finding> {
+    fn check(&self, change: &Change<'_>) -> Vec<Finding> {
         let path = change.path();
         if !is_environment_file(path) {
             return Vec::new();
         }
         let found = match change.new_blob() {
             None => None,
-            Some(potluck_kind::Blob::Bytes(blob)) => environment_rule(blob, NODE_CAP),
+            Some(Blob::Bytes(blob)) => environment_rule(path, blob, NODE_CAP),
             // An unread blob, or any side this version does not know, cannot be vouched for.
-            Some(_) => Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
+            Some(_) => Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE, path)),
         };
-        found
-            .map(|f| potluck_kind::Finding::new(contract_code(f.code()), f.rule(), path))
-            .into_iter()
-            .collect()
+        found.into_iter().collect()
     }
 
-    fn seed(&self) -> Vec<potluck_kind::SeedFile> {
+    fn seed(&self) -> Vec<SeedFile> {
         seed()
-            .into_iter()
-            .map(|f| potluck_kind::SeedFile::new(f.path(), f.bytes()))
-            .collect()
-    }
-}
-
-fn contract_code(code: Code) -> potluck_kind::Code {
-    match code {
-        Code::EnvFile => potluck_kind::Code::EnvFile,
-        Code::SecretValue => potluck_kind::Code::SecretValue,
-        Code::SecretPattern => potluck_kind::Code::SecretPattern,
     }
 }
 
@@ -151,23 +101,23 @@ pub fn detect_format(bytes: &[u8]) -> Option<String> {
 /// `env_unparsable`, as Apinata's loader refuses it.
 pub const NODE_CAP: usize = 2_000_000;
 
-/// The environment-file rule on `blob` alone with an explicit `node_cap`: `env_unparsable`
-/// when the bytes are not one YAML document, hold more than `node_cap` nodes or carry a
-/// merge key yaml_serde cannot apply (any `<<` inside a mapping key), `secret_value` for a
-/// valued secret once merges are folded in, else `None`. `content_rule` applies it with `NODE_CAP` to every path
-/// `is_environment_file` accepts.
-pub fn environment_rule(blob: &[u8], node_cap: usize) -> Option<Finding> {
+/// The environment-file rule on `blob` with an explicit `node_cap`, reported at `path`:
+/// `env_unparsable` when the bytes are not one YAML document, hold more than `node_cap` nodes
+/// or carry a merge key yaml_serde cannot apply (any `<<` inside a mapping key), `secret_value`
+/// for a valued secret once merges are folded in, else `None`. `check` applies it with
+/// `NODE_CAP` to every path `is_environment_file` accepts.
+pub fn environment_rule(path: &str, blob: &[u8], node_cap: usize) -> Option<Finding> {
     // Fail closed: Apinata reads with the same parser, so a file it refuses is one no
     // honest user relies on, and passing it would hide whatever it holds from the walk.
     // Count first so a merge cannot bypass the cap, merge before the walk so a pulled-in
     // value is seen.
     let Ok(mut doc) = parse_environment(blob, node_cap) else {
-        return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE));
+        return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE, path));
     };
     if !fold_merges(&mut doc) {
-        return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE));
+        return Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE, path));
     }
-    has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE))
+    has_valued_secret(&doc).then(|| Finding::new(Code::SecretValue, SECRET_VALUE, path))
 }
 
 // Rounds of `apply_merge` allowed before a leftover `<<` counts as unparsable; the

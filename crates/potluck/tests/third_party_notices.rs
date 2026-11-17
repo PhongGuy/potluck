@@ -147,3 +147,68 @@ fn write_replaces_only_the_marked_block() {
     assert!(!out.status.success(), "wrote into a file without markers");
     assert_eq!(fs::read_to_string(&unmarked).unwrap(), "# Head\n");
 }
+
+fn notices() -> String {
+    fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap()
+}
+
+/// The committed block is exactly what the script prints from this checkout's Cargo.lock.
+#[test]
+fn the_committed_crate_list_is_current() {
+    let out = Command::new(script())
+        .env("CARGO", env!("CARGO"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = String::from_utf8_lossy(&out.stdout);
+    let text = notices();
+    let begin = "<!-- crates:begin -->\n";
+    let start = text.find(begin).expect("no begin marker") + begin.len();
+    let stop = start
+        + text[start..]
+            .find("<!-- crates:end -->")
+            .expect("no end marker");
+    assert_eq!(
+        &text[start..stop],
+        list,
+        "THIRD_PARTY_NOTICES.md is stale: run scripts/third-party-crates.sh --write"
+    );
+    // Linked crates are listed; dev-dependencies, proc-macros and potluck itself are not.
+    for present in [
+        "- `axum` ",
+        "- `aws-lc-sys` ",
+        "- `rustls` ",
+        "- `minisign-verify` ",
+    ] {
+        assert!(list.contains(present), "list lacks {present:?}");
+    }
+    for absent in [
+        "- `potluck` ",
+        "- `minisign` ",
+        "- `serde_derive` ",
+        "- `syn` ",
+    ] {
+        assert!(!list.contains(absent), "list carries {absent:?}");
+    }
+}
+
+#[test]
+fn the_notices_carry_every_licence_text_a_listed_crate_requires() {
+    let text = notices();
+    for needle in [
+        "## Rust crates",
+        "scripts/third-party-crates.sh",
+        "LICENSE-APACHE",
+        "ISC License:",
+        "MIT License:",
+        "BSD 3-Clause License:",
+        "UNICODE LICENSE V3",
+        "This notice may not be removed or altered from any source distribution.",
+    ] {
+        assert!(text.contains(needle), "notices lack {needle:?}");
+    }
+}

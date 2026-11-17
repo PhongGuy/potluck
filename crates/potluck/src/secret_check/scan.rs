@@ -370,13 +370,18 @@ pub enum ScanError {
 /// How many `potluck-reject` lines are printed at most.
 pub const MAX_LINES: usize = 20;
 
+/// How many bytes of a finding's detail `report` prints at most.
+pub const MAX_DETAIL_BYTES: usize = 200;
+
 /// `potluck-reject <code> <ref> <path> <rule>\n` for the first `MAX_LINES` rejections, then
 /// `potluck-reject-more <n>\n` when `n` remain. The path and the ref are percent-encoded:
 /// `%`, space, bytes below 0x20, 0x7f and every byte of an invalid UTF-8 sequence become
 /// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
 /// exactly five fields. A finding without a tree path (a commit or tag message, or a tag whose
 /// target is a blob) carries the path `/`, which the encoding leaves as is and which no git
-/// tree path can start with.
+/// tree path can start with. A finding with a detail is followed by
+/// `potluck-reject-detail <detail>\n`, the detail cut to at most `MAX_DETAIL_BYTES` on a
+/// character boundary and then encoded the same way; detail lines do not count toward the cap.
 pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result<()> {
     for r in rejections.iter().take(MAX_LINES) {
         writeln!(
@@ -387,6 +392,15 @@ pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result
             percent_encode(&r.path),
             r.finding.rule(),
         )?;
+        if let Some(detail) = r.finding.detail() {
+            // Cut before encoding, so the cap bounds the rule set's text, not its escapes.
+            let cut = &detail[..detail.floor_char_boundary(MAX_DETAIL_BYTES)];
+            writeln!(
+                out,
+                "potluck-reject-detail {}",
+                percent_encode(cut.as_bytes())
+            )?;
+        }
     }
     let rest = rejections.len().saturating_sub(MAX_LINES);
     if rest > 0 {

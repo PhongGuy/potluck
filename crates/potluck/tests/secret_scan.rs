@@ -724,3 +724,18 @@ fn a_misnamed_path_rule_finding_fails_closed() {
         Err(ScanError::Rules)
     ));
 }
+
+#[test]
+fn a_rule_set_detail_reaches_the_rejection() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    let r = scan_with(
+        &env(None),
+        Some(&rules(Act::Detail("key.path"))),
+        &[update(&tip, "refs/heads/main")],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(r[0].finding().detail(), Some("key.path"));
+}

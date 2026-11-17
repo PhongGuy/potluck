@@ -73,6 +73,7 @@ mod session_proxies;
 mod slug;
 mod sse_reader;
 mod teams;
+mod third_party_notices;
 mod token;
 mod tokens;
 mod update_api;

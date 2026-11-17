@@ -193,25 +193,29 @@ impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = T> + Send + 'static,
     {
-        let mut rx = {
+        // The lock only decides join or start; the work is built and spawned after it is
+        // released, so a guard dropped by a panic or a refused spawn can clear the slot.
+        let (mut rx, start) = {
             let mut slot = lock(&self.slot);
             match &*slot {
-                Some(rx) => rx.clone(),
+                Some(rx) => (rx.clone(), None),
                 None => {
                     let (tx, rx) = watch::channel(None);
                     *slot = Some(rx.clone());
-                    let guard = ClearOnDrop(Arc::clone(&self.slot));
-                    let fut = work();
-                    tokio::spawn(async move {
-                        let answer = fut.await;
-                        // Clear before publishing: a caller after the answer starts fresh work.
-                        drop(guard);
-                        let _ = tx.send(Some(answer));
-                    });
-                    rx
+                    (rx, Some(tx))
                 }
             }
         };
+        if let Some(tx) = start {
+            let guard = ClearOnDrop(Arc::clone(&self.slot));
+            let fut = work();
+            tokio::spawn(async move {
+                let answer = fut.await;
+                // Clear before publishing: a caller after the answer starts fresh work.
+                drop(guard);
+                let _ = tx.send(Some(answer));
+            });
+        }
         rx.wait_for(Option::is_some)
             .await
             .ok()
@@ -283,6 +287,8 @@ fn transport(err: reqwest::Error) -> UpdateError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::redirect_allowed;
 
     #[test]
@@ -303,6 +309,26 @@ mod tests {
             .await;
         assert_eq!(first, None, "the waiter sees the interruption");
         let second = flight.run(|| async { 7 }).await;
+        assert_eq!(second, Some(7), "the slot was cleared, so fresh work runs");
+    }
+
+    // Multi-threaded so the timeouts can fire even if a worker thread is stuck on the slot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_work_closure_frees_the_slot_without_hanging() {
+        let flight = std::sync::Arc::new(super::SingleFlight::<u32>::new());
+        let starter = std::sync::Arc::clone(&flight);
+        let first = tokio::spawn(async move {
+            starter
+                .run(|| -> std::future::Ready<u32> { panic!("building the work panics") })
+                .await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(3), first)
+            .await
+            .expect("the panicking caller does not hang");
+        assert!(first.is_err(), "the caller sees the panic");
+        let second = tokio::time::timeout(Duration::from_secs(3), flight.run(|| async { 7 }))
+            .await
+            .expect("the next caller does not hang");
         assert_eq!(second, Some(7), "the slot was cleared, so fresh work runs");
     }
 }

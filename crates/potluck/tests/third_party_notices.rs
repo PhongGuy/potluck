@@ -152,6 +152,25 @@ fn notices() -> String {
     fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap()
 }
 
+/// CI forces cargo's colour on; the script must print the same list as on a plain terminal.
+#[test]
+fn forced_cargo_colour_changes_nothing() {
+    let run = |colour: &str| {
+        Command::new(script())
+            .env("CARGO", env!("CARGO"))
+            .env("CARGO_TERM_COLOR", colour)
+            .output()
+            .unwrap()
+    };
+    let (plain, coloured) = (run("never"), run("always"));
+    assert!(
+        coloured.status.success(),
+        "{}",
+        String::from_utf8_lossy(&coloured.stderr)
+    );
+    assert_eq!(plain.stdout, coloured.stdout);
+}
+
 /// The committed block is exactly what the script prints from this checkout's Cargo.lock.
 #[test]
 fn the_committed_crate_list_is_current() {

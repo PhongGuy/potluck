@@ -19,7 +19,7 @@ esac
 # Normal edges without proc-macros, across both image targets, is what the release build links.
 tree=$(cd "$root" && "${CARGO:-cargo}" tree -p potluck -e normal,no-proc-macro \
   --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu \
-  --prefix none -f '{p}|{l}' --frozen)
+  --prefix none -f '{p}|{l}' --color never --frozen)
 
 lines=()
 bad=0

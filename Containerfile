@@ -31,6 +31,8 @@ RUN apt-get update \
     && chown 65532:65532 /data
 
 COPY --from=builder /src/target/release/potluck /usr/local/bin/potluck
+# The licences travel with every copy of the binary.
+COPY LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md /usr/share/doc/potluck/
 
 ENV POTLUCK_DATA=/data \
     POTLUCK_LISTEN=0.0.0.0:8080

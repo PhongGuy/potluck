@@ -184,8 +184,8 @@ pub fn scan_with(
     }
     let kind = GuardedRules(rules);
     let role = kind_role(env.role());
-    // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
-    // path-rule hits first, then its content hits, each in entry order.
+    // Hits are keyed (ref index, pass, entry index), passes 0 to 4 being path rule, content,
+    // message, tip and format, so the final sort groups each ref's hits by pass in entry order.
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
     let mut seen: Vec<Sha> = Vec::new();

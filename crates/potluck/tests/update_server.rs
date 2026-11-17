@@ -75,13 +75,9 @@ async fn shutdown_returns_promptly_while_the_first_check_waits() {
     let running = start_with_updates(&config_for(dir.path()), server.source(&key))
         .await
         .unwrap();
-    let began = Instant::now();
-    running.shutdown().await;
-    assert!(
-        began.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        began.elapsed()
-    );
+    tokio::time::timeout(Duration::from_secs(5), running.shutdown())
+        .await
+        .expect("shutdown returns within 5 s");
     assert_eq!(
         server.manifest_hits(),
         0,
@@ -110,7 +106,8 @@ impl Drop for Serve {
 }
 
 /// `potluck serve` on `data` with `flags` and `env`. Its source is the real GitHub one, but the
-/// first check waits five minutes and every child here is killed within seconds.
+/// first check waits five minutes and every child here is killed within seconds; a child
+/// orphaned by a killed test binary still reaches nothing, as its proxy is a dead loopback port.
 fn spawn_serve(data: &Path, flags: &[&str], env: &[(&str, &str)]) -> Serve {
     let mut cmd = potluck();
     cmd.args([
@@ -124,6 +121,8 @@ fn spawn_serve(data: &Path, flags: &[&str], env: &[(&str, &str)]) -> Serve {
     .arg(data)
     .args(flags)
     .envs(env.iter().copied())
+    .env("HTTPS_PROXY", "http://127.0.0.1:9")
+    .env("ALL_PROXY", "http://127.0.0.1:9")
     .stdout(Stdio::null())
     .stderr(Stdio::null());
     let child = Serve(cmd.spawn().expect("spawn potluck serve"));

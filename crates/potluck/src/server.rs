@@ -467,6 +467,11 @@ mod tests {
 
     /// A config serving `dir` on an ephemeral loopback port, built the way `serve` builds one.
     fn config_for(dir: &Path) -> Config {
+        config_with(dir, &[])
+    }
+
+    /// As `config_for`, with `extra` serve flags appended.
+    fn config_with(dir: &Path, extra: &[&str]) -> Config {
         #[derive(clap::Parser)]
         struct Wrap {
             #[command(flatten)]
@@ -483,8 +488,24 @@ mod tests {
             "--public-url",
             url,
         ];
+        let argv = argv.iter().chain(extra);
         let wrap = <Wrap as clap::Parser>::try_parse_from(argv).expect("flags parse");
         Config::try_from(wrap.serve).expect("test config")
+    }
+
+    // The daily loop is the only task on the tracker right after start, so the count shows
+    // whether the flag spawned it. The GitHub source is safe: its first check waits minutes.
+    #[tokio::test]
+    async fn the_daily_loop_is_spawned_only_when_the_check_is_on() {
+        for (flags, loops) in [(&[][..], 1), (&["--no-update-check"][..], 0)] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = UpdateSource::github().unwrap();
+            let running = start_with_updates(&config_with(dir.path(), flags), source)
+                .await
+                .unwrap();
+            assert_eq!(running.git_tasks.len(), loops, "{flags:?}");
+            running.shutdown().await;
+        }
     }
 
     // A second fd on the lock's open file description stands in for a child forked by another

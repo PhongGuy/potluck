@@ -262,7 +262,7 @@ fn sign_attests_only_a_public_repository_but_always_signs() {
             .any(|l| l.starts_with("    if:") && l.contains("private")),
         "a private repository would skip signing"
     );
-    for uses in ["docker/login-action@", "actions/attest@"] {
+    for uses in ["docker/login-action@", "subject-digest:", "subject-path:"] {
         assert!(
             step(sign, uses).contains(public),
             "{uses} runs in a private repository"
@@ -278,8 +278,38 @@ fn sign_attests_only_a_public_repository_but_always_signs() {
             "{unconditional} is conditional"
         );
     }
-    assert!(step(sign, "actions/attest@").contains("id: attest"));
-    assert!(sign.contains("attested: ${{ steps.attest.outcome == 'success' }}"));
+    assert!(step(sign, "subject-digest:").contains("id: attest\n"));
+    assert!(sign.contains(
+        "attested: ${{ steps.attest.outcome == 'success' && steps.attest-files.outcome == 'success' }}"
+    ));
+}
+
+#[test]
+fn sign_attests_the_signed_manifest_files_in_a_public_repository() {
+    let jobs = release();
+    let sign = job(&jobs, "sign");
+    let files = step(sign, "id: attest-files");
+    for needle in [
+        "if: ${{ !github.event.repository.private }}",
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2",
+        "subject-path: |\n",
+        "            ${{ runner.temp }}/release/potluck-release.json\n",
+        "            ${{ runner.temp }}/release/potluck-release.json.sig\n",
+    ] {
+        assert!(
+            files.contains(needle),
+            "the file attestation lacks {needle:?}: {files}"
+        );
+    }
+    // Only after the .sig exists, so the attestation covers what the draft attaches.
+    let signed = sign
+        .find("base64 -w0 potluck-release.json.minisig")
+        .unwrap();
+    assert!(
+        signed < sign.find("id: attest-files").unwrap(),
+        "attests before signing"
+    );
+    assert_eq!(sign.matches("actions/attest@").count(), 2);
 }
 
 #[test]

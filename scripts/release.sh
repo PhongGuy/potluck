@@ -97,7 +97,7 @@ generated_changes() {
 # Write OUT, the draft notes for TAG in REPO (owner/name) whose image index is
 # DIGEST: the intro, What's Changed since the previous vX.Y.Z tag, the image to
 # pull, and the install and update notes. Runs in the repository, which needs
-# full history and tags. The attestation check is named only when ATTESTED=true.
+# full history and tags. The attestation checks are named only when ATTESTED=true.
 release_notes() {
   local tag=$1 repo=$2 digest=$3 out=$4
   local prev="" range=$tag first=true subjects changes feats fixes
@@ -147,6 +147,7 @@ NOTES
     fi
     if [[ ${ATTESTED:-} == true ]]; then
       echo "Check that this project's release workflow built it with \`gh attestation verify oci://$IMAGE:$tag --repo $repo\`."
+      echo "Check the signed release manifest the same way with \`gh attestation verify potluck-release.json --repo $repo\` and \`gh attestation verify potluck-release.json.sig --repo $repo\`."
     fi
     cat <<'NOTES'
 

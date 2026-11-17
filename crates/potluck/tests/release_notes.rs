@@ -210,6 +210,39 @@ fn the_attestation_check_appears_only_when_attested() {
 }
 
 #[test]
+fn attested_notes_name_the_manifest_file_check_and_unattested_notes_name_none() {
+    const FILES: &str = "Check the signed release manifest the same way with `gh attestation verify potluck-release.json --repo PhongGuy/potluck` and `gh attestation verify potluck-release.json.sig --repo PhongGuy/potluck`.";
+    for attested in [true, false] {
+        let dir = repo_with(&["feat: x"], "v0.2.0");
+        let gh = stub_gh(dir.path());
+        let out_file = dir.path().join("notes-out.md");
+        let mut cmd = Command::new(script());
+        cmd.current_dir(dir.path())
+            .env("GH", &gh)
+            .env_remove("ATTESTED");
+        if attested {
+            cmd.env("ATTESTED", "true");
+        }
+        let out = cmd
+            .args(["notes", "v0.2.0", "PhongGuy/potluck", DIGEST])
+            .arg(&out_file)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let text = fs::read_to_string(&out_file).unwrap();
+        if attested {
+            assert!(text.lines().any(|l| l == FILES), "{text}");
+        } else {
+            assert!(!text.contains("gh attestation"), "{text}");
+        }
+    }
+}
+
+#[test]
 fn a_first_release_has_no_previous_tag() {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), &["init", "-q", "-b", "main"]);

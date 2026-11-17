@@ -1,23 +1,31 @@
-//! The in-tree Apinata kind seen through the potluck-kind contract.
+//! Every registered rule set seen through the potluck-kind contract, and the Apinata rule set
+//! Potluck pins from `apinata-rules`.
 
-use potluck::kinds::apinata::{Apinata, detect_format};
 use potluck::kinds::{all, by_name};
 use potluck_kind::{Blob, Change, Code, Finding, RULES_ABI, Role, RuleSet};
 
 const BAD: &[u8] = include_bytes!("fixtures/secret-check/bad/env-secret-valued.yml");
+const ENV: &str = "environments/dev.yml";
+
+fn apinata() -> &'static dyn RuleSet {
+    by_name("apinata").expect("apinata is registered")
+}
 
 #[test]
-fn apinata_states_its_contract() {
-    assert_eq!(all().len(), 1);
-    let k = all()[0];
+fn every_rule_set_targets_this_abi() {
+    assert!(!all().is_empty(), "no rule set registered");
+    for k in all() {
+        assert_eq!(k.abi(), RULES_ABI, "{}", k.kind());
+    }
+}
+
+#[test]
+fn apinata_is_the_only_kind_and_states_its_contract() {
+    let kinds: Vec<&str> = all().iter().map(|k| k.kind()).collect();
+    assert_eq!(kinds, ["apinata"]);
     assert_eq!(
-        (k.kind(), k.abi(), k.formats(), k.format_file()),
-        (
-            "apinata",
-            RULES_ABI,
-            &["1.0.0"] as &[&str],
-            "opencollection.yml"
-        )
+        (apinata().formats(), apinata().format_file()),
+        (&["1.0.0"] as &[&str], "opencollection.yml")
     );
 }
 
@@ -27,92 +35,93 @@ fn by_name_finds_every_rule_set_under_its_own_name() {
         assert_eq!(by_name(k.kind()).map(|f| f.kind()), Some(k.kind()));
     }
     assert!(by_name("no-such-kind").is_none());
+    assert!(
+        by_name("dbento").is_none(),
+        "dbento has no rule set before phase 2"
+    );
 }
 
 #[test]
-fn the_seed_detects_to_a_listed_format() {
-    let k = all()[0];
-    let file = k
-        .seed()
-        .into_iter()
-        .find(|f| f.path() == k.format_file())
-        .unwrap();
-    let found = k.detect_format(file.bytes()).unwrap();
-    assert!(k.formats().contains(&found.as_str()), "{found}");
-}
-
-#[test]
-fn the_format_detector_reads_only_the_top_level_version() {
-    for (bytes, want) in [
-        (&b"opencollection: 1.0.0\n"[..], Some("1.0.0")),
-        (b"opencollection: \"1.0.0\"\n", Some("1.0.0")),
-        (b"opencollection: '1.0.0'\n", Some("1.0.0")),
-        (
-            b"\xef\xbb\xbfopencollection: 1.0.0\r\ninfo: {}\r\n",
-            Some("1.0.0"),
-        ),
-        (
-            b"info:\n  name: x\nopencollection: 2.0.0 # newer\n",
-            Some("2.0.0"),
-        ),
-        (b"info:\n  opencollection: 1.0.0\n", None),
-        (b"opencollection:\n", None),
-        (b"name: x\n", None),
-        (b"", None),
-        (b"opencollection: \xff\n", None),
-    ] {
-        assert_eq!(
-            detect_format(bytes).as_deref(),
-            want,
-            "{:?}",
-            String::from_utf8_lossy(bytes)
+fn every_seed_detects_to_a_listed_format() {
+    for k in all() {
+        let seed = k.seed();
+        let file = seed
+            .iter()
+            .find(|f| f.path() == k.format_file())
+            .unwrap_or_else(|| panic!("{} seeds no {}", k.kind(), k.format_file()));
+        let found = k.detect_format(file.bytes());
+        assert!(
+            found.as_deref().is_some_and(|v| k.formats().contains(&v)),
+            "{}: {found:?}",
+            k.kind()
         );
     }
 }
 
 #[test]
+fn the_apinata_seed_is_the_one_potluck_shipped() {
+    // The same bytes the in-tree module seeded, so SEED_COMMIT and existing workspaces hold.
+    let seed = apinata().seed();
+    let files: Vec<(&str, &[u8])> = seed.iter().map(|f| (f.path(), f.bytes())).collect();
+    assert_eq!(
+        files,
+        [
+            (".gitignore", &b".env\n"[..]),
+            (
+                "opencollection.yml",
+                &b"opencollection: 1.0.0\n\ninfo:\n  name: Workspace\nbundled: false\nextensions:\n  bruno:\n    ignore:\n      - node_modules\n      - .git\n"[..]
+            ),
+        ]
+    );
+}
+
+#[test]
 fn check_ignores_baseline_and_role() {
-    let p = "environments/dev.yml";
-    let history = Apinata.check(&Change::history(p, Blob::Bytes(BAD), Role::Admin));
-    let tip = Apinata.check(&Change::tip(p, None, Some(Blob::Bytes(BAD)), Role::Write));
+    // The tip pass relies on this: a tip finding equals the history finding for the same blob.
+    let k = apinata();
+    let history = k.check(&Change::history(ENV, Blob::Bytes(BAD), Role::Admin));
+    let tip = k.check(&Change::tip(ENV, None, Some(Blob::Bytes(BAD)), Role::Write));
+    let over_old = k.check(&Change::tip(
+        ENV,
+        Some(Blob::Bytes(b"name: dev\n")),
+        Some(Blob::Bytes(BAD)),
+        Role::Read,
+    ));
     assert_eq!(history, tip);
+    assert_eq!(history, over_old);
     assert_eq!(
         history,
-        vec![Finding::new(Code::SecretValue, "secret_value", p)]
+        vec![Finding::new(Code::SecretValue, "secret_value", ENV).with_detail("api_key")]
     );
     assert!(
-        Apinata
-            .check(&Change::tip(p, Some(Blob::Bytes(BAD)), None, Role::Write))
+        k.check(&Change::tip(ENV, Some(Blob::Bytes(BAD)), None, Role::Write))
             .is_empty()
-    );
-    assert!(
-        history.iter().all(|f| f.detail().is_none()),
-        "in-tree rules emit no detail, so no value can leak through one"
     );
 }
 
 #[test]
 fn check_reads_only_environment_files_and_refuses_an_unread_one() {
+    let k = apinata();
     assert!(
-        Apinata
-            .check(&Change::history(
-                "notes/x.yml",
-                Blob::Bytes(BAD),
-                Role::Write
-            ))
-            .is_empty()
+        k.check(&Change::history(
+            "notes/x.yml",
+            Blob::Bytes(BAD),
+            Role::Write
+        ))
+        .is_empty()
     );
     assert_eq!(
-        Apinata.check(&Change::history(
+        k.check(&Change::history(
             "environments/big.yml",
             Blob::TooLarge,
             Role::Write
         )),
-        vec![Finding::new(
-            Code::SecretValue,
-            "env_unparsable",
-            "environments/big.yml"
-        )]
+        vec![
+            Finding::new(Code::SecretValue, "env_unparsable", "environments/big.yml")
+                .with_detail("too large to check")
+        ]
     );
-    assert!(Apinata.reads("environments/dev.yml") && !Apinata.reads("notes/dev.yml"));
+    assert!(k.reads("environments/dev.yml"));
+    assert!(!k.reads("notes/dev.yml"));
+    assert!(!k.reads("environments/sub/dev.yml"));
 }

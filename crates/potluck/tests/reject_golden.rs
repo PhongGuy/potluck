@@ -1,5 +1,5 @@
-//! The exact bytes the hook prints for today's findings: the Apinata client parses these lines,
-//! so any change to them is a contract change, not a refactor.
+//! The exact bytes the hook prints for today's findings, detail lines included: the Apinata
+//! client parses these lines, so any change to them is a contract change, not a refactor.
 
 use std::io::Write;
 use std::process::{Output, Stdio};
@@ -71,11 +71,39 @@ fn todays_findings_print_exactly_these_bytes() {
             "potluck-reject secret_env_file refs/heads/main .env env_file\n",
             "potluck-reject secret_pattern refs/heads/main creds.txt aws\n",
             "potluck-reject secret_value refs/heads/main environments/bad.yml env_unparsable\n",
+            "potluck-reject-detail line%202,%20column%201\n",
             "potluck-reject secret_value refs/heads/main environments/dev.yml secret_value\n",
+            "potluck-reject-detail api_key\n",
             "potluck-reject secret_pattern refs/heads/main notes/with%20space.txt aws\n",
             "potluck-reject secret_pattern refs/heads/main / potluck\n",
             "potluck-reject secret_value refs/heads/feat environments/big.yml env_unparsable\n",
+            "potluck-reject-detail too%20large%20to%20check\n",
             "potluck-reject secret_pattern refs/heads/feat odd%25name%09.txt aws\n",
+        )
+    );
+}
+
+/// Verdicts `apinata-rules` moved from Potluck's own parser: an empty environment file and one
+/// with a local tag are now unparsable, each with its fixed detail.
+#[test]
+fn moved_verdicts_print_exactly_these_bytes() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", SEED_COLLECTION);
+    s.write("environments/empty.yml", b"");
+    s.write(
+        "environments/tagged.yml",
+        b"variables:\n  - !t {name: k, secret: true, value: x}\n",
+    );
+    let tip = s.stage_commit("moved");
+    let out = run_hook(&s, &format!("{ZERO} {tip} refs/heads/main\n"));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        concat!(
+            "potluck-reject secret_value refs/heads/main environments/empty.yml env_unparsable\n",
+            "potluck-reject-detail the%20root%20is%20not%20a%20mapping\n",
+            "potluck-reject secret_value refs/heads/main environments/tagged.yml env_unparsable\n",
+            "potluck-reject-detail YAML%20tags%20are%20not%20supported\n",
         )
     );
 }

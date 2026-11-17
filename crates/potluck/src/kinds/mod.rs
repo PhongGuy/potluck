@@ -11,8 +11,8 @@ pub fn by_name(name: &str) -> Option<&'static dyn RuleSet> {
     all().iter().copied().find(|k| k.kind() == name)
 }
 
-/// Every in-tree rule set, as the potluck-kind contract sees it.
+/// Every registered rule set, as the potluck-kind contract sees it.
 pub fn all() -> &'static [&'static dyn RuleSet] {
-    static ALL: [&dyn RuleSet; 1] = [&apinata::Apinata];
+    static ALL: [&dyn RuleSet; 1] = [apinata_rules::RULE_SET];
     &ALL
 }

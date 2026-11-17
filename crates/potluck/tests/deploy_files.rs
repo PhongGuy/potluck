@@ -514,3 +514,23 @@ fn the_readme_and_the_notices_cover_tini() {
         assert!(run_it.contains(needle), "Run it lacks {needle:?}");
     }
 }
+
+#[test]
+fn the_updating_section_opens_with_the_update_notice() {
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let updating = readme_section(&readme, "## Updating");
+    let first = updating.trim_start().split("\n\n").next().unwrap();
+    for needle in [
+        "once a day",
+        "signed release",
+        "never updates itself",
+        "potluck admin update check",
+        "--no-update-check",
+        "POTLUCK_UPDATE_CHECK=false",
+    ] {
+        assert!(
+            first.contains(needle),
+            "first Updating paragraph lacks {needle:?}: {first}"
+        );
+    }
+}

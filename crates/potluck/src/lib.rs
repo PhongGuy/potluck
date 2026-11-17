@@ -16,3 +16,4 @@ pub mod role;
 pub mod secret_check;
 pub mod server;
 pub mod slug;
+pub mod update;

@@ -54,6 +54,8 @@ impl AdminClient {
         drop(UnixStream::connect(socket).await?);
         let http = reqwest::Client::builder()
             .unix_socket(socket)
+            // The admin socket never speaks TLS, so the client skips loading the CA store.
+            .tls_certs_only([])
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(io::Error::other)?;

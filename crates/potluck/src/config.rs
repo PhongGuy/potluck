@@ -49,6 +49,9 @@ pub struct ServeArgs {
     /// File holding the OIDC client secret; parsed, but refused until OIDC sign-in exists.
     #[arg(long, env = "POTLUCK_OIDC_CLIENT_SECRET_FILE")]
     oidc_client_secret_file: Option<PathBuf>,
+    /// Turn off the daily check for a new signed release.
+    #[arg(long = "no-update-check", env = "POTLUCK_UPDATE_CHECK", action = clap::ArgAction::SetFalse)]
+    update_check: bool,
 }
 
 /// Validated server configuration. Built with `Config::try_from(ServeArgs)`.
@@ -63,6 +66,7 @@ pub struct Config {
     git_max_runtime: Duration,
     log: String,
     trusted_proxies: Vec<ipnet::IpNet>,
+    update_check: bool,
 }
 
 impl Config {
@@ -99,6 +103,11 @@ impl Config {
     /// The tracing filter directive.
     pub fn log(&self) -> &str {
         &self.log
+    }
+
+    /// Whether the daily release check runs; off with `--no-update-check`.
+    pub fn update_check(&self) -> bool {
+        self.update_check
     }
 
     /// Whether `ip` is inside one of `--trusted-proxies`; an IPv4-mapped IPv6 address is tested
@@ -274,6 +283,7 @@ impl TryFrom<ServeArgs> for Config {
             git_max_runtime: Duration::from_secs(args.git_max_runtime_secs),
             log: args.log,
             trusted_proxies,
+            update_check: args.update_check,
         })
     }
 }

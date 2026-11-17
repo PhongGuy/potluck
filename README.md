@@ -126,6 +126,8 @@ The server trusts `X-Forwarded-For` only from the addresses listed in `POTLUCK_T
 
 ## Updating
 
+The server checks GitHub once a day for a new signed release. When one exists it logs a line and shows it to server admins; it never updates itself, and the check is a plain HTTPS request carrying only the server's version. `potluck admin update check` checks now and prints the update steps pinned to the release's image digest. To turn the daily check off, pass `--no-update-check` or set `POTLUCK_UPDATE_CHECK=false`.
+
 With podman, pull the new image and recreate the container:
 
 ```sh

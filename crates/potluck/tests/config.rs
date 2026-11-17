@@ -514,3 +514,12 @@ fn a_mapped_address_under_a_prefix_below_96_never_trusts_ipv4_peers() {
         );
     }
 }
+
+#[test]
+fn the_daily_update_check_is_on_unless_turned_off() {
+    let on = parse_config(&["--public-url", "http://127.0.0.1:8080"]).unwrap();
+    assert!(on.update_check());
+    let off =
+        parse_config(&["--public-url", "http://127.0.0.1:8080", "--no-update-check"]).unwrap();
+    assert!(!off.update_check());
+}

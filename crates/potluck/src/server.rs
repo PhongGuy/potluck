@@ -16,6 +16,7 @@ use crate::api::{Actor, AppState};
 use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
 use crate::notices::Notices;
+use crate::update::{UpdateChecker, UpdateSource, schedule};
 
 /// Why the server could not start.
 #[derive(Debug, thiserror::Error)]
@@ -86,8 +87,24 @@ pub enum ServerError {
 /// `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, locks `<data>/server.lock`
 /// for the life of the server, sweeps what killed pushes left in its repositories, installs the
 /// pre-receive hook, opens and migrates the database, binds `config.listen()` and the admin
-/// socket, and serves the API on both.
+/// socket, and serves the API on both. The update endpoints report the check off.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
+    start_inner(config, None).await
+}
+
+/// As `start`, with an update checker over `source` for the running version; the daily check
+/// runs unless `--no-update-check`. A checker that cannot be built is logged and left out.
+pub async fn start_with_updates(
+    config: &Config,
+    source: UpdateSource,
+) -> Result<Running, ServerError> {
+    start_inner(config, Some(source)).await
+}
+
+async fn start_inner(
+    config: &Config,
+    source: Option<UpdateSource>,
+) -> Result<Running, ServerError> {
     config.check_admin_socket()?;
     for path in [
         config.data().to_path_buf(),
@@ -152,12 +169,25 @@ pub async fn start(config: &Config) -> Result<Running, ServerError> {
 
     // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
-    let state = AppState::new(db.clone(), config.clone());
+    let (stop, rx) = watch::channel(false);
+    let mut state = AppState::new(db.clone(), config.clone());
     state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
     let git_tasks = state.git().tasks().clone();
+    // The daily loop rides the git tracker and the stop flag, so shutdown ends it before its wait.
+    match source.map(|source| UpdateChecker::new(source, env!("CARGO_PKG_VERSION"))) {
+        None => {}
+        Some(Ok(checker)) => {
+            if config.update_check() {
+                schedule::spawn_daily(checker.clone(), &git_tasks, rx.clone());
+            }
+            state = state.with_updates(checker);
+        }
+        Some(Err(err)) => {
+            tracing::error!("cannot set up the update check ({err}); serving without it");
+        }
+    }
     let router = crate::api::router(state);
-    let (stop, rx) = watch::channel(false);
     let http = tokio::spawn(
         axum::serve(
             tcp,
@@ -437,6 +467,11 @@ mod tests {
 
     /// A config serving `dir` on an ephemeral loopback port, built the way `serve` builds one.
     fn config_for(dir: &Path) -> Config {
+        config_with(dir, &[])
+    }
+
+    /// As `config_for`, with `extra` serve flags appended.
+    fn config_with(dir: &Path, extra: &[&str]) -> Config {
         #[derive(clap::Parser)]
         struct Wrap {
             #[command(flatten)]
@@ -453,8 +488,24 @@ mod tests {
             "--public-url",
             url,
         ];
+        let argv = argv.iter().chain(extra);
         let wrap = <Wrap as clap::Parser>::try_parse_from(argv).expect("flags parse");
         Config::try_from(wrap.serve).expect("test config")
+    }
+
+    // The daily loop is the only task on the tracker right after start, so the count shows
+    // whether the flag spawned it. The GitHub source is safe: its first check waits minutes.
+    #[tokio::test]
+    async fn the_daily_loop_is_spawned_only_when_the_check_is_on() {
+        for (flags, loops) in [(&[][..], 1), (&["--no-update-check"][..], 0)] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = UpdateSource::github().unwrap();
+            let running = start_with_updates(&config_with(dir.path(), flags), source)
+                .await
+                .unwrap();
+            assert_eq!(running.git_tasks.len(), loops, "{flags:?}");
+            running.shutdown().await;
+        }
     }
 
     // A second fd on the lock's open file description stands in for a child forked by another

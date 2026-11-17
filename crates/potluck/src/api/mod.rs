@@ -12,6 +12,7 @@ use crate::db::Db;
 use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
 use crate::notices::Notices;
+use crate::update::UpdateChecker;
 
 mod actor;
 pub mod auth;
@@ -28,6 +29,7 @@ mod session;
 mod system;
 mod teams;
 mod tokens;
+mod update;
 mod users;
 mod validate;
 pub(crate) mod workspaces;
@@ -36,7 +38,8 @@ pub use actor::{Actor, AuthUser};
 use error::ApiError;
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver, the git engine, the password hasher and the sign-in rate limiters.
+/// resolver, the git engine, the password hasher, the sign-in rate limiters and, when a release
+/// source is wired, the update checker.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -47,6 +50,7 @@ pub struct AppState {
     passwords: Passwords,
     session_limits: Arc<SessionLimits>,
     notices: Notices,
+    updates: Option<UpdateChecker>,
 }
 
 impl AppState {
@@ -67,6 +71,7 @@ impl AppState {
             passwords: Passwords::new(),
             session_limits: Arc::new(SessionLimits::default()),
             notices: Notices::new(),
+            updates: None,
         }
     }
 
@@ -89,6 +94,18 @@ impl AppState {
     pub fn with_passwords(mut self, passwords: Passwords) -> Self {
         self.passwords = passwords;
         self
+    }
+
+    /// Serves the update endpoints from `checker`; without one they report `check: "off"`.
+    #[must_use]
+    pub fn with_updates(mut self, checker: UpdateChecker) -> Self {
+        self.updates = Some(checker);
+        self
+    }
+
+    /// The update checker, when a release source is wired.
+    pub(crate) fn updates(&self) -> Option<&UpdateChecker> {
+        self.updates.as_ref()
     }
 
     /// The hasher.
@@ -152,6 +169,8 @@ pub fn router(state: AppState) -> Router {
             put(teams::add_member).delete(teams::remove_member),
         )
         .route("/teams/{team}/workspaces", post(workspaces::create))
+        .route("/update", get(update::get))
+        .route("/update/check", post(update::check))
         .route("/tokens", get(tokens::list).post(tokens::create))
         .route("/tokens/{id}", delete(tokens::revoke))
         .route("/users", get(users::list).post(users::create))

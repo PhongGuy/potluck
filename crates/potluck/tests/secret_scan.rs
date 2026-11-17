@@ -711,6 +711,54 @@ fn panic_child() {
     ));
 }
 
+/// Re-runs this test binary on `role_child` once per `POTLUCK_ROLE` value, since the hook reads
+/// its role from the process environment.
+#[test]
+fn the_hook_reads_its_role_from_potluck_role_and_falls_back_to_write() {
+    let cases: [(Option<&str>, &str); 7] = [
+        (None, "write"),
+        (Some(""), "write"),
+        (Some("admin"), "admin"),
+        (Some("write"), "write"),
+        (Some("read"), "read"),
+        (Some("Admin"), "write"),
+        (Some("owner"), "write"),
+    ];
+    for (value, expected) in cases {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "secret_scan::role_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("POTLUCK_TEST_ROLE_CHILD", expected)
+        .env_remove("POTLUCK_ROLE");
+        if let Some(v) = value {
+            cmd.env("POTLUCK_ROLE", v);
+        }
+        let out = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{value:?}: {stdout}{stderr}");
+        assert!(
+            stdout.contains("1 passed"),
+            "{value:?}: the child ran: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn role_child() {
+    let Some(expected) = std::env::var_os("POTLUCK_TEST_ROLE_CHILD") else {
+        return;
+    };
+    assert_eq!(
+        HookEnv::from_env().role().as_str(),
+        expected.to_str().unwrap()
+    );
+}
+
 #[test]
 fn a_panic_in_reads_fails_closed() {
     // A blob the server already has is content-checked at a new path only if the kind reads it,
@@ -781,6 +829,54 @@ fn a_relaxing_update_is_refused_for_write_and_passes_for_admin() {
         RELAXED
     );
     assert!(relax_rows(&s, Role::Admin, moved(&old, &new, "refs/heads/main")).is_empty());
+}
+
+#[test]
+fn a_history_pass_relaxation_is_refused_for_write_and_dropped_for_admin() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("created with a relaxation");
+    let scan_as = |role: Role| {
+        let e = HookEnv::new(None, false, None).with_role(role);
+        rows(
+            &scan_with(
+                &e,
+                Some(&rules(Act::RelaxAlways)),
+                &[update(&tip, "refs/heads/main")],
+                &git_for(&s),
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(
+        scan_as(Role::Write),
+        ["refs/heads/main a.t safety_relaxation relax_always"],
+        "a created ref gets no tip pass, so this is the history pass"
+    );
+    assert!(scan_as(Role::Admin).is_empty());
+}
+
+#[test]
+fn an_import_update_still_gets_the_tip_pass() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.stage_commit("relax");
+    let import = HookEnv::new(None, true, None);
+    assert_eq!(
+        rows(
+            &scan_with(
+                &import,
+                Some(&rules(Act::Relax)),
+                &[moved(&old, &new, "refs/heads/main")],
+                &git_for(&s),
+            )
+            .unwrap()
+        ),
+        RELAXED
+    );
 }
 
 #[test]

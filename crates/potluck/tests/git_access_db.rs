@@ -335,6 +335,30 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hook_sees_role_admin_for_a_server_admin_and_an_admin_grant() {
+    let a = arena(false).await;
+    grant(&a, "api", "user", "ann", "admin").await;
+    write_hook(
+        &a.server.hooks_dir(),
+        "echo \"kind=$POTLUCK_KIND role=$POTLUCK_ROLE pusher=$POTLUCK_PUSHER\" >&2\nexit 1",
+    );
+    let work = work_tree(&a.home, "work");
+    for (who, token) in [("root", &a.root), ("ann", &a.ann)] {
+        let out = failed(git(
+            &a.home,
+            Some(&work),
+            Some(token),
+            &["push", "--porcelain", &a.url, "main"],
+        ));
+        assert_eq!(
+            hook_line(&out),
+            format!("remote: kind=apinata role=admin pusher={who}"),
+            "{out}"
+        );
+    }
+}
+
 /// Over git too, a workspace the caller holds no role on answers byte for byte like one that
 /// does not exist.
 #[tokio::test]

@@ -99,6 +99,29 @@ fn skips_only_path_crates_inside_this_repo() {
 }
 
 #[test]
+fn lists_a_git_sourced_crate() {
+    // A rules crate pinned from another repository is linked into the binary, so it is
+    // third-party here and must be listed and licence-checked like a registry crate.
+    let dir = tempfile::tempdir().unwrap();
+    let tree = format!(
+        "{TREE}apinata-rules v0.1.0 (https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#01234567)|MIT OR Apache-2.0\n"
+    );
+    let out = run(&stub_cargo(dir.path(), &tree), &[], None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        list.contains(
+            "- `apinata-rules` 0.1.0 (https://github.com/PhongGuy/apinata?tag=apinata-rules-v0.1.0#01234567): MIT OR Apache-2.0\n"
+        ),
+        "git-sourced crate dropped: {list}"
+    );
+}
+
+#[test]
 fn asks_cargo_for_linked_dependencies_of_both_release_targets() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(&stub_cargo(dir.path(), TREE), &[], None);

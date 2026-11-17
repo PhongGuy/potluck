@@ -155,6 +155,31 @@ fn kind_rules_follow_the_kind_and_the_generic_set_runs_for_all() {
 }
 
 #[test]
+fn a_token_in_an_environment_file_with_a_valued_secret_reports_the_generic_rule() {
+    // Both rule sets would refuse this file; the generic pattern runs first and the kind's
+    // check is asked only when it finds nothing.
+    let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
+    let both = [ENV_YML, b"# AKIAIOSFODNN7EXAMPLE\n"].concat();
+    assert_eq!(
+        potluck::kinds::apinata::environment_rule(
+            "environments/dev.yml",
+            &both,
+            potluck::kinds::apinata::NODE_CAP
+        )
+        .map(|f| f.rule()),
+        Some("secret_value"),
+        "the kind's rule must refuse this file too, or the test proves nothing"
+    );
+    s.write("environments/dev.yml", &both);
+    let tip = s.stage_commit("token and valued secret");
+    assert_eq!(
+        scan_main(&s, &env(Some("apinata")), &tip),
+        ["refs/heads/main environments/dev.yml secret_pattern aws"]
+    );
+}
+
+#[test]
 fn a_commit_shared_by_two_refs_is_reported_under_the_first() {
     let s = Scratch::new();
     s.write("creds.txt", AWS);
@@ -657,6 +682,24 @@ fn a_rule_set_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
 }
 
 #[test]
+fn a_generic_path_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
+    // The generic `.env` rule matches on the lossy path, but the client must get back the
+    // exact bytes git stores, so the report escapes the Latin-1 byte rather than U+FFFD.
+    let s = Scratch::new();
+    let dir = s.work.join(OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".env"), b"KEY=fixture\n").unwrap();
+    let tip = s.stage_commit("latin-1 directory");
+    let found = scan(&env(None), &[update(&tip, "refs/heads/main")], &git_for(&s)).unwrap();
+    let mut out = Vec::new();
+    report(&found, &mut out).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "potluck-reject secret_env_file refs/heads/main caf%E9/.env env_file\n"
+    );
+}
+
+#[test]
 fn an_unknown_kind_is_refused_unless_every_update_is_a_delete() {
     let s = Scratch::new();
     s.write("README", b"r\n");
@@ -782,6 +825,28 @@ fn a_misnamed_path_rule_finding_fails_closed() {
     let tip = s.stage_commit("t");
     assert!(matches!(
         scan_rules(&s, &rules(Act::BadPathRuleName), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn a_malformed_finding_after_a_valid_one_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::BadLaterFinding), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn an_empty_rule_name_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::EmptyRuleName), &tip),
         Err(ScanError::Rules)
     ));
 }

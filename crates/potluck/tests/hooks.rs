@@ -5,6 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
+use potluck::db::Db;
 use potluck::git::GitLimits;
 use potluck::hooks::install;
 use potluck::role::Role;
@@ -12,8 +13,8 @@ use potluck::server::start;
 use potluck::slug::Slug;
 
 use crate::common::{
-    GitServer, TestAccess, config_for, failed, git, git_server, git_server_at, ok, unix_get,
-    work_tree,
+    GitServer, TestAccess, api_admin, api_team, api_workspace, config_for, failed, git, git_server,
+    ok, potluck, unix_get, work_tree,
 };
 
 const TOKEN: &str = "plk_writer_token_000000000000000000000000000";
@@ -179,51 +180,85 @@ async fn receive_pack_runs_the_hook_from_hooks_path_not_the_repository() {
     ));
 }
 
+/// Kills the `potluck serve` child when the test ends, pass or fail.
+struct Serve(std::process::Child);
+
+impl Drop for Serve {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The `http://127.0.0.1:<port>` that `potluck serve` logged to `log`, waiting up to 10 s.
+fn logged_base(log: &Path) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        if let Some(rest) = text.split("listening on ").nth(1) {
+            return rest.split_whitespace().next().unwrap().to_owned();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no listen line within 10 s: {text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_relative_data_dir_still_runs_the_hook() {
-    // `--data` as seen from the test's cwd; `Config` makes it absolute, so `core.hooksPath` is
-    // absolute too. Without that, git resolves a relative hooksPath against the repository and
-    // the declining hook below is never run (measured).
-    // The data dir is a cwd-relative path inside the crate dir, which does not exist relative to
-    // the repository git runs the hook from.
-    let cwd = std::env::current_dir().unwrap();
-    let dir = tempfile::Builder::new()
-        .prefix(".rel-")
-        .tempdir_in(&cwd)
-        .unwrap();
-    let relative = dir
-        .path()
-        .strip_prefix(&cwd)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let data = dir.path().to_path_buf();
-    assert!(!relative.starts_with('/'), "{relative}");
-    let access =
-        TestAccess::new()
-            .workspace("core", "api")
-            .grant(TOKEN, "core", "api", Role::Write);
-    let server = git_server_at(dir, &relative, access, None, &[]).await;
-    server
-        .repos
-        .init(
-            &Slug::parse("core").unwrap(),
-            &Slug::parse("api").unwrap(),
-            "main",
-        )
-        .await
-        .unwrap();
-    let home = server.dir.path().join("home");
+    // `potluck serve --data data` from its own cwd; `Config` makes it absolute, so
+    // `core.hooksPath` is too. A relative hooksPath resolves against the repository, and the
+    // declining hook below would never run. A short temp cwd keeps the admin socket under the
+    // Unix path limit wherever the checkout lives.
+    let cwd = tempfile::tempdir().unwrap();
+    let data = cwd.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let db = Db::open(&data.join("server.db")).unwrap();
+    db.migrate().await.unwrap();
+    let root = api_admin(&db).await;
+    drop(db);
+    let log = cwd.path().join("serve.log");
+    let _serve = Serve(
+        potluck()
+            .args([
+                "serve",
+                "--listen",
+                "127.0.0.1:0",
+                "--public-url",
+                "http://127.0.0.1:8080",
+                "--no-update-check",
+                "--log",
+                "info",
+                "--data",
+                "data",
+            ])
+            .current_dir(cwd.path())
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let base = logged_base(&log);
+    let api = format!("{base}/api/v1");
+    api_team(&api, &root, "core").await;
+    api_workspace(&api, &root, "core", "api", false).await;
+    let home = cwd.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let url = server.url("core", "api");
     let work = work_tree(&home, "work");
     write_hook(&data.join("hooks"), "exit 1");
     let output = failed(git(
         &home,
         Some(&work),
-        Some(TOKEN),
-        &["push", "--porcelain", &url, "main"],
+        Some(&root),
+        &[
+            "push",
+            "--porcelain",
+            &format!("{base}/git/core/api.git"),
+            "main",
+        ],
     ));
     assert!(output.contains("pre-receive hook declined"), "{output}");
 }

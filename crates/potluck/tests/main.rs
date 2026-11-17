@@ -74,6 +74,7 @@ mod sse_reader;
 mod teams;
 mod token;
 mod tokens;
+mod update_check;
 mod update_keys;
 mod update_verify;
 mod users;

@@ -7,8 +7,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use url::{Host, Url};
 
+mod checker;
 mod verify;
 
+pub use checker::{UpdateChecker, UpdateStatus};
 pub use verify::{Release, verify_release};
 
 /// The container image a release is published as.
@@ -153,9 +155,7 @@ fn key_id(pub_text: &str) -> Option<String> {
 pub struct UpdateSource {
     base: Url,
     keys: TrustedKeys,
-    #[expect(dead_code, reason = "read by the update checker")]
     connect: Duration,
-    #[expect(dead_code, reason = "read by the update checker")]
     total: Duration,
 }
 

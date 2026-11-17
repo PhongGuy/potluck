@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use potluck::update::{UpdateChecker, UpdateError, UpdateSource};
 
 use crate::common::release::{ReleaseServer, Reply, TestKey, manifest};
+use crate::logs::captured_logs;
 
 const MANIFEST: &str = "potluck-release.json";
 const SIG: &str = "potluck-release.json.sig";
@@ -142,4 +143,94 @@ async fn a_current_version_that_is_not_semver_is_refused() {
         UpdateChecker::new(server.source(&key), "dev"),
         Err(UpdateError::CurrentVersion { .. })
     ));
+}
+
+#[tokio::test]
+async fn an_equal_older_or_pre_release_version_is_up_to_date() {
+    for version in ["1.0.0", "0.9.9", "1.1.0-rc.1", "1.0.0+build.7"] {
+        let (server, key) = (ReleaseServer::start().await, TestKey::new());
+        server.publish(&key, &manifest(version));
+        let status = checker(&server, &key).check().await.unwrap();
+        assert_eq!(status.latest(), None, "{version}");
+        assert!(
+            status.checked_at().is_some(),
+            "{version} is a verified answer"
+        );
+    }
+}
+
+#[tokio::test]
+async fn latest_only_moves_up() {
+    let (server, key) = (ReleaseServer::start().await, TestKey::new());
+    let c = checker(&server, &key);
+    server.publish(&key, &manifest("1.3.0"));
+    c.check().await.unwrap();
+    server.publish(&key, &manifest("1.2.0"));
+    let status = c.check().await.unwrap();
+    assert_eq!(
+        status.latest().map(|r| r.version()),
+        Some("1.3.0"),
+        "a replayed older manifest cannot push latest back"
+    );
+    server.publish(&key, &manifest("1.4.0"));
+    let status = c.check().await.unwrap();
+    assert_eq!(status.latest().map(|r| r.version()), Some("1.4.0"));
+}
+
+#[tokio::test]
+async fn a_failed_check_changes_neither_field() {
+    let (server, key) = (ReleaseServer::start().await, TestKey::new());
+    let c = checker(&server, &key);
+    server.publish(&key, &manifest("1.3.0"));
+    c.check().await.unwrap();
+    let before = c.status();
+    server.set(SIG, Reply::Body(TestKey::new().sign(&manifest("1.3.0"))));
+    assert_eq!(c.check().await, Err(UpdateError::UnknownKey));
+    assert_eq!(c.status(), before);
+}
+
+#[test]
+fn a_new_release_is_logged_once_at_info_and_failures_at_warn_or_debug() {
+    let text = captured_logs(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (server, key) = (ReleaseServer::start().await, TestKey::new());
+            let c = checker(&server, &key);
+            let _ = c.check().await;
+            server.publish(&key, &manifest("1.1.0"));
+            c.check().await.unwrap();
+            c.check().await.unwrap();
+            server.set(SIG, Reply::Body(b"%%%".to_vec()));
+            let _ = c.check().await;
+        });
+    });
+    let offered: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("potluck 1.1.0 is available"))
+        .collect();
+    assert_eq!(offered.len(), 1, "{text}");
+    for needle in [
+        " INFO ",
+        "running 1.0.0",
+        "https://github.com/PhongGuy/potluck/releases/tag/v1.1.0",
+        "potluck admin update check",
+    ] {
+        assert!(offered[0].contains(needle), "{needle:?} in {}", offered[0]);
+    }
+    let failed: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("update check failed"))
+        .collect();
+    assert_eq!(failed.len(), 1, "only the bad signature warns: {text}");
+    for needle in [" WARN ", "not a minisign signature", "--no-update-check"] {
+        assert!(failed[0].contains(needle), "{needle:?} in {}", failed[0]);
+    }
+    assert!(
+        text.lines()
+            .any(|l| l.contains(" DEBUG ") && l.contains("no signed release is published")),
+        "the 404 logs at debug: {text}"
+    );
 }

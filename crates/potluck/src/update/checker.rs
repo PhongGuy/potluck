@@ -77,9 +77,40 @@ impl UpdateChecker {
         })
     }
 
-    /// Fetches and verifies the signed release, records it when it is newer than the running
-    /// version, and returns the resulting status. A failure leaves the status unchanged.
+    /// Fetches and verifies the signed release, records it when it is a final release above both
+    /// the running version and the current `latest`, and returns the resulting status. A failure
+    /// leaves the status unchanged. Each call logs exactly one line.
     pub async fn check(&self) -> Result<UpdateStatus, UpdateError> {
+        let result = self.fetch_and_apply().await;
+        let current = &self.inner.current;
+        match &result {
+            Ok((status, _, true)) => {
+                if let Some(new) = status.latest() {
+                    tracing::info!(
+                        "potluck {} is available (running {current}): {}; run `potluck admin update check` for the update steps",
+                        new.version(),
+                        new.notes_url()
+                    );
+                }
+            }
+            Ok((_, version, false)) => {
+                tracing::debug!(
+                    "update check: newest signed release is {version}; running {current}"
+                );
+            }
+            Err(err @ UpdateError::NotFound) => {
+                tracing::debug!("update check found nothing: {err}");
+            }
+            Err(err) => tracing::warn!(
+                "update check failed: {err}; turn the daily check off with --no-update-check or POTLUCK_UPDATE_CHECK=false"
+            ),
+        }
+        result.map(|(status, _, _)| status)
+    }
+
+    // Fetches, verifies and applies one answer, returning the new status, the verified version
+    // and whether `latest` moved; the caller logs.
+    async fn fetch_and_apply(&self) -> Result<(UpdateStatus, Version, bool), UpdateError> {
         let inner = &self.inner;
         let client = build_client(&inner.source, &inner.current.to_string())?;
         let manifest = fetch(&client, &inner.source.base, MANIFEST_FILE).await?;
@@ -87,14 +118,22 @@ impl UpdateChecker {
         let release = verify_release(&inner.source.keys, &manifest, &signature)?;
         let version = Version::parse(release.version())
             .map_err(|_| UpdateError::Manifest { field: "version" })?;
-        let newer = version.cmp_precedence(&inner.current).is_gt();
-        // The guard is taken only after the last await, so the check future stays Send.
+        // Under one guard, taken after the last await so the future stays Send: a final release
+        // replaces `latest` only when it beats both the running version and the stored one, so a
+        // replayed older manifest never pulls `latest` back.
         let mut state = inner.lock();
-        if newer {
+        let above_stored = state.latest.as_ref().is_none_or(|stored| {
+            Version::parse(stored.version())
+                .is_ok_and(|stored| version.cmp_precedence(&stored).is_gt())
+        });
+        let moved = version.pre.is_empty()
+            && version.cmp_precedence(&inner.current).is_gt()
+            && above_stored;
+        if moved {
             state.latest = Some(release);
         }
         state.checked_at = Some(clock::now_rfc3339());
-        Ok(state.clone())
+        Ok((state.clone(), version, moved))
     }
 
     /// The status as of the last check.

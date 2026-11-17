@@ -1299,6 +1299,7 @@ dependencies = [
  "jiff",
  "minisign",
  "minisign-verify",
+ "potluck-kind",
  "regex",
  "reqwest",
  "rusqlite",
@@ -1317,6 +1318,10 @@ dependencies = [
  "url",
  "yaml_serde",
 ]
+
+[[package]]
+name = "potluck-kind"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"

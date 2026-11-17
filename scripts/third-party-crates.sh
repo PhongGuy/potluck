@@ -28,7 +28,8 @@ while IFS= read -r line; do
   line=${line% (\*)}
   pkg=${line%%|*} licence=${line#*|}
   name=${pkg%% *} version=${pkg#* v}
-  [[ $name == potluck && $version == *' ('* ]] && continue
+  # Workspace crates carry a local path and are first-party; git sources show a URL and stay.
+  [[ $version == *' (/'* ]] && continue
   # Every identifier in the expression must be allowed; operators and grouping carry no terms.
   ok=1
   [[ -z $licence ]] && ok=0

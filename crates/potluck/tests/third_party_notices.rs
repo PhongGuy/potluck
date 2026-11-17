@@ -207,6 +207,7 @@ fn the_committed_crate_list_is_current() {
     }
     for absent in [
         "- `potluck` ",
+        "- `potluck-kind` ",
         "- `minisign` ",
         "- `serde_derive` ",
         "- `syn` ",

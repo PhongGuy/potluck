@@ -131,7 +131,7 @@ async fn a_push_with_secrets_is_declined_with_the_contract_lines_and_a_clean_one
         output.contains("potluck-reject secret_env_file"),
         "{output}"
     );
-    // Back to the clean README commit: lands.
+    // Dropping both secret commits leaves only the format commit, which lands.
     ok(git(
         &home,
         Some(&work),

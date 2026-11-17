@@ -10,7 +10,7 @@ use potluck_kind::{Code, Role};
 
 use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
 use crate::role::Role as AccessRole;
-use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
+use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha, TipEntry};
 
 /// What the server told the hook through its environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,8 +184,8 @@ pub fn scan_with(
     }
     let kind = GuardedRules(rules);
     let role = kind_role(env.role());
-    // Hits are keyed (ref index, pass, entry index) so the final sort gives each ref's
-    // path-rule hits first, then its content hits, each in entry order.
+    // Hits are keyed (ref index, pass, entry index), passes 0 to 4 being path rule, content,
+    // message, tip and format, so the final sort groups each ref's hits by pass in entry order.
     let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
     let mut seen: Vec<Sha> = Vec::new();
@@ -258,15 +258,19 @@ pub fn scan_with(
             ));
         }
     })?;
+    // Each ref's tip diff is taken once and shared by the tip and format passes.
+    let mut diffs = Vec::with_capacity(updates.len());
     for (ri, update) in updates.iter().enumerate() {
-        for (ei, r) in tip_pass(kind, update, role, git)? {
+        let diff = ref_tip_diff(kind, update, git)?;
+        for (ei, r) in tip_pass(kind, update, diff.as_deref(), role, git)? {
             hits.push(((ri, 3, ei), r));
         }
+        diffs.push(diff);
     }
     // Only the server names a kind, so a rule set injected without one is never format-checked.
     if env.kind().is_some() {
         for (ri, update) in updates.iter().enumerate() {
-            if let Some(r) = format_pass(kind, update, git)? {
+            if let Some(r) = format_pass(kind, update, diffs[ri].as_deref(), git)? {
                 hits.push(((ri, 4, 0), r));
             }
         }
@@ -299,7 +303,9 @@ pub fn accepted_relaxations(
     }
     let mut found = Vec::new();
     for update in updates {
-        for (_, r) in tip_pass(GuardedRules(Some(rules)), update, Role::Write, git)? {
+        let kind = GuardedRules(Some(rules));
+        let diff = ref_tip_diff(kind, update, git)?;
+        for (_, r) in tip_pass(kind, update, diff.as_deref(), Role::Write, git)? {
             if r.finding.code() == Code::SafetyRelaxation {
                 found.push(r);
             }
@@ -317,26 +323,40 @@ fn kind_role(role: AccessRole) -> Role {
     }
 }
 
-/// Judges one update old tip against new tip: `check` with `Change::tip` at every path the
-/// kind `reads` among those `tip_diff` lists, as `(entry index, rejection)` in entry order. A
-/// delete, a created ref, an old or new value that is not a commit, and a push without a rule
-/// set yield nothing; a peel failure is a git error. Every finding is kept, whatever `role`.
-fn tip_pass(
+/// One update's `tip_diff` of old tip against new tip, or `None` for a delete, a created ref,
+/// an old or new value that is not a commit, and a push without a rule set; a peel failure is
+/// a git error.
+fn ref_tip_diff(
     kind: GuardedRules<'_>,
     update: &RefUpdate,
-    role: Role,
     git: &Git,
-) -> Result<Vec<(usize, Rejection)>, ScanError> {
+) -> Result<Option<Vec<TipEntry>>, ScanError> {
     if kind.0.is_none() || update.is_delete() || update.old().is_zero() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let (old, old_type) = git.peel(update.old())?;
     let (new, new_type) = git.peel(update.new())?;
     if old_type != ObjectType::Commit || new_type != ObjectType::Commit {
-        return Ok(Vec::new());
+        return Ok(None);
     }
+    Ok(Some(git.tip_diff(&old, &new)?))
+}
+
+/// Judges one update old tip against new tip: `check` with `Change::tip` at every path the
+/// kind `reads` among those `diff` (from `ref_tip_diff`) lists, as `(entry index, rejection)`
+/// in entry order; no diff yields nothing. Every finding is kept, whatever `role`.
+fn tip_pass(
+    kind: GuardedRules<'_>,
+    update: &RefUpdate,
+    diff: Option<&[TipEntry]>,
+    role: Role,
+    git: &Git,
+) -> Result<Vec<(usize, Rejection)>, ScanError> {
+    let Some(diff) = diff else {
+        return Ok(Vec::new());
+    };
     let mut entries = Vec::new();
-    for (ei, entry) in git.tip_diff(&old, &new)?.into_iter().enumerate() {
+    for (ei, entry) in diff.iter().enumerate() {
         let lossy = entry.path_lossy();
         if (entry.old().is_some() || entry.new().is_some()) && kind.reads(&lossy)? {
             entries.push((ei, entry, lossy));
@@ -394,9 +414,11 @@ fn tip_pass(
 /// version the rule set lists, else a `format_unsupported` rejection at the format file. Only a
 /// created ref (or one whose old value is not a commit) and an update whose tip diff lists the
 /// format file are judged; a delete, a tree or blob target and a push without a rule set are not.
+/// `diff` is the update's `ref_tip_diff`.
 fn format_pass(
     kind: GuardedRules<'_>,
     update: &RefUpdate,
+    diff: Option<&[TipEntry]>,
     git: &Git,
 ) -> Result<Option<Rejection>, ScanError> {
     let Some(rules) = kind.0 else { return Ok(None) };
@@ -409,16 +431,8 @@ fn format_pass(
     }
     let file = guarded(|| rules.format_file())?;
     // An update that leaves the file alone keeps the format it was accepted with before.
-    if !update.old().is_zero() {
-        let (old, old_type) = git.peel(update.old())?;
-        if old_type == ObjectType::Commit
-            && !git
-                .tip_diff(&old, &new)?
-                .iter()
-                .any(|e| e.path() == file.as_bytes())
-        {
-            return Ok(None);
-        }
+    if diff.is_some_and(|d| !d.iter().any(|e| e.path() == file.as_bytes())) {
+        return Ok(None);
     }
     // A missing file, a directory in its place and a file over the cap all read as no format.
     let mut version = None;
@@ -596,7 +610,7 @@ pub const MAX_DETAIL_BYTES: usize = 200;
 /// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
 /// exactly five fields. A finding without a tree path (a commit or tag message, or a tag whose
 /// target is a blob) carries the path `/`, which the encoding leaves as is and which no git
-/// tree path can start with. A finding with a detail is followed by
+/// tree path can start with. A finding with a non-empty detail is followed by
 /// `potluck-reject-detail <detail>\n`, the detail cut to at most `MAX_DETAIL_BYTES` on a
 /// character boundary and then encoded the same way; detail lines do not count toward the cap.
 pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result<()> {
@@ -609,7 +623,7 @@ pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result
             percent_encode(&r.path),
             r.finding.rule(),
         )?;
-        if let Some(detail) = r.finding.detail() {
+        if let Some(detail) = r.finding.detail().filter(|d| !d.is_empty()) {
             // Cut before encoding, so the cap bounds the rule set's text, not its escapes.
             let cut = &detail[..detail.floor_char_boundary(MAX_DETAIL_BYTES)];
             writeln!(

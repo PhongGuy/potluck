@@ -1,7 +1,7 @@
 //! The in-tree Apinata kind seen through the potluck-kind contract.
 
-use potluck::kinds::all;
 use potluck::kinds::apinata::{Apinata, detect_format};
+use potluck::kinds::{all, by_name};
 use potluck_kind::{Blob, Change, Code, Finding, RULES_ABI, Role, RuleSet};
 
 const BAD: &[u8] = include_bytes!("fixtures/secret-check/bad/env-secret-valued.yml");
@@ -19,6 +19,14 @@ fn apinata_states_its_contract() {
             "opencollection.yml"
         )
     );
+}
+
+#[test]
+fn by_name_finds_every_rule_set_under_its_own_name() {
+    for k in all() {
+        assert_eq!(by_name(k.kind()).map(|f| f.kind()), Some(k.kind()));
+    }
+    assert!(by_name("no-such-kind").is_none());
 }
 
 #[test]

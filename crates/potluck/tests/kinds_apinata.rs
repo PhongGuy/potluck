@@ -443,7 +443,7 @@ fn a_chained_merge_cannot_hide_a_valued_secret() {
 }
 
 #[test]
-fn content_path_is_the_environment_file_glob() {
+fn reads_only_top_level_environment_files() {
     assert!(Apinata.reads("environments/dev.yml"));
     assert!(!Apinata.reads("notes/dev.yml"));
     assert!(!Apinata.reads("sub/environments/dev.yml"));
@@ -451,7 +451,7 @@ fn content_path_is_the_environment_file_glob() {
 }
 
 #[test]
-fn over_cap_rule_refuses_an_environment_file_the_hook_cannot_read() {
+fn check_too_large_refuses_an_environment_file_the_hook_cannot_read() {
     let over_cap = |p| {
         Apinata
             .check(&Change::history(p, Blob::TooLarge, Role::Write))

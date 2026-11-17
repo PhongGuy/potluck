@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Build and smoke-test only; push, attest and draft nothing
+        description: Build and smoke-test only; push, sign, attest and draft nothing
         type: boolean
         default: true
 

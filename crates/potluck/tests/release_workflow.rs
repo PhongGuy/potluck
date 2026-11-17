@@ -402,3 +402,27 @@ fn sign_checks_the_manifest_names_this_tag_and_digest_before_signing() {
         "the check comes after signing"
     );
 }
+
+#[test]
+fn the_manifest_artifacts_expire_after_a_day() {
+    let jobs = release();
+    for (name, artifact) in [
+        ("manifest", "name: manifest-unsigned"),
+        ("sign", "name: manifest-signed"),
+    ] {
+        let upload = step(job(&jobs, name), artifact);
+        assert!(upload.contains("actions/upload-artifact@"), "{upload}");
+        assert!(upload.contains("retention-days: 1\n"), "{name}: {upload}");
+    }
+}
+
+#[test]
+fn the_dry_run_input_says_it_skips_signing() {
+    let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml")).unwrap();
+    assert!(
+        text.contains(
+            "description: Build and smoke-test only; push, sign, attest and draft nothing\n"
+        ),
+        "{text}"
+    );
+}

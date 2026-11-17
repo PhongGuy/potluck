@@ -392,7 +392,7 @@ fn tip_pass(
     // before the entry that would take it past the budget; every entry fits an empty one.
     let mut found = Vec::new();
     let mut batch: Vec<&(usize, &TipEntry, String)> = Vec::new();
-    let mut blobs: Vec<Sha> = Vec::new();
+    let mut blobs: HashSet<Sha> = HashSet::new();
     let mut held = 0;
     for item in &entries {
         let (_, entry, _) = item;
@@ -401,7 +401,7 @@ fn tip_pass(
         own.dedup();
         let cost: u64 = own
             .iter()
-            .filter(|sha| !blobs.contains(sha))
+            .filter(|sha| !blobs.contains(**sha))
             .map(|sha| size(sha))
             .sum();
         if !batch.is_empty() && held + cost > TIP_BLOB_BUDGET {
@@ -411,9 +411,8 @@ fn tip_pass(
             held = 0;
         }
         for sha in own {
-            if !blobs.contains(sha) {
+            if blobs.insert(sha.clone()) {
                 held += size(sha);
-                blobs.push(sha.clone());
             }
         }
         batch.push(item);
@@ -430,11 +429,12 @@ fn judge_tip_batch(
     role: Role,
     git: &Git,
     batch: &[&(usize, &TipEntry, String)],
-    blobs: &[Sha],
+    blobs: &HashSet<Sha>,
     found: &mut Vec<(usize, Rejection)>,
 ) -> Result<(), ScanError> {
-    let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(blobs.len());
-    git.for_each_blob(blobs, |sha, bytes| {
+    let names: Vec<Sha> = blobs.iter().cloned().collect();
+    let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(names.len());
+    git.for_each_blob(&names, |sha, bytes| {
         read.insert(sha.clone(), bytes.to_vec());
     })?;
     // Every side at or under the cap is in `blobs`, so a side not there is over the cap, and

@@ -30,7 +30,7 @@ list() {
     $1 !~ /-rules$/ { next }
     {
       src = $2
-      ok = (src ~ /^git\+https:\/\/github\.com\/PhongGuy\/[A-Za-z0-9._-]+\?tag=[^#&?]+#[0-9a-f]+$/)
+      ok = (src ~ /^git\+https:\/\/github\.com\/PhongGuy\/[A-Za-z0-9._-]+\?tag=[A-Za-z0-9][A-Za-z0-9._-]*#[0-9a-f]+$/)
       commit = src; sub(/^[^#]*#/, "", commit)
       if (!ok || length(commit) != 40 || $1 !~ /^[A-Za-z0-9_-]+$/) {
         printf "rules: %s is not pinned to a PhongGuy git tag (source: %s)\n", $1, (src == "" ? "none" : src) > "/dev/stderr"
@@ -65,11 +65,12 @@ run_tests() {
     echo "rules: no rules crate pinned"
     return 0
   fi
-  local tmp
+  # Global, since the EXIT trap runs after this function has returned.
   tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
+  trap 'rm -rf -- "$tmp"' EXIT
+  # The list is read on fd 3, so a clone or test that reads stdin cannot swallow later crates.
   local name url tag commit head
-  while read -r name url tag commit; do
+  while read -r -u 3 name url tag commit; do
     git clone --quiet --depth 1 --branch "$tag" -- "$url" "$tmp/$name"
     head=$(git -C "$tmp/$name" rev-parse HEAD)
     if [ "$head" != "$commit" ]; then
@@ -77,7 +78,7 @@ run_tests() {
       exit 1
     fi
     (cd "$tmp/$name" && cargo test -p "$name" --locked)
-  done <<< "$crates"
+  done 3<<< "$crates"
 }
 
 case $mode in

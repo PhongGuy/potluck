@@ -97,3 +97,84 @@ fn the_real_lock_passes_check_lock() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+const DBENTO: &str = "[[package]]\nname = \"dbento-rules\"\nversion = \"0.1.0\"\nsource = \"git+https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#0123456789abcdef0123456789abcdef01234567\"\n\n";
+
+/// Runs `test` mode over a lock with stub `git` and `cargo` first on PATH, so no network is
+/// reached. Returns the output, each cargo call's arguments, and what is left in its TMPDIR.
+fn run_stubbed(lock: &str, cargo_reads_stdin: bool) -> (Output, String, Vec<std::path::PathBuf>) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (bin, tmp) = (dir.path().join("bin"), dir.path().join("tmp"));
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&tmp).unwrap();
+    // The stub clone creates its target dir and every clone's HEAD is the pinned commit.
+    let git = "#!/bin/sh\nif [ \"$1\" = clone ]; then for a; do last=$a; done; mkdir -p \"$last\"; exit 0; fi\nif [ \"$1\" = -C ]; then echo 0123456789abcdef0123456789abcdef01234567; exit 0; fi\nexit 2\n";
+    let cargo = "#!/bin/sh\nif [ -n \"$STUB_READ_STDIN\" ]; then cat > /dev/null; fi\necho \"$*\" >> \"$STUB_LOG\"\n";
+    for (name, body) in [("git", git), ("cargo", cargo)] {
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let lock_path = dir.path().join("Cargo.lock");
+    std::fs::write(&lock_path, format!("version = 4\n\n{lock}")).unwrap();
+    let log = dir.path().join("cargo.log");
+    let mut cmd = Command::new(repo_root().join("scripts/rules-crates.sh"));
+    cmd.args(["test", lock_path.to_str().unwrap()])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("TMPDIR", &tmp)
+        .env("STUB_LOG", &log);
+    if cargo_reads_stdin {
+        cmd.env("STUB_READ_STDIN", "1");
+    }
+    let out = cmd.output().unwrap();
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    let left = std::fs::read_dir(&tmp)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    (out, calls, left)
+}
+
+const BOTH_TESTED: &str = "test -p apinata-rules --locked\ntest -p dbento-rules --locked\n";
+
+#[test]
+fn test_runs_every_pinned_crate_and_removes_its_clones() {
+    let (out, calls, left) = run_stubbed(&format!("{KIND_PATH}{APINATA}{DBENTO}"), false);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(calls, BOTH_TESTED);
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_crate_test_reading_stdin_does_not_skip_the_next_crate() {
+    let (out, calls, _) = run_stubbed(&format!("{KIND_PATH}{APINATA}{DBENTO}"), true);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(calls, BOTH_TESTED);
+}
+
+#[test]
+fn list_refuses_a_tag_git_could_misread() {
+    for tag in ["apinata rules", "-apinata-rules"] {
+        let lock = format!(
+            "{KIND_PATH}{}",
+            APINATA.replace("apinata-rules-v0.1.0", tag)
+        );
+        let out = run("list", &lock);
+        assert_eq!(out.status.code(), Some(1), "{lock}");
+        assert_eq!(stdout(&out), "", "{lock}");
+    }
+}

@@ -301,3 +301,20 @@ fn the_real_lock_pins_apinata_rules_at_its_tag() {
         "{text}"
     );
 }
+
+#[test]
+fn every_git_source_in_the_real_lock_is_public_https() {
+    let lock = std::fs::read_to_string(repo_root().join("Cargo.lock")).unwrap();
+    let sources: Vec<&str> = lock
+        .lines()
+        .filter_map(|l| l.strip_prefix("source = \"git+"))
+        .collect();
+    assert!(
+        !sources.is_empty(),
+        "no git source: the rules crate pin is missing"
+    );
+    for src in sources {
+        assert!(src.starts_with("https://github.com/PhongGuy/"), "{src}");
+        assert!(!src.contains('@'), "credentials in {src}");
+    }
+}

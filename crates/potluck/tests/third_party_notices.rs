@@ -61,6 +61,44 @@ fn prints_each_linked_crate_once_sorted_without_potluck() {
 }
 
 #[test]
+fn skips_only_path_crates_inside_this_repo() {
+    // An in-repo crate is first-party; a path crate elsewhere (a [patch] to a local checkout)
+    // is third-party and must still be listed and pass the licence guard.
+    let root = fs::canonicalize(repo_root()).unwrap();
+    let inside = format!(
+        "potluck-kind v0.1.0 ({}/crates/potluck-kind)|MIT OR Apache-2.0\n",
+        root.display()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let tree = format!("{TREE}{inside}sibling v0.1.0 (/elsewhere/sibling)|MIT\n");
+    let out = run(&stub_cargo(dir.path(), &tree), &[], None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !list.contains("`potluck-kind`"),
+        "in-repo crate listed: {list}"
+    );
+    assert!(
+        list.contains("- `sibling` 0.1.0 (/elsewhere/sibling): MIT\n"),
+        "out-of-tree path crate dropped: {list}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let tree = format!("{TREE}closed v0.1.0 (/elsewhere/closed)|LicenseRef-Proprietary\n");
+    let out = run(&stub_cargo(dir.path(), &tree), &[], None);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "out-of-tree path crate escaped the allowlist"
+    );
+    assert!(err.contains("closed"), "refusal does not name it: {err}");
+}
+
+#[test]
 fn asks_cargo_for_linked_dependencies_of_both_release_targets() {
     let dir = tempfile::tempdir().unwrap();
     let out = run(&stub_cargo(dir.path(), TREE), &[], None);

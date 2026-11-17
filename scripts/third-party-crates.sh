@@ -4,7 +4,7 @@
 # A crate whose licence falls outside the allowlist fails the run instead of being listed.
 set -euo pipefail
 
-root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 notices=${NOTICES:-$root/THIRD_PARTY_NOTICES.md}
 readonly begin='<!-- crates:begin -->' end='<!-- crates:end -->'
 readonly allowed=' MIT Apache-2.0 ISC BSD-3-Clause Unicode-3.0 Zlib Unlicense BSL-1.0 0BSD MIT-0 LLVM-exception '
@@ -28,8 +28,9 @@ while IFS= read -r line; do
   line=${line% (\*)}
   pkg=${line%%|*} licence=${line#*|}
   name=${pkg%% *} version=${pkg#* v}
-  # Workspace crates carry a local path and are first-party; git sources show a URL and stay.
-  [[ $version == *' (/'* ]] && continue
+  # This repo's own crates are first-party; any other path crate is checked and listed.
+  [[ $name == potluck && $version == *' ('* ]] && continue
+  [[ $version == *" ($root/crates/"* ]] && continue
   # Every identifier in the expression must be allowed; operators and grouping carry no terms.
   ok=1
   [[ -z $licence ]] && ok=0

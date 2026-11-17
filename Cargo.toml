@@ -41,7 +41,6 @@ tokio-util = { version = "=0.7.20", features = ["io-util", "rt"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"
-yaml_serde = "=0.10.7"
 
 [patch."https://github.com/PhongGuy/potluck"]
 potluck-kind = { path = "crates/potluck-kind" }

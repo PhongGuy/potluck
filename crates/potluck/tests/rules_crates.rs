@@ -269,7 +269,7 @@ fn list_refuses_a_tag_git_could_misread() {
     }
 }
 
-/// The tag Task 1 of the phase 1 plan confirmed on GitHub.
+/// The crate-scoped tag the workspace pins apinata-rules at.
 const APINATA_RULES_TAG: &str = "apinata-rules-v0.1.0";
 
 #[test]

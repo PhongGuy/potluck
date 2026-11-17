@@ -60,7 +60,7 @@ fn every_seed_detects_to_a_listed_format() {
 
 #[test]
 fn the_apinata_seed_is_the_one_potluck_shipped() {
-    // The same bytes the in-tree module seeded, so SEED_COMMIT and existing workspaces hold.
+    // The seed stays byte-identical, so SEED_COMMIT and existing workspaces hold.
     let seed = apinata().seed();
     let files: Vec<(&str, &[u8])> = seed.iter().map(|f| (f.path(), f.bytes())).collect();
     assert_eq!(

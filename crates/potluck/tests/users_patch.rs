@@ -216,3 +216,86 @@ async fn patched_display_name_and_email_are_stored_trimmed() {
     assert_eq!(body["display_name"], "Robert", "{body}");
     assert_eq!(body["email"], "bob@example.com", "{body}");
 }
+
+/// `{field: null}` as a JSON object.
+fn null_body(field: &str) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert(field.to_owned(), Value::Null);
+    Value::Object(body)
+}
+
+#[tokio::test]
+async fn an_explicit_null_on_a_field_that_cannot_be_null_is_422_naming_it() {
+    let app = test_app().await;
+    create_user(&app.db, "bob", "pw-123456", false).await;
+    create_user(&app.db, "alice", "pw-123456", true).await;
+    let alice = login(&app, "alice", "pw-123456").await;
+    let bob = login(&app, "bob", "pw-123456").await;
+    for field in [
+        "display_name",
+        "server_admin",
+        "disabled",
+        "password",
+        "current_password",
+    ] {
+        let (status, body) = patch_user(&app, &alice, "bob", null_body(field)).await;
+        assert_eq!(
+            (status, code(&body)),
+            (422, Some("invalid_request")),
+            "{field}: {body}"
+        );
+        assert_eq!(body["error"]["field"], field, "{body}");
+    }
+    // A valid field beside the null is not applied either.
+    let (status, body) = patch_user(
+        &app,
+        &bob,
+        "bob",
+        json!({"email": "bob@example.com", "display_name": null}),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["field"], "display_name", "{body}");
+    // A null current_password is a bad value, not a failed proof.
+    let (status, body) = patch_user(
+        &app,
+        &bob,
+        "bob",
+        json!({"password": "new-pw-12345", "current_password": null}),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert_eq!(body["error"]["field"], "current_password", "{body}");
+    // Nothing above changed bob: still enabled, same name, no email, same password.
+    let (status, body) = patch_user(&app, &bob, "bob", json!({})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["display_name"], "bob", "{body}");
+    assert_eq!(body["email"], Value::Null, "{body}");
+    assert_eq!(body["server_admin"], false, "{body}");
+    assert_eq!(body["disabled"], false, "{body}");
+    login(&app, "bob", "pw-123456").await;
+}
+
+#[tokio::test]
+async fn null_still_clears_email_and_role_checks_come_before_the_null_check() {
+    let app = test_app().await;
+    create_user(&app.db, "bob", "pw-123456", false).await;
+    let bob = login(&app, "bob", "pw-123456").await;
+    let (status, body) = patch_user(&app, &bob, "bob", json!({"email": "bob@example.com"})).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = patch_user(&app, &bob, "bob", json!({"email": null})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["email"],
+        Value::Null,
+        "null clears the nullable field: {body}"
+    );
+    for field in ["server_admin", "disabled"] {
+        let (status, body) = patch_user(&app, &bob, "bob", null_body(field)).await;
+        assert_eq!(
+            (status, code(&body)),
+            (403, Some("forbidden")),
+            "{field}: a non-admin may not touch it at all: {body}"
+        );
+    }
+}

@@ -28,26 +28,43 @@ pub(super) struct CreateUser {
 }
 
 /// The `PATCH /users/{username}` body; an absent field is left alone. `email: null` clears the
-/// email. No `Debug`, so neither password can reach a log by formatting.
+/// email, and `null` on any other field is refused by `patch`. No `Debug`, so neither password
+/// can reach a log by formatting.
 #[derive(Deserialize)]
 pub(super) struct PatchUser {
-    #[serde(default)]
-    display_name: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    display_name: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
     email: Option<Option<String>>,
-    #[serde(default)]
-    server_admin: Option<bool>,
-    #[serde(default)]
-    disabled: Option<bool>,
-    #[serde(default)]
-    password: Option<String>,
-    #[serde(default)]
-    current_password: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    server_admin: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option")]
+    disabled: Option<Option<bool>>,
+    #[serde(default, deserialize_with = "double_option")]
+    password: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    current_password: Option<Option<String>>,
 }
 
 // A present field, `null` included, is `Some`; only an absent one stays `None` via the default.
-fn double_option<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> {
-    Option::<String>::deserialize(d).map(Some)
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// Absent stays `None` and a value is `Some`; an explicit `null` is 422 naming `field`.
+fn non_null<T>(field: &str, value: Option<Option<T>>) -> Result<Option<T>, ApiError> {
+    match value {
+        Some(None) => Err(ApiError::invalid_value(
+            field,
+            format!("{field} cannot be null"),
+        )),
+        Some(Some(value)) => Ok(Some(value)),
+        None => Ok(None),
+    }
 }
 
 /// `GET /users` (server admin or `System`): every user by username.
@@ -101,7 +118,9 @@ pub(super) async fn create(
 /// 401), and each verification counts against the per-username session limiter (429 when full);
 /// `server_admin` or `disabled` in a self patch by a non-admin is 403. A non-admin patching
 /// another user, or anyone patching an unknown user, gets 404. The same value rules as `create`
-/// (422), and display name and email are stored trimmed. `{}` is 200 with the unchanged user.
+/// (422), and display name and email are stored trimmed. `null` is 422 on every field but `email`,
+/// checked after the role checks above and before anything is written. `{}` is 200 with the
+/// unchanged user.
 pub(super) async fn patch(
     State(state): State<AppState>,
     auth: Authenticated,
@@ -131,21 +150,27 @@ pub(super) async fn patch(
         return Err(ApiError::not_found("no such user").into());
     };
 
-    if let Some(name) = &body.display_name {
+    let display_name = non_null("display_name", body.display_name)?;
+    let server_admin = non_null("server_admin", body.server_admin)?;
+    let disabled = non_null("disabled", body.disabled)?;
+    let password = non_null("password", body.password)?;
+    let current_password = non_null("current_password", body.current_password)?;
+
+    if let Some(name) = &display_name {
         validate::name("display_name", name)?;
     }
     if let Some(Some(email)) = &body.email {
         check_email(email)?;
     }
-    if let Some(password) = &body.password {
+    if let Some(password) = &password {
         check_password(password)?;
     }
 
     let mut patch = UserPatch::default();
-    if let Some(password) = body.password {
+    if let Some(password) = password {
         // Changing one's own password proves the current one, rate limited like a sign-in.
         if is_self {
-            let Some(current) = body.current_password else {
+            let Some(current) = current_password else {
                 return Err(ApiError::unauthenticated("current_password is required").into());
             };
             state
@@ -172,27 +197,27 @@ pub(super) async fn patch(
             .map_err(|_| ApiError::internal("password hashing failed"))?;
         patch = patch.password_hash(&phc);
     }
-    if let Some(name) = &body.display_name {
+    if let Some(name) = &display_name {
         patch = patch.display_name(name.trim());
     }
     if let Some(email) = &body.email {
         patch = patch.email(email.as_deref().map(str::trim));
     }
-    if let Some(yes) = body.server_admin {
+    if let Some(yes) = server_admin {
         patch = patch.server_admin(yes);
     }
-    if let Some(yes) = body.disabled {
+    if let Some(yes) = disabled {
         patch = patch.disabled(yes);
     }
     let Some(user) = state.db().update_user(&username, patch).await? else {
         return Err(ApiError::not_found("no such user").into());
     };
-    if body.disabled == Some(true) {
+    if disabled == Some(true) {
         state.notices().close_user(user.id());
     }
     // The implicit admin role was never a grant row, so streams that relied on it close.
     // The patch is committed either way; a failed reap is logged rather than answered as 500.
-    if body.server_admin == Some(false)
+    if server_admin == Some(false)
         && let Err(err) = events::reap_unreadable(&state, std::slice::from_ref(&user)).await
     {
         tracing::error!(user = user.id(), error = ?err, "closing streams after an admin drop failed");

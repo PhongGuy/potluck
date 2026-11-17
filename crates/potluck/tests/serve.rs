@@ -2,15 +2,19 @@
 //! shutdown, and the `serve` subcommand's refusals through the binary.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use potluck::api::AppState;
 use potluck::config::ConfigError;
-use potluck::server::{ServerError, start};
+use potluck::db::Db;
+use potluck::role::Role;
+use potluck::server::{ServerError, start, start_with};
 use serde_json::Value;
 
 use crate::common::{
-    api_admin, api_team, api_workspace, config_for, config_listening_on, create_user, git, ok,
-    parse_config, potluck, repo_path, unix_get, work_tree, write_hook, write_script,
+    TestAccess, api_admin, api_team, api_workspace, config_for, config_listening_on, create_user,
+    git, ok, parse_config, potluck, repo_path, unix_get, work_tree, write_hook, write_script,
 };
 
 #[tokio::test]
@@ -34,6 +38,50 @@ async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
     assert_eq!(version, 2, "migrations ran at start");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn start_with_serves_the_given_state_behind_the_same_lock_and_sockets() {
+    const READER: &str = "plk_reader_token_000000000000000000000000000";
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    let db = Db::open(&config.db_path()).unwrap();
+    let access =
+        TestAccess::new()
+            .workspace("core", "api")
+            .grant(READER, "core", "api", Role::Read);
+    let state = AppState::new(db, config.clone()).with_git_access(Arc::new(access));
+    let running = start_with(&config, state).await.unwrap();
+    // Only the given resolver knows this token; it may read, so a push is refused with 403.
+    let r = reqwest::Client::new()
+        .get(format!(
+            "http://{}/git/core/api.git/info/refs?service=git-receive-pack",
+            running.http_addr()
+        ))
+        .bearer_auth(READER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 403, "the given resolver answered");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+    // The state's own database was migrated: the users table exists.
+    assert!(
+        running
+            .db()
+            .user_by_username("nobody")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let second = start(&config).await;
+    assert!(
+        matches!(second, Err(ServerError::DataDirInUse { .. })),
+        "the data dir is locked: {second:?}"
+    );
+    let (status, _) = unix_get(running.admin_socket(), "/api/v1/health").await;
+    assert_eq!(status, 200, "the admin socket serves too");
     running.shutdown().await;
 }
 

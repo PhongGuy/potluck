@@ -1,11 +1,12 @@
 //! The update checker: fetches the signed manifest and its signature from the source, verifies
 //! them, and keeps the newest verified release in memory for the status readers.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use semver::Version;
+use tokio::sync::watch;
 use url::Url;
 
 use super::{
@@ -54,6 +55,7 @@ struct Inner {
     source: UpdateSource,
     current: Version,
     state: Mutex<UpdateStatus>,
+    inflight: SingleFlight<Result<UpdateStatus, UpdateError>>,
 }
 
 impl UpdateChecker {
@@ -73,67 +75,24 @@ impl UpdateChecker {
                 source,
                 current: version,
                 state: Mutex::new(state),
+                inflight: SingleFlight::new(),
             }),
         })
     }
 
     /// Fetches and verifies the signed release, records it when it is a final release above both
     /// the running version and the current `latest`, and returns the resulting status. A failure
-    /// leaves the status unchanged. Each call logs exactly one line.
+    /// leaves the status unchanged. A call while a check runs joins it and shares its answer;
+    /// the check runs in its own task, so a caller that gives up does not cancel it, and one
+    /// that panics answers `Interrupted`. Each check logs exactly one line.
     pub async fn check(&self) -> Result<UpdateStatus, UpdateError> {
-        let result = self.fetch_and_apply().await;
-        let current = &self.inner.current;
-        match &result {
-            Ok((status, _, true)) => {
-                if let Some(new) = status.latest() {
-                    tracing::info!(
-                        "potluck {} is available (running {current}): {}; run `potluck admin update check` for the update steps",
-                        new.version(),
-                        new.notes_url()
-                    );
-                }
-            }
-            Ok((_, version, false)) => {
-                tracing::debug!(
-                    "update check: newest signed release is {version}; running {current}"
-                );
-            }
-            Err(err @ UpdateError::NotFound) => {
-                tracing::debug!("update check found nothing: {err}");
-            }
-            Err(err) => tracing::warn!(
-                "update check failed: {err}; turn the daily check off with --no-update-check or POTLUCK_UPDATE_CHECK=false"
-            ),
-        }
-        result.map(|(status, _, _)| status)
-    }
-
-    // Fetches, verifies and applies one answer, returning the new status, the verified version
-    // and whether `latest` moved; the caller logs.
-    async fn fetch_and_apply(&self) -> Result<(UpdateStatus, Version, bool), UpdateError> {
-        let inner = &self.inner;
-        let client = build_client(&inner.source, &inner.current.to_string())?;
-        let manifest = fetch(&client, &inner.source.base, MANIFEST_FILE).await?;
-        let signature = fetch(&client, &inner.source.base, SIGNATURE_FILE).await?;
-        let release = verify_release(&inner.source.keys, &manifest, &signature)?;
-        let version = Version::parse(release.version())
-            .map_err(|_| UpdateError::Manifest { field: "version" })?;
-        // Under one guard, taken after the last await so the future stays Send: a final release
-        // replaces `latest` only when it beats both the running version and the stored one, so a
-        // replayed older manifest never pulls `latest` back.
-        let mut state = inner.lock();
-        let above_stored = state.latest.as_ref().is_none_or(|stored| {
-            Version::parse(stored.version())
-                .is_ok_and(|stored| version.cmp_precedence(&stored).is_gt())
-        });
-        let moved = version.pre.is_empty()
-            && version.cmp_precedence(&inner.current).is_gt()
-            && above_stored;
-        if moved {
-            state.latest = Some(release);
-        }
-        state.checked_at = Some(clock::now_rfc3339());
-        Ok((state.clone(), version, moved))
+        let inner = Arc::clone(&self.inner);
+        let answer = self
+            .inner
+            .inflight
+            .run(move || async move { check_once(&inner).await })
+            .await;
+        answer.unwrap_or(Err(UpdateError::Interrupted))
     }
 
     /// The status as of the last check.
@@ -142,9 +101,121 @@ impl UpdateChecker {
     }
 }
 
+// One check from fetch to log line; `check` runs it at most once at a time.
+async fn check_once(inner: &Inner) -> Result<UpdateStatus, UpdateError> {
+    let result = fetch_and_apply(inner).await;
+    let current = &inner.current;
+    match &result {
+        Ok((status, _, true)) => {
+            if let Some(new) = status.latest() {
+                tracing::info!(
+                    "potluck {} is available (running {current}): {}; run `potluck admin update check` for the update steps",
+                    new.version(),
+                    new.notes_url()
+                );
+            }
+        }
+        Ok((_, version, false)) => {
+            tracing::debug!("update check: newest signed release is {version}; running {current}");
+        }
+        Err(err @ UpdateError::NotFound) => {
+            tracing::debug!("update check found nothing: {err}");
+        }
+        Err(err) => tracing::warn!(
+            "update check failed: {err}; turn the daily check off with --no-update-check or POTLUCK_UPDATE_CHECK=false"
+        ),
+    }
+    result.map(|(status, _, _)| status)
+}
+
+// Fetches, verifies and applies one answer, returning the new status, the verified version and
+// whether `latest` moved; the caller logs.
+async fn fetch_and_apply(inner: &Inner) -> Result<(UpdateStatus, Version, bool), UpdateError> {
+    let client = build_client(&inner.source, &inner.current.to_string())?;
+    let manifest = fetch(&client, &inner.source.base, MANIFEST_FILE).await?;
+    let signature = fetch(&client, &inner.source.base, SIGNATURE_FILE).await?;
+    let release = verify_release(&inner.source.keys, &manifest, &signature)?;
+    let version = Version::parse(release.version())
+        .map_err(|_| UpdateError::Manifest { field: "version" })?;
+    // Under one guard, taken after the last await so the future stays Send: a final release
+    // replaces `latest` only when it beats both the running version and the stored one, so a
+    // replayed older manifest never pulls `latest` back.
+    let mut state = inner.lock();
+    let above_stored = state.latest.as_ref().is_none_or(|stored| {
+        Version::parse(stored.version()).is_ok_and(|stored| version.cmp_precedence(&stored).is_gt())
+    });
+    let moved =
+        version.pre.is_empty() && version.cmp_precedence(&inner.current).is_gt() && above_stored;
+    if moved {
+        state.latest = Some(release);
+    }
+    state.checked_at = Some(clock::now_rfc3339());
+    Ok((state.clone(), version, moved))
+}
+
 impl Inner {
-    fn lock(&self) -> std::sync::MutexGuard<'_, UpdateStatus> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, UpdateStatus> {
+        lock(&self.state)
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+type Slot<T> = Arc<Mutex<Option<watch::Receiver<Option<T>>>>>;
+
+/// At most one piece of work in flight; callers that arrive meanwhile share its answer.
+pub(crate) struct SingleFlight<T> {
+    slot: Slot<T>,
+}
+
+/// Empties the slot when the work ends, by return or by panic, so the next caller starts afresh.
+struct ClearOnDrop<T>(Slot<T>);
+
+impl<T> Drop for ClearOnDrop<T> {
+    fn drop(&mut self) {
+        *lock(&self.0) = None;
+    }
+}
+
+impl<T: Clone + Send + Sync + 'static> SingleFlight<T> {
+    pub(crate) fn new() -> Self {
+        SingleFlight {
+            slot: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Joins the work in flight, or spawns `work()` in its own task so a caller that gives up
+    /// cannot cancel it for the others. `None` when the work panicked.
+    pub(crate) async fn run<F, Fut>(&self, work: F) -> Option<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let mut rx = {
+            let mut slot = lock(&self.slot);
+            match &*slot {
+                Some(rx) => rx.clone(),
+                None => {
+                    let (tx, rx) = watch::channel(None);
+                    *slot = Some(rx.clone());
+                    let guard = ClearOnDrop(Arc::clone(&self.slot));
+                    let fut = work();
+                    tokio::spawn(async move {
+                        let answer = fut.await;
+                        // Clear before publishing: a caller after the answer starts fresh work.
+                        drop(guard);
+                        let _ = tx.send(Some(answer));
+                    });
+                    rx
+                }
+            }
+        };
+        rx.wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|seen| seen.clone())
     }
 }
 
@@ -222,5 +293,16 @@ mod tests {
         assert!(redirect_allowed(&https, 5), "the fifth hop");
         assert!(!redirect_allowed(&https, 6), "a sixth hop is too many");
         assert!(!redirect_allowed(&http, 1), "never to http");
+    }
+
+    #[tokio::test]
+    async fn a_panicking_check_frees_the_slot_for_the_next_one() {
+        let flight = super::SingleFlight::<u32>::new();
+        let first = flight
+            .run(|| async { panic!("the check task panics") })
+            .await;
+        assert_eq!(first, None, "the waiter sees the interruption");
+        let second = flight.run(|| async { 7 }).await;
+        assert_eq!(second, Some(7), "the slot was cleared, so fresh work runs");
     }
 }

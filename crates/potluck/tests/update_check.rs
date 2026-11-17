@@ -234,3 +234,44 @@ fn a_new_release_is_logged_once_at_info_and_failures_at_warn_or_debug() {
         "the 404 logs at debug: {text}"
     );
 }
+
+#[tokio::test]
+async fn concurrent_checks_share_one_fetch() {
+    let (server, key) = (ReleaseServer::start().await, TestKey::new());
+    let body = manifest("1.1.0");
+    server.set(SIG, Reply::Body(key.sign(&body)));
+    server.set(MANIFEST, Reply::Slow(Duration::from_millis(300), body));
+    let c = checker(&server, &key);
+    let (a, b, d) = tokio::join!(c.check(), c.check(), c.check());
+    assert_eq!(server.manifest_hits(), 1);
+    let a = a.unwrap();
+    assert_eq!(b.unwrap(), a);
+    assert_eq!(d.unwrap(), a);
+    c.check().await.unwrap();
+    assert_eq!(
+        server.manifest_hits(),
+        2,
+        "a check after the answer fetches again"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_that_gives_up_does_not_cancel_the_shared_check() {
+    let (server, key) = (ReleaseServer::start().await, TestKey::new());
+    let body = manifest("1.1.0");
+    server.set(SIG, Reply::Body(key.sign(&body)));
+    server.set(MANIFEST, Reply::Slow(Duration::from_millis(300), body));
+    let c = checker(&server, &key);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), c.check())
+            .await
+            .is_err()
+    );
+    let status = c.check().await.unwrap();
+    assert_eq!(status.latest().map(|r| r.version()), Some("1.1.0"));
+    assert_eq!(
+        server.manifest_hits(),
+        1,
+        "the second caller joined the first fetch"
+    );
+}

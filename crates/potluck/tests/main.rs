@@ -57,6 +57,7 @@ mod public_api;
 mod push_bookkeeping;
 mod push_refs;
 mod rate_limit;
+mod reject_golden;
 mod release_notes;
 mod release_workflow;
 mod repos;

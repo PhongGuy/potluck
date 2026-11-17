@@ -673,6 +673,9 @@ pub fn jobs(workflow: &str) -> Vec<(String, String)> {
     jobs
 }
 
+/// An `opencollection.yml` in a format the apinata kind lists.
+pub const APINATA_FORMAT: &[u8] = b"opencollection: 1.0.0\n";
+
 /// The apinata seed commit (`Repos::seed_commit`, the Potluck identity, message
 /// `Seed apinata workspace`) on a server whose public host is `127.0.0.1`.
 pub const SEED_COMMIT: &str = "1f7fbc63392e202f4f1eae88ba7e2509cd732d33";

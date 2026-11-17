@@ -167,7 +167,10 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// After the history passes, every update whose old and new values both peel to commits gets a
 /// tip pass: `check` with `Change::tip` at each path between the two tips that the kind `reads`.
 /// Its findings sort after the ref's other hits, and one is dropped when its path already has a
-/// rejection anywhere in the push. A `safety_relaxation` finding is dropped for an admin pusher.
+/// rejection anywhere in the push. When `env` names a kind and a rule set is given, every created
+/// or format-touching update to a commit gets a format pass: its `format_file` must hold a format
+/// the rule set lists, or the ref gets one `format_unsupported` finding, sorted last. A
+/// `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
     rules: Option<&dyn RuleSet>,
@@ -258,6 +261,14 @@ pub fn scan_with(
     for (ri, update) in updates.iter().enumerate() {
         for (ei, r) in tip_pass(kind, update, role, git)? {
             hits.push(((ri, 3, ei), r));
+        }
+    }
+    // Only the server names a kind, so a rule set injected without one is never format-checked.
+    if env.kind().is_some() {
+        for (ri, update) in updates.iter().enumerate() {
+            if let Some(r) = format_pass(kind, update, git)? {
+                hits.push(((ri, 4, 0), r));
+            }
         }
     }
     if role == Role::Admin {
@@ -355,6 +366,63 @@ fn tip_pass(
         }
     }
     Ok(found)
+}
+
+/// Judges the workspace format at one update's new tip: `None` when the format file holds a
+/// version the rule set lists, else a `format_unsupported` rejection at the format file. Only a
+/// created ref (or one whose old value is not a commit) and an update whose tip diff lists the
+/// format file are judged; a delete, a tree or blob target and a push without a rule set are not.
+fn format_pass(
+    kind: GuardedRules<'_>,
+    update: &RefUpdate,
+    git: &Git,
+) -> Result<Option<Rejection>, ScanError> {
+    let Some(rules) = kind.0 else { return Ok(None) };
+    if update.is_delete() {
+        return Ok(None);
+    }
+    let (new, new_type) = git.peel(update.new())?;
+    if new_type != ObjectType::Commit {
+        return Ok(None);
+    }
+    let file = guarded(|| rules.format_file())?;
+    // An update that leaves the file alone keeps the format it was accepted with before.
+    if !update.old().is_zero() {
+        let (old, old_type) = git.peel(update.old())?;
+        if old_type == ObjectType::Commit
+            && !git
+                .tip_diff(&old, &new)?
+                .iter()
+                .any(|e| e.path() == file.as_bytes())
+        {
+            return Ok(None);
+        }
+    }
+    // A missing file, a directory in its place and a file over the cap all read as no format.
+    let mut version = None;
+    if let Some(sha) = git.blob_at(&new, file)? {
+        let shas = std::slice::from_ref(&sha);
+        match git.blob_sizes(shas)?.get(&sha) {
+            Some(&n) if n <= generic::MAX_CONTENT_BYTES => {
+                let mut bytes = None;
+                git.for_each_blob(shas, |_, b| bytes = Some(b.to_vec()))?;
+                let bytes = bytes.ok_or_else(no_size)?;
+                version = guarded(|| rules.detect_format(&bytes))?;
+            }
+            Some(_) => {}
+            None => return Err(no_size()),
+        }
+    }
+    let formats = guarded(|| rules.formats())?;
+    if version.is_some_and(|v| formats.contains(&v.as_str())) {
+        return Ok(None);
+    }
+    let finding = Finding::new(Code::FormatUnsupported, "format_unsupported", file);
+    Ok(Some(Rejection::new(
+        update.name(),
+        file.as_bytes(),
+        finding,
+    )))
 }
 
 /// Every blob a pass reads is one git has just named, so a missing size or body fails closed.

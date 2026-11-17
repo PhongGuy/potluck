@@ -244,3 +244,86 @@ async fn a_push_through_the_production_resolver_ends_the_import() {
     .await
     .expect("the first accepted push ends the import within 10 s");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ref_name_that_is_not_utf8_is_refused_and_leaves_no_trace() {
+    use std::os::unix::ffi::OsStrExt;
+    // An armed override skips the scan, so only the ref-name check can refuse this push.
+    let (server, ws, id) = import_server(true).await;
+    let mut sub = server.notices.subscribe(ws, 1, 1);
+    let home = server.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let work = work_tree(&home, "work");
+    let tip = ok(git(&home, Some(&work), None, &["rev-parse", "HEAD"]))
+        .trim()
+        .to_owned();
+    // A loose ref file names the branch with bytes no &str argument can carry.
+    let branch = std::ffi::OsStr::from_bytes(b"caf\xe9");
+    std::fs::write(
+        work.join(".git").join("refs").join("heads").join(branch),
+        format!("{tip}\n"),
+    )
+    .unwrap();
+    let url = server.url("core", "api");
+    let out = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", &url, "refs/heads/*:refs/heads/*"],
+    ));
+    assert!(out.contains("remote: ref name is not valid UTF-8"), "{out}");
+    assert!(!out.contains("potluck-reject"), "{out}");
+    assert!(!out.contains("potluck-error"), "{out}");
+    assert!(out.contains("pre-receive hook declined"), "{out}");
+    let repo = server
+        .repos
+        .path(&Slug::parse("core").unwrap(), &Slug::parse("api").unwrap());
+    let refs = git(
+        &home,
+        Some(&home),
+        None,
+        &["--git-dir", repo.to_str().unwrap(), "for-each-ref"],
+    );
+    assert!(refs.status.success());
+    assert!(
+        refs.stdout.is_empty(),
+        "neither ref landed: {}",
+        String::from_utf8_lossy(&refs.stdout)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        server
+            .db
+            .override_by_id(ws, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at()
+            .is_none(),
+        "no push record: the override stays armed"
+    );
+    assert!(
+        server
+            .db
+            .workspace_by_slugs("core", "api")
+            .await
+            .unwrap()
+            .unwrap()
+            .import_pending(),
+        "no push record: still an import"
+    );
+    // The next clean push is the first thing the stream hears: the refused one published nothing.
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main"],
+    ));
+    assert_eq!(
+        timeout(Duration::from_secs(10), sub.next())
+            .await
+            .expect("a move within 10 s")
+            .expect("stream open"),
+        RefMove::new("refs/heads/main", ZERO_SHA, &tip)
+    );
+}

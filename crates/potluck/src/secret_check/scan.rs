@@ -342,6 +342,15 @@ fn ref_tip_diff(
     Ok(Some(git.tip_diff(&old, &new)?))
 }
 
+/// Most blob bytes the tip pass holds at once; one batch's blobs are read and dropped before
+/// the next batch is read. 32 caps keeps the extra spawns a few percent of the read time.
+pub const TIP_BLOB_BUDGET: u64 = 32 * generic::MAX_CONTENT_BYTES;
+
+const _: () = assert!(
+    TIP_BLOB_BUDGET >= 2 * generic::MAX_CONTENT_BYTES,
+    "an entry holds at most two sides, each at most the cap, so every entry fits one batch"
+);
+
 /// Judges one update old tip against new tip: `check` with `Change::tip` at every path the
 /// kind `reads` among those `diff` (from `ref_tip_diff`) lists, as `(entry index, rejection)`
 /// in entry order; no diff yields nothing. Every finding is kept, whatever `role`.
@@ -365,8 +374,6 @@ fn tip_pass(
     if entries.is_empty() {
         return Ok(Vec::new());
     }
-    // Both sides of a change are needed at once, so the blobs at or under the cap are held in
-    // memory for this ref; the read stays on the kind's paths.
     let names: HashSet<Sha> = entries
         .iter()
         .flat_map(|(_, e, _)| e.old().into_iter().chain(e.new()))
@@ -374,40 +381,78 @@ fn tip_pass(
         .collect();
     let names: Vec<Sha> = names.into_iter().collect();
     let sizes = git.blob_sizes(&names)?;
-    let mut small = Vec::with_capacity(names.len());
-    for sha in names {
-        match sizes.get(&sha) {
-            Some(&n) if n <= generic::MAX_CONTENT_BYTES => small.push(sha),
-            Some(_) => {}
-            None => return Err(no_size()),
-        }
+    if names.iter().any(|sha| !sizes.contains_key(sha)) {
+        return Err(no_size());
     }
-    let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(small.len());
-    git.for_each_blob(&small, |sha, bytes| {
+    // Every name has a size from here on, so a lookup that misses cannot happen.
+    let size = |sha: &Sha| sizes.get(sha).copied().unwrap_or_default();
+    // Both sides of a change are needed at once, so entries are judged in batches whose blobs
+    // at or under the cap are held together, up to TIP_BLOB_BUDGET bytes. A batch closes
+    // before the entry that would take it past the budget; every entry fits an empty one.
+    let mut found = Vec::new();
+    let mut batch: Vec<&(usize, &TipEntry, String)> = Vec::new();
+    let mut blobs: Vec<Sha> = Vec::new();
+    let mut held = 0;
+    for item in &entries {
+        let (_, entry, _) = item;
+        let mut own: Vec<&Sha> = entry.old().into_iter().chain(entry.new()).collect();
+        own.retain(|sha| size(sha) <= generic::MAX_CONTENT_BYTES);
+        own.dedup();
+        let cost: u64 = own
+            .iter()
+            .filter(|sha| !blobs.contains(sha))
+            .map(|sha| size(sha))
+            .sum();
+        if !batch.is_empty() && held + cost > TIP_BLOB_BUDGET {
+            judge_tip_batch(kind, update, role, git, &batch, &blobs, &mut found)?;
+            batch.clear();
+            blobs.clear();
+            held = 0;
+        }
+        for sha in own {
+            if !blobs.contains(sha) {
+                held += size(sha);
+                blobs.push(sha.clone());
+            }
+        }
+        batch.push(item);
+    }
+    judge_tip_batch(kind, update, role, git, &batch, &blobs, &mut found)?;
+    Ok(found)
+}
+
+/// Reads one tip-pass batch's `blobs` in a single stream and runs `check` on each of its
+/// entries in order, pushing findings onto `found`; the bytes are dropped on return.
+fn judge_tip_batch(
+    kind: GuardedRules<'_>,
+    update: &RefUpdate,
+    role: Role,
+    git: &Git,
+    batch: &[&(usize, &TipEntry, String)],
+    blobs: &[Sha],
+    found: &mut Vec<(usize, Rejection)>,
+) -> Result<(), ScanError> {
+    let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(blobs.len());
+    git.for_each_blob(blobs, |sha, bytes| {
         read.insert(sha.clone(), bytes.to_vec());
     })?;
-    // A blob git sized but did not stream fails closed, like a missing size.
+    // Every side at or under the cap is in `blobs`, so a side not there is over the cap, and
+    // one there that git did not stream fails closed, like a missing size.
     let side = |sha: Option<&Sha>| -> Result<Option<Blob<'_>>, ScanError> {
         let Some(sha) = sha else { return Ok(None) };
         match read.get(sha) {
             Some(bytes) => Ok(Some(Blob::Bytes(bytes))),
-            None if sizes
-                .get(sha)
-                .is_some_and(|&n| n > generic::MAX_CONTENT_BYTES) =>
-            {
-                Ok(Some(Blob::TooLarge))
-            }
+            None if !blobs.contains(sha) => Ok(Some(Blob::TooLarge)),
             None => Err(no_size()),
         }
     };
-    let mut found = Vec::new();
-    for (ei, entry, lossy) in &entries {
+    for (ei, entry, lossy) in batch {
         let change = Change::tip(lossy, side(entry.old())?, side(entry.new())?, role);
         if let Some(finding) = kind.check(&change)? {
             found.push((*ei, rejection(update.name(), entry.path(), lossy, finding)));
         }
     }
-    Ok(found)
+    Ok(())
 }
 
 /// Judges the workspace format at one update's new tip: `None` when the format file holds a

@@ -1181,3 +1181,75 @@ fn an_accepted_relaxation_is_logged_with_workspace_ref_user_and_rule() {
         "{text}"
     );
 }
+
+/// A `size`-byte body that starts with `head` and is unique per `seed`, so no two sides share
+/// a blob.
+fn big_body(head: &[u8], seed: usize, size: u64) -> Vec<u8> {
+    let mut body = head.to_vec();
+    let fill = format!(" {seed:04} ");
+    while (body.len() as u64) < size {
+        body.extend_from_slice(fill.as_bytes());
+    }
+    body.truncate(usize::try_from(size).unwrap());
+    body
+}
+
+#[test]
+fn the_tip_pass_reads_its_blobs_in_batches_under_the_budget() {
+    use potluck::kinds::generic::MAX_CONTENT_BYTES;
+    use potluck::secret_check::scan::TIP_BLOB_BUDGET;
+
+    const PATHS: usize = 40;
+    let s = Scratch::new();
+    let path = |i: usize| format!("f{i:02}.t");
+    for i in 0..PATHS {
+        s.write(&path(i), &big_body(b"strict", i, MAX_CONTENT_BYTES));
+    }
+    let old = s.commit("strict");
+    s.publish("main");
+    for i in 0..PATHS {
+        s.write(
+            &path(i),
+            &big_body(b"relaxed", PATHS + i, MAX_CONTENT_BYTES),
+        );
+    }
+    let new = s.stage_commit("relax");
+    let old_blobs: Vec<String> = (0..PATHS).map(|i| s.blob(&old, &path(i))).collect();
+
+    // Each `cat-file --batch` call is logged as one line of the names it was given.
+    let log = s.dir.path().join("batches.log");
+    let iso = s.isolated_git();
+    let script = s.script(
+        "batch-logging-git",
+        &format!(
+            "if [ \"$1\" = cat-file ] && [ \"$2\" = --batch ]; then\n  names=$(cat)\n  printf '%s\\n' \"$names\" | tr '\\n' ' ' >> '{log}'\n  echo >> '{log}'\n  printf '%s\\n' \"$names\" | exec '{iso}' \"$@\"\nfi\nexec '{iso}' \"$@\"\n",
+            log = log.display(),
+            iso = iso.display(),
+        ),
+    );
+    let git = Git::new(script, Some(s.bare.clone()));
+    let e = HookEnv::new(None, false, None).with_role(Role::Write);
+    let found = scan_with(
+        &e,
+        Some(&rules(Act::Relax)),
+        &[moved(&old, &new, "refs/heads/main")],
+        &git,
+    )
+    .unwrap();
+
+    let expected: Vec<String> = (0..PATHS)
+        .map(|i| format!("refs/heads/main {} safety_relaxation relax_test", path(i)))
+        .collect();
+    assert_eq!(rows(&found), expected, "every entry judged, in entry order");
+    // Only the tip pass reads an old side, so a call naming an old blob is a tip-pass batch.
+    let text = std::fs::read_to_string(&log).unwrap();
+    let tip_calls: Vec<usize> = text
+        .lines()
+        .filter(|l| l.split(' ').any(|n| old_blobs.iter().any(|b| b == n)))
+        .map(|l| l.split(' ').filter(|n| !n.is_empty()).count())
+        .collect();
+    let most = usize::try_from(TIP_BLOB_BUDGET / MAX_CONTENT_BYTES).unwrap();
+    assert!(tip_calls.len() >= 2, "batched: {tip_calls:?}");
+    assert!(tip_calls.iter().all(|&n| n <= most), "{tip_calls:?}");
+    assert_eq!(tip_calls.iter().sum::<usize>(), 2 * PATHS, "{tip_calls:?}");
+}

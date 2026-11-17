@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use super::client_ip::ClientIp;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult};
 use super::json::ApiJson;
 use super::objects::{TokenJson, UserJson};
 use super::{tokens, validate};
@@ -36,7 +36,7 @@ pub(super) async fn create(
     State(state): State<AppState>,
     ip: ClientIp,
     ApiJson(body): ApiJson<SessionRequest>,
-) -> Result<(StatusCode, Json<SessionResponse>), ApiError> {
+) -> ApiResult<(StatusCode, Json<SessionResponse>)> {
     let token_name = validate::token_name("token_name", &body.token_name)?;
     // Only attempts that reach the credential check count, the address before the username.
     let limits = state.session_limits();
@@ -55,10 +55,10 @@ pub(super) async fn create(
         ApiError::unauthenticated("invalid username or password")
     };
     let Some(user) = state.db().user_by_username(&body.username).await? else {
-        return Err(refused());
+        return Err(refused().into());
     };
     let Some(phc) = user.password_hash().filter(|_| !user.disabled()) else {
-        return Err(refused());
+        return Err(refused().into());
     };
     // argon2 is deliberately slow, so it runs off the async workers.
     let passwords = state.passwords().clone();
@@ -68,10 +68,10 @@ pub(super) async fn create(
         .map_err(|_| ApiError::internal("password check failed"))?;
     match verified {
         Ok(true) => {}
-        Ok(false) => return Err(refused()),
+        Ok(false) => return Err(refused().into()),
         Err(_) => {
             tracing::error!(username = %body.username, "stored password hash is unusable");
-            return Err(ApiError::internal("password check failed"));
+            return Err(ApiError::internal("password check failed").into());
         }
     }
 

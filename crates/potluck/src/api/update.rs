@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use super::AppState;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult};
 use crate::update::{Release, UpdateStatus};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -61,7 +61,7 @@ fn update_json(state: &AppState, status: &UpdateStatus) -> UpdateJson {
 pub(super) async fn get(
     State(state): State<AppState>,
     auth: Authenticated,
-) -> Result<Json<UpdateJson>, ApiError> {
+) -> ApiResult<Json<UpdateJson>> {
     auth.require_server_admin()?;
     Ok(Json(match state.updates() {
         Some(checker) => update_json(&state, &checker.status()),
@@ -79,7 +79,7 @@ pub(super) async fn get(
 pub(super) async fn check(
     State(state): State<AppState>,
     auth: Authenticated,
-) -> Result<Json<UpdateJson>, ApiError> {
+) -> ApiResult<Json<UpdateJson>> {
     auth.require_server_admin()?;
     // Cloned out of the state so the awaited future holds no borrow of it.
     let checker = state

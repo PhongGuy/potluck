@@ -21,7 +21,6 @@ mod admin_grants;
 mod admin_teams;
 mod admin_update;
 mod admin_users;
-mod api_error;
 mod api_system;
 mod authenticate;
 mod cli_version;

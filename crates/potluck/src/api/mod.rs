@@ -37,7 +37,7 @@ mod validate;
 pub(crate) mod workspaces;
 
 pub use actor::{Actor, AuthUser};
-use error::ApiError;
+use error::{ApiError, ErrorResponse};
 
 /// What every handler can reach: the database handle, the validated config, the git access
 /// resolver, the git engine, the password hasher, the sign-in rate limiters and, when a release
@@ -207,6 +207,6 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn not_found() -> ApiError {
-    ApiError::not_found("no such route")
+async fn not_found() -> ErrorResponse {
+    ApiError::not_found("no such route").into()
 }

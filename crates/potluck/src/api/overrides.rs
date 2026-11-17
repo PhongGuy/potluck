@@ -9,7 +9,7 @@ use serde::Deserialize;
 use super::AppState;
 use super::actor::Actor;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::json::ApiJson;
 use super::objects::OverrideJson;
 use super::workspaces::{WsPath, load, require};
@@ -34,7 +34,7 @@ pub(super) async fn list(
     State(state): State<AppState>,
     auth: Authenticated,
     path: WsPath,
-) -> Result<Json<Vec<OverrideJson>>, ApiError> {
+) -> ApiResult<Json<Vec<OverrideJson>>> {
     let (ws, role) = load(&state, &auth, path).await?;
     require(role, Role::Admin, "manage overrides")?;
     let overrides = state.db().list_overrides(ws.id()).await?;
@@ -49,23 +49,22 @@ pub(super) async fn arm(
     State(state): State<AppState>,
     auth: Authenticated,
     path: WsPath,
-    body: Result<ApiJson<ArmOverride>, ApiError>,
-) -> Result<(StatusCode, Json<OverrideJson>), ApiError> {
+    body: Result<ApiJson<ArmOverride>, ErrorResponse>,
+) -> ApiResult<(StatusCode, Json<OverrideJson>)> {
     let (ws, role) = load(&state, &auth, path).await?;
     require(role, Role::Admin, "manage overrides")?;
     let ApiJson(body) = body?;
     let user = match state.db().user_by_username(&body.for_user).await? {
         Some(user) if !user.disabled() => user,
         _ => {
-            return Err(ApiError::invalid_value("for_user", "no such active user"));
+            return Err(ApiError::invalid_value("for_user", "no such active user").into());
         }
     };
     let reason = body.reason.trim();
     if reason.is_empty() || reason.chars().count() > MAX_REASON {
-        return Err(ApiError::invalid_value(
-            "reason",
-            "reason must be 1 to 1000 characters",
-        ));
+        return Err(
+            ApiError::invalid_value("reason", "reason must be 1 to 1000 characters").into(),
+        );
     }
     // Two admins racing past this check is harmless: the hook is handed the lowest armed id
     // and the push consumes exactly that one.
@@ -75,9 +74,7 @@ pub(super) async fn arm(
         .await?
         .is_some()
     {
-        return Err(ApiError::conflict(
-            "an override is already armed for this user",
-        ));
+        return Err(ApiError::conflict("an override is already armed for this user").into());
     }
     let armed_by = actor_name(&auth);
     let id = state
@@ -86,7 +83,7 @@ pub(super) async fn arm(
         .await?;
     let Some(record) = state.db().override_by_id(ws.id(), id).await? else {
         tracing::error!(id, "an override vanished right after it was armed");
-        return Err(ApiError::internal("override could not be read back"));
+        return Err(ApiError::internal("override could not be read back").into());
     };
     tracing::info!(
         workspace = %format!("{}/{}", ws.team_slug(), ws.slug()),
@@ -104,7 +101,7 @@ pub(super) async fn disarm(
     State(state): State<AppState>,
     auth: Authenticated,
     path: OverridePath,
-) -> Result<StatusCode, ApiError> {
+) -> ApiResult<StatusCode> {
     // The role is checked before the id is parsed, so a caller without admin learns nothing.
     let (ws_path, id) = match path {
         Ok(Path((team, ws, id))) => (Ok(Path((team, ws))), id.parse::<i64>().ok()),
@@ -113,7 +110,7 @@ pub(super) async fn disarm(
     let (ws, role) = load(&state, &auth, ws_path).await?;
     require(role, Role::Admin, "manage overrides")?;
     let Some(id) = id else {
-        return Err(ApiError::not_found("no such override"));
+        return Err(ApiError::not_found("no such override").into());
     };
     match state.db().disarm_override(ws.id(), id).await? {
         Disarmed::Removed => {
@@ -126,10 +123,10 @@ pub(super) async fn disarm(
             );
             Ok(StatusCode::NO_CONTENT)
         }
-        Disarmed::Consumed => Err(ApiError::conflict(
-            "a consumed override stays in the history",
-        )),
-        Disarmed::Missing => Err(ApiError::not_found("no such override")),
+        Disarmed::Consumed => {
+            Err(ApiError::conflict("a consumed override stays in the history").into())
+        }
+        Disarmed::Missing => Err(ApiError::not_found("no such override").into()),
     }
 }
 

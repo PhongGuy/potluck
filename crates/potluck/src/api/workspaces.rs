@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use super::auth::{Authenticated, token_required};
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::json::ApiJson;
 use super::objects::{WorkspaceJson, noreply_host};
 use super::teams::check_slug;
@@ -43,8 +43,8 @@ pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
     Path(team): Path<String>,
-    body: Result<ApiJson<CreateWorkspace>, ApiError>,
-) -> Result<(StatusCode, Json<WorkspaceJson>), ApiError> {
+    body: Result<ApiJson<CreateWorkspace>, ErrorResponse>,
+) -> ApiResult<(StatusCode, Json<WorkspaceJson>)> {
     auth.require_server_admin()?;
     let ApiJson(body) = body?;
     let slug = check_slug(&body.slug)?;
@@ -52,10 +52,9 @@ pub(super) async fn create(
     // The kind is checked before the claim: the schema CHECK would admit a reserved kind, and
     // an unknown one would only surface from the insert as a 500.
     let Some(kind) = kinds::by_name(&body.kind) else {
-        return Err(ApiError::invalid_value(
-            "kind",
-            "kind must be a supported workspace kind",
-        ));
+        return Err(
+            ApiError::invalid_value("kind", "kind must be a supported workspace kind").into(),
+        );
     };
     check_default_branch(&body.default_branch)?;
     let team = match Slug::parse(&team) {
@@ -67,7 +66,7 @@ pub(super) async fn create(
         Err(_) => None,
     };
     let Some((team_slug, team)) = team else {
-        return Err(ApiError::not_found("no such team"));
+        return Err(ApiError::not_found("no such team").into());
     };
 
     let repos = state.git().repos().clone();
@@ -167,7 +166,7 @@ pub(super) async fn list(
     State(state): State<AppState>,
     auth: Authenticated,
     RawQuery(query): RawQuery,
-) -> Result<Json<Vec<WorkspaceJson>>, ApiError> {
+) -> ApiResult<Json<Vec<WorkspaceJson>>> {
     // An unknown kind is a filter that matches nothing, not a validation error.
     let kind = query
         .as_deref()
@@ -184,7 +183,7 @@ pub(super) async fn get(
     State(state): State<AppState>,
     auth: Authenticated,
     path: WsPath,
-) -> Result<Json<WorkspaceJson>, ApiError> {
+) -> ApiResult<Json<WorkspaceJson>> {
     let (ws, role) = load(&state, &auth, path).await?;
     require(role, Role::Read, "read")?;
     Ok(Json(WorkspaceJson::new(
@@ -202,12 +201,12 @@ pub(super) async fn delete(
     State(state): State<AppState>,
     auth: Authenticated,
     path: WsPath,
-) -> Result<StatusCode, ApiError> {
+) -> ApiResult<StatusCode> {
     let (ws, role) = load(&state, &auth, path).await?;
     require(role, Role::Admin, "delete")?;
     let (Ok(team_slug), Ok(slug)) = (Slug::parse(ws.team_slug()), Slug::parse(ws.slug())) else {
         tracing::error!(id = ws.id(), "a stored workspace slug does not parse");
-        return Err(ApiError::internal("workspace could not be deleted"));
+        return Err(ApiError::internal("workspace could not be deleted").into());
     };
     let repos = state.git().repos().clone();
     let db = state.db().clone();
@@ -226,10 +225,11 @@ pub(super) async fn delete(
         }
         Ok(StatusCode::NO_CONTENT)
     });
-    task.await.map_err(|err| {
+    let status = task.await.map_err(|err| {
         tracing::error!(error = %err, "workspace deletion task failed");
         ApiError::internal("workspace deletion failed")
-    })?
+    })??;
+    Ok(status)
 }
 
 /// The one place a role is decided: `System` and a `server_admin` user are `Admin` on every

@@ -4,7 +4,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use super::credential::{Credential, credential_from_headers};
-use super::error::ApiError;
+use super::error::{ApiError, ErrorResponse};
 use super::{Actor, AppState, AuthUser};
 use crate::auth::token::{digest, digests_match, prefix_of};
 use crate::clock::{now_rfc3339, shift_secs};
@@ -108,11 +108,14 @@ pub(super) fn token_required() -> ApiError {
 }
 
 impl FromRequestParts<AppState> for Authenticated {
-    type Rejection = ApiError;
+    type Rejection = ErrorResponse;
 
     // The admin socket's actor is trusted outright, so its headers are never parsed; on TCP the
     // header decides, and only its absence is anonymous.
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, ErrorResponse> {
         if let Some(Actor::System) = parts.extensions.get::<Actor>() {
             return Ok(Authenticated {
                 actor: Actor::System,
@@ -136,7 +139,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::api::error::ApiError;
+    use crate::api::error::ApiResult;
     use crate::api::test_support::{create_user, mint_token, serve, test_state};
     use crate::api::{Actor, AuthUser};
     use crate::db::Db;
@@ -149,12 +152,12 @@ mod tests {
         }
     }
 
-    async fn admin_only(auth: Authenticated) -> Result<&'static str, ApiError> {
+    async fn admin_only(auth: Authenticated) -> ApiResult<&'static str> {
         auth.require_server_admin()?;
         Ok("admin")
     }
 
-    async fn self_only(auth: Authenticated) -> Result<String, ApiError> {
+    async fn self_only(auth: Authenticated) -> ApiResult<String> {
         Ok(auth.require_user()?.user().username().to_owned())
     }
 

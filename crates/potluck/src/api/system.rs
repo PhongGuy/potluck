@@ -5,7 +5,7 @@ use axum::extract::State;
 use serde::Serialize;
 
 use super::AppState;
-use super::error::ApiError;
+use super::error::ApiResult;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -29,7 +29,7 @@ struct AuthMethods {
 }
 
 /// `GET /api/v1/health`: ok while the database answers a ping, else 503 `unavailable`.
-pub(super) async fn health(State(state): State<AppState>) -> Result<Json<Health>, ApiError> {
+pub(super) async fn health(State(state): State<AppState>) -> ApiResult<Json<Health>> {
     state.db().ping().await?;
     Ok(Json(Health {
         status: "ok",

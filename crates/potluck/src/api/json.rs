@@ -7,7 +7,7 @@ use axum::http::header::CONTENT_TYPE;
 use serde::de::DeserializeOwned;
 use serde_json::error::Category;
 
-use super::error::ApiError;
+use super::error::{ApiError, ErrorResponse};
 
 /// A JSON body in the error model: a wrong or missing `Content-Type`, invalid JSON or the wrong
 /// shape are 400 `invalid_request`; a body over the limit is 413 `payload_too_large`. A missing
@@ -17,13 +17,11 @@ use super::error::ApiError;
 pub(crate) struct ApiJson<T>(pub T);
 
 impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for ApiJson<T> {
-    type Rejection = ApiError;
+    type Rejection = ErrorResponse;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         if !is_json(&req) {
-            return Err(ApiError::invalid_request(
-                "Content-Type must be application/json",
-            ));
+            return Err(ApiError::invalid_request("Content-Type must be application/json").into());
         }
         let bytes = Bytes::from_request(req, state)
             .await
@@ -43,7 +41,7 @@ impl<T: DeserializeOwned, S: Send + Sync> FromRequest<S> for ApiJson<T> {
                     "request body is not valid JSON".to_owned()
                 }
             };
-            ApiError::invalid_request(message)
+            ApiError::invalid_request(message).into()
         })
     }
 }

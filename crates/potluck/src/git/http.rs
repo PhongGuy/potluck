@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 
 use crate::api::AppState;
 use crate::api::credential::credential_from_headers;
-use crate::api::error::ApiError;
+use crate::api::error::{ApiError, ApiResult};
 use crate::git::access::{Access, PushContext};
 use crate::git::engine::PushObserver;
 use crate::git::push::RefMove;
@@ -40,14 +40,15 @@ async fn info_refs(
     path: RepoPath,
     RawQuery(query): RawQuery,
     headers: HeaderMap,
-) -> Result<Response, ApiError> {
+) -> ApiResult<Response> {
     let name = query
         .as_deref()
         .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("service=")));
     let Some(name) = name else {
         return Err(ApiError::invalid_request(
             "smart HTTP only: the service query parameter is required",
-        ));
+        )
+        .into());
     };
     let service = Service::from_name(name)
         .ok_or_else(|| ApiError::invalid_value("service", "unknown service"))?;
@@ -64,7 +65,7 @@ async fn upload_pack(
     path: RepoPath,
     headers: HeaderMap,
     body: Body,
-) -> Result<Response, ApiError> {
+) -> ApiResult<Response> {
     rpc(&state, path, &headers, body, Service::UploadPack).await
 }
 
@@ -73,7 +74,7 @@ async fn receive_pack(
     path: RepoPath,
     headers: HeaderMap,
     body: Body,
-) -> Result<Response, ApiError> {
+) -> ApiResult<Response> {
     rpc(&state, path, &headers, body, Service::ReceivePack).await
 }
 
@@ -85,7 +86,7 @@ async fn rpc(
     headers: &HeaderMap,
     body: Body,
     service: Service,
-) -> Result<Response, ApiError> {
+) -> ApiResult<Response> {
     let (repo, access) = authorize(state, headers, path, service).await?;
     let limit = state.git().max_body();
     let declared = headers

@@ -11,7 +11,7 @@ use futures_util::stream;
 
 use super::AppState;
 use super::auth::Authenticated;
-use super::error::ApiError;
+use super::error::{ApiError, ApiResult};
 use super::workspaces::{WsPath, load};
 use crate::db::accounts::UserRecord;
 use crate::git::push::list_refs;
@@ -25,12 +25,12 @@ pub(super) async fn stream(
     State(state): State<AppState>,
     auth: Authenticated,
     path: WsPath,
-) -> Result<Response, ApiError> {
+) -> ApiResult<Response> {
     let (ws, _role) = load(&state, &auth, path).await?;
     let user = auth.require_user()?;
     let (Ok(team_slug), Ok(slug)) = (Slug::parse(ws.team_slug()), Slug::parse(ws.slug())) else {
         tracing::error!(id = ws.id(), "a stored workspace slug does not parse");
-        return Err(ApiError::internal("events could not be opened"));
+        return Err(ApiError::internal("events could not be opened").into());
     };
     // Subscribe before the snapshot so a push landing in between still arrives live.
     let subscription = state
@@ -46,7 +46,7 @@ pub(super) async fn stream(
     // A close that ran before `subscribe` missed this stream, so the access is checked again.
     let signed_out = || ApiError::unauthenticated("invalid or expired token");
     if state.db().token_by_id(user.token_id()).await?.is_none() {
-        return Err(signed_out());
+        return Err(signed_out().into());
     }
     let Some(owner) = state
         .db()
@@ -54,7 +54,7 @@ pub(super) async fn stream(
         .await?
         .filter(|owner| !owner.disabled())
     else {
-        return Err(signed_out());
+        return Err(signed_out().into());
     };
     // Admin-ness and the row come from the database now, not from the request-time actor, so
     // a dropped flag or a deleted workspace that closed streams before `subscribe` still counts.
@@ -66,7 +66,7 @@ pub(super) async fn stream(
     let readable =
         owner.server_admin() || state.db().role_for(ws.id(), owner.id()).await?.is_some();
     if !(still_there && readable) {
-        return Err(ApiError::not_found("no such workspace"));
+        return Err(ApiError::not_found("no such workspace").into());
     }
     let first: Vec<Result<Event, Infallible>> =
         std::iter::once(Event::default().retry(Duration::from_secs(2)))

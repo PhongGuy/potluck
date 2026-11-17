@@ -155,6 +155,31 @@ fn kind_rules_follow_the_kind_and_the_generic_set_runs_for_all() {
 }
 
 #[test]
+fn a_token_in_an_environment_file_with_a_valued_secret_reports_the_generic_rule() {
+    // Both rule sets would refuse this file; the generic pattern runs first and the kind's
+    // check is asked only when it finds nothing.
+    let s = Scratch::new();
+    s.write("opencollection.yml", APINATA_FORMAT);
+    let both = [ENV_YML, b"# AKIAIOSFODNN7EXAMPLE\n"].concat();
+    assert_eq!(
+        potluck::kinds::apinata::environment_rule(
+            "environments/dev.yml",
+            &both,
+            potluck::kinds::apinata::NODE_CAP
+        )
+        .map(|f| f.rule()),
+        Some("secret_value"),
+        "the kind's rule must refuse this file too, or the test proves nothing"
+    );
+    s.write("environments/dev.yml", &both);
+    let tip = s.stage_commit("token and valued secret");
+    assert_eq!(
+        scan_main(&s, &env(Some("apinata")), &tip),
+        ["refs/heads/main environments/dev.yml secret_pattern aws"]
+    );
+}
+
+#[test]
 fn a_commit_shared_by_two_refs_is_reported_under_the_first() {
     let s = Scratch::new();
     s.write("creds.txt", AWS);

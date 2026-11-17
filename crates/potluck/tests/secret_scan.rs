@@ -657,6 +657,24 @@ fn a_rule_set_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
 }
 
 #[test]
+fn a_generic_path_finding_at_a_non_utf8_path_keeps_the_raw_bytes() {
+    // The generic `.env` rule matches on the lossy path, but the client must get back the
+    // exact bytes git stores, so the report escapes the Latin-1 byte rather than U+FFFD.
+    let s = Scratch::new();
+    let dir = s.work.join(OsStr::from_bytes(b"caf\xe9"));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".env"), b"KEY=fixture\n").unwrap();
+    let tip = s.stage_commit("latin-1 directory");
+    let found = scan(&env(None), &[update(&tip, "refs/heads/main")], &git_for(&s)).unwrap();
+    let mut out = Vec::new();
+    report(&found, &mut out).unwrap();
+    assert_eq!(
+        String::from_utf8(out).unwrap(),
+        "potluck-reject secret_env_file refs/heads/main caf%E9/.env env_file\n"
+    );
+}
+
+#[test]
 fn an_unknown_kind_is_refused_unless_every_update_is_a_delete() {
     let s = Scratch::new();
     s.write("README", b"r\n");

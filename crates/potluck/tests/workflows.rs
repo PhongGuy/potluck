@@ -56,6 +56,11 @@ fn the_gate_checks_the_public_api_after_the_tests() {
         test < json && json < check,
         "test, JSON, check in order: {gate}"
     );
+    // The unstable switch stays on the rustdoc line; as an env key it would reach every build.
+    assert!(
+        !text.contains("RUSTC_BOOTSTRAP:"),
+        "ci.yml sets RUSTC_BOOTSTRAP as an env key"
+    );
 }
 
 #[test]

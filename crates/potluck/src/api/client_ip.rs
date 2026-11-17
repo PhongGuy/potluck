@@ -10,7 +10,6 @@ use super::AppState;
 
 /// Where a request came from, for rate limiting. An IPv4-mapped IPv6 address is held as IPv4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub(crate) enum ClientIp {
     /// A TCP peer, or the client a trusted proxy forwarded for.
     Peer(IpAddr),

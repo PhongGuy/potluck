@@ -215,7 +215,6 @@ impl From<DbError> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::DbError;
     use serde_json::{Value, json};
 
     async fn render(err: ApiError) -> (u16, axum::http::HeaderMap, Value) {

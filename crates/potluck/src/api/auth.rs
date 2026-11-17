@@ -71,7 +71,6 @@ fn rejected(prefix: &str, reason: &'static str) -> ApiError {
 /// the `Authorization` header resolved through `authenticate`, `Anonymous` without one, 401 for
 /// a present but unusable or unknown credential. A missing extension counts as `Anonymous`.
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub(crate) struct Authenticated {
     actor: Actor,
 }

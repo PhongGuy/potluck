@@ -75,5 +75,12 @@ fn json_it_cannot_read_is_refused() {
     ] {
         let out = check(json);
         assert_eq!(out.status.code(), Some(2), "{json}: {}", stdout(&out));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.starts_with("check-public-api: ")
+                && stderr.ends_with("/potluck.json is not rustdoc JSON this check can read\n")
+                && stderr.lines().count() == 1,
+            "{json}: {stderr}"
+        );
     }
 }

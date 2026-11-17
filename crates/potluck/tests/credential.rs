@@ -1,4 +1,4 @@
-//! Roles order; credentials parse from both schemes and never print themselves.
+//! Roles order read, write, admin, and a credential never prints its token in `Debug`.
 
 use potluck::api::credential::Credential;
 use potluck::role::Role;

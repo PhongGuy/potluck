@@ -21,6 +21,11 @@ tag_version() {
 check_version() {
   local tag=$1 toml=$2 version workspace
   version=$(tag_version "$tag") || return 1
+  # Named here, since the read below discards python3's own stderr.
+  if ! command -v python3 > /dev/null; then
+    echo "release.sh: check-version needs python3" >&2
+    return 1
+  fi
   # tomllib reads the table itself, so decoy version keys elsewhere never match.
   if ! workspace=$(python3 -I -c 'import sys, tomllib
 with open(sys.argv[1], "rb") as f:

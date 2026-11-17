@@ -261,7 +261,7 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     grant(&a, "api", "user", "bob", "write").await;
     write_hook(
         &a.server.hooks_dir(),
-        "echo \"kind=$POTLUCK_KIND pusher=$POTLUCK_PUSHER token=$POTLUCK_PUSHER_TOKEN import=$POTLUCK_IMPORT override=$POTLUCK_OVERRIDE\" >&2\nexit 1",
+        "echo \"kind=$POTLUCK_KIND role=$POTLUCK_ROLE pusher=$POTLUCK_PUSHER token=$POTLUCK_PUSHER_TOKEN import=$POTLUCK_IMPORT override=$POTLUCK_OVERRIDE\" >&2\nexit 1",
     );
     let work = work_tree(&a.home, "work");
     let bob = a
@@ -280,7 +280,7 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     ));
     assert_eq!(
         hook_line(&out),
-        format!("remote: kind=apinata pusher=bob token={token_id} import=1 override="),
+        format!("remote: kind=apinata role=write pusher=bob token={token_id} import=1 override="),
         "{out}"
     );
     let ws = a
@@ -304,7 +304,9 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     ));
     assert_eq!(
         hook_line(&out),
-        format!("remote: kind=apinata pusher=bob token={token_id} import=1 override={id}"),
+        format!(
+            "remote: kind=apinata role=write pusher=bob token={token_id} import=1 override={id}"
+        ),
         "an armed override reaches the hook: {out}"
     );
     api_workspace(&a.server.api(""), &a.root, "core", "docs", true).await;
@@ -318,7 +320,7 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     ));
     assert_eq!(
         hook_line(&out),
-        format!("remote: kind=apinata pusher=bob token={token_id} import= override="),
+        format!("remote: kind=apinata role=write pusher=bob token={token_id} import= override="),
         "a seeded workspace has no import or override flag: {out}"
     );
     assert_eq!(

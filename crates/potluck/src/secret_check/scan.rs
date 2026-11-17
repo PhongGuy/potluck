@@ -9,6 +9,7 @@ use std::io::Write;
 use potluck_kind::Role;
 
 use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
+use crate::role::Role as AccessRole;
 use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha};
 
 /// What the server told the hook through its environment.
@@ -18,28 +19,43 @@ pub struct HookEnv {
     kind: Option<String>,
     import: bool,
     override_id: Option<String>,
+    role: AccessRole,
 }
 
 impl HookEnv {
-    /// Reads `POTLUCK_KIND` (non-empty), `POTLUCK_IMPORT` (`1` means import) and
-    /// `POTLUCK_OVERRIDE` (non-empty); an unset variable and an empty one mean the same.
+    /// Reads `POTLUCK_KIND` (non-empty), `POTLUCK_IMPORT` (`1` means import),
+    /// `POTLUCK_OVERRIDE` (non-empty) and `POTLUCK_ROLE`; an unset variable and an empty one mean
+    /// the same, and an unset or unknown role is `write`.
     pub fn from_env() -> HookEnv {
         let text = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
+        let role = text("POTLUCK_ROLE")
+            .as_deref()
+            .and_then(AccessRole::parse)
+            .unwrap_or(AccessRole::Write);
         HookEnv::new(
             text("POTLUCK_KIND").as_deref(),
             text("POTLUCK_IMPORT").as_deref() == Some("1"),
             text("POTLUCK_OVERRIDE").as_deref(),
         )
+        .with_role(role)
     }
 
-    /// Builds the environment from its parts; an empty kind or override counts as none.
+    /// Builds the environment from its parts; an empty kind or override counts as none, and the
+    /// pusher's role is `write` until `with_role` says otherwise.
     pub fn new(kind: Option<&str>, import: bool, override_id: Option<&str>) -> HookEnv {
         let non_empty = |v: Option<&str>| v.filter(|s| !s.is_empty()).map(str::to_owned);
         HookEnv {
             kind: non_empty(kind),
             import,
             override_id: non_empty(override_id),
+            role: AccessRole::Write,
         }
+    }
+
+    /// The same environment with the pusher's role set to `role`.
+    #[must_use]
+    pub fn with_role(self, role: AccessRole) -> HookEnv {
+        HookEnv { role, ..self }
     }
 
     /// The workspace kind, if one was given.
@@ -55,6 +71,11 @@ impl HookEnv {
     /// The admin override id, if one applies to this push.
     pub fn override_id(&self) -> Option<&str> {
         self.override_id.as_deref()
+    }
+
+    /// The pusher's role on the workspace.
+    pub fn role(&self) -> AccessRole {
+        self.role
     }
 }
 

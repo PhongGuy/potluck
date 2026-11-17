@@ -45,7 +45,6 @@ pub(crate) async fn run_daily<N, F, Fut>(
 }
 
 /// Spawns the daily check loop for `checker` on `tracker`, ending when `stop` turns true.
-#[expect(dead_code, reason = "no caller until the server wires the checker in")]
 pub(crate) fn spawn_daily(
     checker: UpdateChecker,
     tracker: &TaskTracker,

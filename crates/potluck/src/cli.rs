@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 use crate::admin::AdminArgs;
 use crate::config::{Config, ServeArgs};
 use crate::health_check::HealthArgs;
+use crate::update::UpdateSource;
 
 /// The `potluck` command line.
 #[derive(Parser, Debug)]
@@ -98,7 +99,15 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     // shutdown; `ctrl_c()` would only register once polled.
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    let running = crate::server::start(&config).await?;
+    let running = match UpdateSource::github() {
+        Ok(source) => crate::server::start_with_updates(&config, source).await?,
+        Err(err) => {
+            tracing::error!(
+                "the embedded update keys do not parse ({err}); serving without the update check"
+            );
+            crate::server::start(&config).await?
+        }
+    };
     tracing::info!(
         "listening on http://{} ; admin socket {}",
         running.http_addr(),

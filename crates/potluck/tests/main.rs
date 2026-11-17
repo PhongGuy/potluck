@@ -77,6 +77,7 @@ mod tokens;
 mod update_api;
 mod update_check;
 mod update_keys;
+mod update_server;
 mod update_verify;
 mod users;
 mod users_patch;

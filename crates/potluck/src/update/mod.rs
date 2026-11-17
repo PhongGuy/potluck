@@ -8,7 +8,7 @@ use base64::engine::general_purpose::STANDARD;
 use url::{Host, Url};
 
 mod checker;
-mod schedule;
+pub(crate) mod schedule;
 mod verify;
 
 pub use checker::{UpdateChecker, UpdateStatus};

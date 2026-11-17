@@ -487,3 +487,52 @@ async fn a_ref_notice_carries_exactly_the_contract_bytes() {
         "a live move uses the same bytes"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_closes_when_its_token_expires_and_the_reconnect_is_401() {
+    let a = arena().await;
+    let bob = a
+        .server
+        .db()
+        .user_by_username("bob")
+        .await
+        .unwrap()
+        .unwrap();
+    // Stamps are whole seconds, so this token expires 2 to 3 s from now.
+    let expires = potluck::clock::shift_secs(&potluck::clock::now_rfc3339(), 3).unwrap();
+    let short =
+        crate::common::mint_token(a.server.db(), &bob, "short", Some(expires.as_str())).await;
+    let mut lasting = SseReader::open(&events_url(&a, "api"), &a.bob)
+        .await
+        .unwrap();
+    let mut expiring = SseReader::open(&events_url(&a, "api"), &short)
+        .await
+        .unwrap();
+    for r in [&mut lasting, &mut expiring] {
+        assert_eq!(next(r).await.unwrap(), vec!["retry: 2000"]);
+        next(r).await.unwrap();
+    }
+    assert_eq!(next(&mut expiring).await, None, "the stream ends at expiry");
+    assert!(
+        potluck::clock::now_rfc3339() >= expires,
+        "not before the token expired"
+    );
+    let r = crate::common::client()
+        .get(events_url(&a, "api"))
+        .bearer_auth(&short)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    assert_eq!(r.headers()["www-authenticate"], "Basic realm=\"potluck\"");
+    let body: serde_json::Value = r.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "unauthenticated", "{body}");
+    // The token without an expiry is untouched.
+    let work = work_tree(&a.home, "work");
+    let tip = push(&a, &work, "main:refs/heads/topic");
+    assert_eq!(
+        ref_event(&next(&mut lasting).await.unwrap()),
+        ("refs/heads/topic".to_owned(), tip),
+        "the lasting stream still listens"
+    );
+}

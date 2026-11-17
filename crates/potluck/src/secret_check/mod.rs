@@ -6,8 +6,9 @@ pub mod scan;
 use std::io::{Read, Write};
 use std::process::ExitCode;
 
+use crate::kinds::RuleSet;
 use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
-use crate::secret_check::scan::{HookEnv, ScanError, report, scan};
+use crate::secret_check::scan::{HookEnv, ScanError, accepted_relaxations, report, scan};
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
 /// `Git::from_env()`, writes the report to stderr. Exit 0 accepts; exit 1 refuses. A ref name
@@ -34,6 +35,38 @@ pub fn run_pre_receive() -> ExitCode {
             let _ = writeln!(err, "potluck-error {reason}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Logs, for a push the server accepted from an admin, one info line "safety relaxation
+/// accepted" per relaxation `accepted_relaxations` finds, with `workspace_id`, `pusher`, the ref
+/// (lossy UTF-8) and the rule. A failed re-check logs one warn line instead and never panics.
+pub fn log_accepted_relaxations(
+    workspace_id: i64,
+    pusher: &str,
+    rules: &dyn RuleSet,
+    updates: &[RefUpdate],
+    git: &Git,
+) {
+    match accepted_relaxations(rules, updates, git) {
+        Ok(found) => {
+            for r in found {
+                let ref_name = String::from_utf8_lossy(r.ref_name());
+                tracing::info!(
+                    workspace_id,
+                    pusher,
+                    "ref" = %ref_name,
+                    rule = r.finding().rule(),
+                    "safety relaxation accepted"
+                );
+            }
+        }
+        // The error text may carry git's output, so only the push is named.
+        Err(_) => tracing::warn!(
+            workspace_id,
+            pusher,
+            "could not re-check an accepted admin push"
+        ),
     }
 }
 

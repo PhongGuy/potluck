@@ -62,8 +62,8 @@ impl Access {
     }
 }
 
-/// What bookkeeping needs about an accepted push: the workspace row, who pushed, and the override
-/// the hook was given. The resolver attaches it to a receive-pack `Access`; without it an
+/// What bookkeeping needs about an accepted push: the workspace row and its kind, who pushed, and
+/// the override the hook was given. The resolver attaches it to a receive-pack `Access`; without it an
 /// accepted push is served but not recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -71,6 +71,7 @@ pub struct PushContext {
     workspace_id: i64,
     pusher: String,
     override_id: Option<i64>,
+    kind: Option<String>,
 }
 
 impl PushContext {
@@ -80,7 +81,15 @@ impl PushContext {
             workspace_id,
             pusher: pusher.to_owned(),
             override_id: None,
+            kind: None,
         }
+    }
+
+    /// The workspace's kind.
+    #[must_use]
+    pub fn kind(mut self, kind: &str) -> Self {
+        self.kind = Some(kind.to_owned());
+        self
     }
 
     /// The override id the hook was given, if any.
@@ -103,6 +112,11 @@ impl PushContext {
     /// The override id the hook was given, if any.
     pub fn armed_override(&self) -> Option<i64> {
         self.override_id
+    }
+
+    /// The workspace's kind, when the resolver gave one.
+    pub fn workspace_kind(&self) -> Option<&str> {
+        self.kind.as_deref()
     }
 }
 
@@ -195,7 +209,9 @@ impl GitAccess for DbAccess {
                 access = access.with_hook_env("POTLUCK_OVERRIDE", &id.to_string());
             }
             // The same values the hook was given, so bookkeeping consumes exactly that override.
-            let push = PushContext::new(record.id(), user.user().username()).override_id(armed);
+            let push = PushContext::new(record.id(), user.user().username())
+                .override_id(armed)
+                .kind(record.kind());
             Ok(access.with_push(push))
         })
     }

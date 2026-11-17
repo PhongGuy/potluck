@@ -286,6 +286,28 @@ pub fn scan_with(
     Ok(hits.into_iter().map(|(_, r)| r).collect())
 }
 
+/// The safety relaxations a push the server has already accepted would carry for a non-admin:
+/// the tip pass alone over `updates`, as `Role::Write`, keeping only `safety_relaxation`
+/// findings, in update order. Fails like `scan_with` on a git error or a failing rule set.
+pub fn accepted_relaxations(
+    rules: &dyn RuleSet,
+    updates: &[RefUpdate],
+    git: &Git,
+) -> Result<Vec<Rejection>, ScanError> {
+    if guarded(|| rules.abi())? != RULES_ABI {
+        return Err(ScanError::Rules);
+    }
+    let mut found = Vec::new();
+    for update in updates {
+        for (_, r) in tip_pass(GuardedRules(Some(rules)), update, Role::Write, git)? {
+            if r.finding.code() == Code::SafetyRelaxation {
+                found.push(r);
+            }
+        }
+    }
+    Ok(found)
+}
+
 /// The kind's view of the pusher's role.
 fn kind_role(role: AccessRole) -> Role {
     match role {

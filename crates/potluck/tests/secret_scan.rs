@@ -952,3 +952,71 @@ fn without_a_kind_in_the_env_no_format_pass_runs() {
         "an injected rule set with no kind env is not format-checked"
     );
 }
+
+#[test]
+fn accepted_relaxations_reports_only_the_relaxing_updates() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.commit("relax");
+    s.publish("main");
+    let got = potluck::secret_check::scan::accepted_relaxations(
+        &rules(Act::Relax),
+        &[
+            moved(&old, &new, "refs/heads/main"),
+            update(&new, "refs/heads/copy"),
+        ],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(rows(&got), RELAXED);
+}
+
+#[test]
+fn an_accepted_relaxation_is_logged_with_workspace_ref_user_and_rule() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.commit("relax");
+    s.publish("main");
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            &rules(Act::Relax),
+            &[moved(&old, &new, "refs/heads/main")],
+            &git_for(&s),
+        );
+    });
+    let line = text
+        .lines()
+        .find(|l| l.contains("safety relaxation accepted"))
+        .unwrap_or_else(|| panic!("{text}"));
+    for needle in [
+        " INFO ",
+        "workspace_id=7",
+        "alice",
+        "refs/heads/main",
+        "relax_test",
+    ] {
+        assert!(line.contains(needle), "{needle} in {line}");
+    }
+    let broken = Git::new(PathBuf::from("/nonexistent/git"), Some(s.bare.clone()));
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            &rules(Act::Relax),
+            &[moved(&old, &new, "refs/heads/main")],
+            &broken,
+        );
+    });
+    assert!(
+        text.contains(" WARN ") && text.contains("could not re-check an accepted admin push"),
+        "{text}"
+    );
+}

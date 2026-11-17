@@ -66,15 +66,37 @@ done <<< "$rows"
 
 # The copyright lines of a crate's top-level licence files, without comment prefixes and
 # without the Apache appendix template, which names no real holder.
+licence_files() {
+  find "$1" -maxdepth 1 -xtype f \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' \
+    -o -iname 'COPYRIGHT*' -o -iname 'NOTICE*' \) -print0
+}
 copyright_lines() {
   local files found rc=0
-  mapfile -d '' files < <(find "$1" -maxdepth 1 -xtype f \( -iname 'LICEN[CS]E*' \
-    -o -iname 'COPYING*' -o -iname 'COPYRIGHT*' -o -iname 'NOTICE*' \) -print0)
+  mapfile -d '' files < <(licence_files "$1")
   (( ${#files[@]} )) || return 0
   found=$(grep -hE '^[[:space:]]*(//|#|\*)?[[:space:]]*(Copyright|©)' -- "${files[@]}") || rc=$?
   (( rc <= 1 )) || return "$rc"
   { grep -vE '\[yyyy\]|\{yyyy\}|name of copyright owner' <<< "$found" || true; } |
     sed -E 's/^[[:space:]]*(\/\/|#|\*)?[[:space:]]*//; s/[[:space:]]+$//; /^$/d' | LC_ALL=C sort -u
+}
+
+# A statement wrapped so no line starts with Copyright: each paragraph above an MIT grant
+# that names a copyright, joined into one line.
+copyright_headers() {
+  local files
+  mapfile -d '' files < <(licence_files "$1")
+  (( ${#files[@]} )) || return 0
+  awk '
+    function keep() { if (para ~ /Copyright/) held = held para "\n"; para = "" }
+    FNR == 1 { para = ""; held = ""; done = 0 }
+    done { next }
+    /Permission is hereby granted/ { keep(); printf "%s", held; done = 1; next }
+    /^[[:space:]]*$/ { keep(); next }
+    {
+      line = $0; gsub(/[[:space:]]+/, " ", line); sub(/^ /, "", line); sub(/ $/, "", line)
+      para = para == "" ? line : para " " line
+    }
+  ' "${files[@]}" | LC_ALL=C sort -u
 }
 
 list=''
@@ -85,6 +107,7 @@ while IFS=$'\t' read -r header key; do
   fi
   list+=$header$'\n'
   notes=$(copyright_lines "${dirs[$key]}")
+  [[ -n $notes ]] || notes=$(copyright_headers "${dirs[$key]}")
   if [[ -n $notes ]]; then
     list+=$(sed 's/^/  - /' <<< "$notes")$'\n'
   elif [[ -n ${authors[$key]} ]]; then

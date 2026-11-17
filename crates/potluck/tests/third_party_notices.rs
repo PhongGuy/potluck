@@ -160,6 +160,57 @@ fn prints_each_linked_crate_once_sorted_without_potluck() {
 }
 
 #[test]
+fn joins_a_copyright_statement_wrapped_across_lines() {
+    // Only a header paragraph before the MIT grant that names a copyright counts; one that
+    // does not leaves the crate to its authors.
+    let wrapped = Pkg {
+        name: "wrapped",
+        version: "0.1.0",
+        authors: &[],
+        repository: Some("https://example.com/wrapped"),
+        files: &[(
+            "LICENSE-MIT",
+            "This work is derived in part from the `older` crate, Copyright (c)\n\
+             2015 The Older   Developers\n\nPermission is hereby granted, free of charge\n",
+        )],
+    };
+    let plain = Pkg {
+        name: "plain",
+        version: "0.1.0",
+        authors: &["P Lain"],
+        repository: None,
+        files: &[(
+            "LICENSE-MIT",
+            "The MIT License\n\nPermission is hereby granted, free of charge\n",
+        )],
+    };
+    let tree = format!("{TREE}wrapped v0.1.0|MIT\nplain v0.1.0|MIT\n");
+    let dir = tempfile::tempdir().unwrap();
+    let out = run(
+        &stub_cargo(dir.path(), &tree, &[PKGS, &[wrapped, plain]].concat()),
+        &[],
+        None,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        list.contains(
+            "- `wrapped` 0.1.0: MIT\n  - This work is derived in part from the `older` crate, \
+             Copyright (c) 2015 The Older Developers\n- "
+        ),
+        "wrapped statement not joined: {list}"
+    );
+    assert!(
+        list.contains("- `plain` 0.1.0: MIT\n  - Authors: P Lain\n"),
+        "header without a copyright taken: {list}"
+    );
+}
+
+#[test]
 fn skips_only_path_crates_inside_this_repo() {
     // An in-repo crate is first-party; a path crate elsewhere (a [patch] to a local checkout)
     // is third-party and must still be listed and pass the licence guard.
@@ -474,6 +525,11 @@ fn the_committed_crate_list_is_current() {
             "Copyright (c) 1998-2011 The OpenSSL Project. All rights reserved.",
         ),
         ("anyhow", "Authors: David Tolnay <dtolnay@gmail.com>"),
+        (
+            "hashlink",
+            "This work is derived in part from the `linked-hash-map` crate, \
+             Copyright (c) 2015 The Rust Project Developers",
+        ),
     ] {
         let block = list
             .split("\n- ")

@@ -177,7 +177,7 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
 - `hashbrown` 0.17.1: MIT OR Apache-2.0
   - Copyright (c) 2016 Amanieu d'Antras
 - `hashlink` 0.12.2: MIT OR Apache-2.0
-  - No copyright line or authors published; see https://github.com/djc/hashlink
+  - This work is derived in part from the `linked-hash-map` crate, Copyright (c) 2015 The Rust Project Developers
 - `http-body-util` 0.1.5: MIT
   - Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
 - `http-body` 1.1.0: MIT

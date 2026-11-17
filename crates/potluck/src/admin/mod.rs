@@ -4,6 +4,7 @@ pub mod access;
 pub mod client;
 pub mod output;
 pub mod teams;
+pub mod update;
 pub mod users;
 
 use std::io::{self, Read, Write};
@@ -52,6 +53,9 @@ pub enum Noun {
     /// One-push exemptions from the secret check.
     #[command(subcommand)]
     Override(access::OverrideCmd),
+    /// Whether a newer signed release exists.
+    #[command(subcommand)]
+    Update(update::UpdateCmd),
 }
 
 /// Why a command failed; `main` prints it after `error: `.
@@ -143,6 +147,7 @@ pub async fn run(
         Noun::Workspace(cmd) => teams::run_workspace(cmd, &mut cx).await,
         Noun::Grant(cmd) => access::run_grant(cmd, &mut cx).await,
         Noun::Override(cmd) => access::run_override(cmd, &mut cx).await,
+        Noun::Update(cmd) => update::run(cmd, &mut cx).await,
     }
 }
 

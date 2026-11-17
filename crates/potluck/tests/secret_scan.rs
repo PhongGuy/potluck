@@ -857,6 +857,29 @@ fn a_history_pass_relaxation_is_refused_for_write_and_dropped_for_admin() {
 }
 
 #[test]
+fn an_import_update_still_gets_the_tip_pass() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.stage_commit("relax");
+    let import = HookEnv::new(None, true, None);
+    assert_eq!(
+        rows(
+            &scan_with(
+                &import,
+                Some(&rules(Act::Relax)),
+                &[moved(&old, &new, "refs/heads/main")],
+                &git_for(&s),
+            )
+            .unwrap()
+        ),
+        RELAXED
+    );
+}
+
+#[test]
 fn a_created_ref_has_no_baseline_and_a_delete_is_not_checked() {
     let s = Scratch::new();
     s.write("a.t", b"relaxed\n");

@@ -7,6 +7,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use url::{Host, Url};
 
+mod verify;
+
+pub use verify::{Release, verify_release};
+
 /// The container image a release is published as.
 pub const IMAGE: &str = "ghcr.io/phongguy/potluck";
 /// Where the latest release's files are downloaded from.

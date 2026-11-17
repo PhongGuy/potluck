@@ -216,6 +216,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends minisign=0.12-1build1
+      # Signs only a manifest that names this tag's version and the merged digest; a mismatch
+      # stops the job before the signing secrets are read.
+      - name: Check the manifest names this tag and digest
+        working-directory: ${{ runner.temp }}/release
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+        run: |
+          jq -e --arg v "${REF_NAME#v}" --arg d "$DIGEST" '.version == $v and .digest == $d' potluck-release.json
       # The secret is a base64 minisign key box and the .sig file is the signature box
       # base64-wrapped onto one line. Builtins pipe both secrets, so neither touches disk
       # or a process's arguments.

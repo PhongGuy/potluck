@@ -367,3 +367,38 @@ fn the_signing_secrets_reach_minisign_only_through_env_and_pipes() {
         1
     );
 }
+
+#[test]
+fn sign_checks_the_manifest_names_this_tag_and_digest_before_signing() {
+    let jobs = release();
+    let sign = job(&jobs, "sign");
+    let check = step(
+        sign,
+        "'.version == $v and .digest == $d' potluck-release.json",
+    );
+    for needle in [
+        "REF_NAME: ${{ github.ref_name }}",
+        "DIGEST: ${{ needs.merge.outputs.digest }}",
+        "jq -e --arg v \"${REF_NAME#v}\" --arg d \"$DIGEST\"",
+    ] {
+        assert!(
+            check.contains(needle),
+            "the check lacks {needle:?}: {check}"
+        );
+    }
+    assert!(!check.contains("if:"), "the check is conditional: {check}");
+    assert!(
+        !check.contains("CARGO_PACKAGER_SIGN"),
+        "the check sees the key"
+    );
+    let run = &check[check.find("run: |").expect("no run block")..];
+    assert!(
+        !run.contains("${{"),
+        "the check interpolates an expression: {run}"
+    );
+    let at = sign.find("'.version == $v and .digest == $d'").unwrap();
+    assert!(
+        at < sign.find("minisign -S").unwrap(),
+        "the check comes after signing"
+    );
+}

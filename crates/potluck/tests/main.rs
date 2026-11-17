@@ -57,6 +57,7 @@ mod notices;
 mod objects;
 mod overrides;
 mod password;
+mod public_api;
 mod push_bookkeeping;
 mod push_refs;
 mod rate_limit;

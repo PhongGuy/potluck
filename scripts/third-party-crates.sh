@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Print the Rust crates linked into the potluck release binary, one Markdown line per crate
-# with its licence, or with --write replace the marked block in THIRD_PARTY_NOTICES.md.
+# with its licence and, beneath it, its copyright lines, or with --write replace the marked
+# block in THIRD_PARTY_NOTICES.md.
 # A crate whose licence falls outside the allowlist fails the run instead of being listed.
 set -euo pipefail
 
@@ -20,8 +21,7 @@ esac
 tree=$(cd "$root" && "${CARGO:-cargo}" tree -p potluck -e normal,no-proc-macro \
   --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu \
   --prefix none -f '{p}|{l}' --color never --frozen)
-
-lines=()
+entries=()
 bad=0
 while IFS= read -r line; do
   [[ -z $line ]] && continue
@@ -43,19 +43,70 @@ while IFS= read -r line; do
     echo "third-party-crates.sh: $name $version has licence '$licence' outside the allowlist" >&2
     bad=1
   fi
-  lines+=("- \`$name\` $version: $licence")
+  entries+=("- \`$name\` $version: $licence"$'\t'"$name ${version%% *}")
 done <<< "$tree"
 (( bad )) && exit 1
+if (( ! ${#entries[@]} )); then
+  echo "third-party-crates.sh: cargo tree listed no third-party crates" >&2
+  exit 1
+fi
 
-list=$(printf '%s\n' "${lines[@]}" | LC_ALL=C sort -u)
+# Metadata locates each crate's source, authors and repository; filtered to the two image
+# targets it needs only the sources tree already required, so it runs offline.
+meta=$(cd "$root" && "${CARGO:-cargo}" metadata --format-version 1 --frozen \
+  --filter-platform x86_64-unknown-linux-gnu --filter-platform aarch64-unknown-linux-gnu)
+rows=$(jq -r '.packages[] | [.name + " " + .version, (.manifest_path | rtrimstr("/Cargo.toml")),
+  (.authors | join(", ")), (.repository // "")] | join("\u001f")' <<< "$meta")
+# A unit separator, unlike a tab, keeps an empty authors or repository field in its place.
+declare -A dirs authors repos
+while IFS=$'\x1f' read -r key dir who repo; do
+  [[ -z $key ]] && continue
+  dirs[$key]=$dir authors[$key]=$who repos[$key]=$repo
+done <<< "$rows"
+
+# The copyright lines of a crate's top-level licence files, without comment prefixes and
+# without the Apache appendix template, which names no real holder.
+copyright_lines() {
+  local files found rc=0
+  mapfile -d '' files < <(find "$1" -maxdepth 1 -xtype f \( -iname 'LICEN[CS]E*' \
+    -o -iname 'COPYING*' -o -iname 'COPYRIGHT*' -o -iname 'NOTICE*' \) -print0)
+  (( ${#files[@]} )) || return 0
+  found=$(grep -hE '^[[:space:]]*(//|#|\*)?[[:space:]]*(Copyright|©)' -- "${files[@]}") || rc=$?
+  (( rc <= 1 )) || return "$rc"
+  { grep -vE '\[yyyy\]|\{yyyy\}|name of copyright owner' <<< "$found" || true; } |
+    sed -E 's/^[[:space:]]*(\/\/|#|\*)?[[:space:]]*//; s/[[:space:]]+$//; /^$/d' | LC_ALL=C sort -u
+}
+
+list=''
+while IFS=$'\t' read -r header key; do
+  if [[ ! -v dirs[$key] ]]; then
+    echo "third-party-crates.sh: cargo metadata lacks $key" >&2
+    exit 1
+  fi
+  list+=$header$'\n'
+  notes=$(copyright_lines "${dirs[$key]}")
+  if [[ -n $notes ]]; then
+    list+=$(sed 's/^/  - /' <<< "$notes")$'\n'
+  elif [[ -n ${authors[$key]} ]]; then
+    list+="  - Authors: ${authors[$key]}"$'\n'
+  elif [[ -n ${repos[$key]} ]]; then
+    list+="  - No copyright line or authors published; see ${repos[$key]}"$'\n'
+  else
+    list+="  - No copyright line, authors or repository published"$'\n'
+  fi
+done < <(printf '%s\n' "${entries[@]}" | LC_ALL=C sort -u)
+list=${list%$'\n'}
 
 if (( ! write )); then
   printf '%s\n' "$list"
   exit 0
 fi
 
-if ! grep -qxF "$begin" "$notices" || ! grep -qxF "$end" "$notices"; then
-  echo "third-party-crates.sh: $notices lacks the $begin and $end markers" >&2
+# Exactly one begin marker must precede exactly one end marker, or the block is ambiguous.
+begins=$(grep -nxF "$begin" "$notices" | cut -d: -f1 || true)
+ends=$(grep -nxF "$end" "$notices" | cut -d: -f1 || true)
+if [[ ! $begins =~ ^[0-9]+$ || ! $ends =~ ^[0-9]+$ ]] || (( begins >= ends )); then
+  echo "third-party-crates.sh: $notices needs one $begin line before one $end line" >&2
   exit 1
 fi
 # Build the new file beside the old one and move it over, so a failure leaves the old file.

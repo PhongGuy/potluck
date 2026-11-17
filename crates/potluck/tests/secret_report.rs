@@ -181,6 +181,17 @@ fn a_detail_line_follows_its_reject_line_encoded() {
 }
 
 #[test]
+fn an_empty_detail_prints_no_detail_line() {
+    assert_eq!(
+        text(&[detailed(b"dbento.toml", ""), env_file(b".env")]),
+        concat!(
+            "potluck-reject secret_value refs/heads/main dbento.toml password_key\n",
+            "potluck-reject secret_env_file refs/heads/main .env env_file\n",
+        )
+    );
+}
+
+#[test]
 fn a_detail_is_capped_at_200_bytes_on_a_character_boundary() {
     let long = format!("{}\u{e9}tail", "a".repeat(199));
     let out = text(&[detailed(b"f", &long)]);

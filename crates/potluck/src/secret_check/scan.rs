@@ -596,7 +596,7 @@ pub const MAX_DETAIL_BYTES: usize = 200;
 /// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
 /// exactly five fields. A finding without a tree path (a commit or tag message, or a tag whose
 /// target is a blob) carries the path `/`, which the encoding leaves as is and which no git
-/// tree path can start with. A finding with a detail is followed by
+/// tree path can start with. A finding with a non-empty detail is followed by
 /// `potluck-reject-detail <detail>\n`, the detail cut to at most `MAX_DETAIL_BYTES` on a
 /// character boundary and then encoded the same way; detail lines do not count toward the cap.
 pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result<()> {
@@ -609,7 +609,7 @@ pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result
             percent_encode(&r.path),
             r.finding.rule(),
         )?;
-        if let Some(detail) = r.finding.detail() {
+        if let Some(detail) = r.finding.detail().filter(|d| !d.is_empty()) {
             // Cut before encoding, so the cap bounds the rule set's text, not its escapes.
             let cut = &detail[..detail.floor_char_boundary(MAX_DETAIL_BYTES)];
             writeln!(

@@ -412,3 +412,92 @@ fn tip_diff_reads_a_gitlink_on_the_old_side_as_absent() {
         "a gitlink replaced by a blob has no blob on the old side"
     );
 }
+
+/// Whether `pid` (one this test started) still answers `kill -0`.
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn a_git_child_past_its_run_limit_is_killed_with_its_group_and_fails() {
+    let s = Scratch::new();
+    let leader = s.dir.path().join("leader.pid");
+    let helper = s.dir.path().join("helper.pid");
+    // A "git" that leaves a grandchild in its group, then outlives any sane limit itself.
+    let script = s.script(
+        "slow-git",
+        &format!(
+            "echo $$ > '{}'\nsleep 300 &\necho $! > '{}'\nexec sleep 300\n",
+            leader.display(),
+            helper.display()
+        ),
+    );
+    let git = Git::new(script, None).with_max_runtime(std::time::Duration::from_secs(1));
+    let a = sha(&"a".repeat(40));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    std::thread::spawn(move || {
+        let _ = tx.send(git.tip_diff(&a, &a));
+    });
+    let got = rx.recv_timeout(std::time::Duration::from_secs(20));
+    let pids: Vec<String> = [&leader, &helper]
+        .iter()
+        .map(|p| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        })
+        .collect();
+    let Ok(result) = got else {
+        // Never leave this test's own sleepers behind on a failed run.
+        for pid in pids.iter().filter(|p| !p.is_empty()) {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", pid])
+                .status();
+        }
+        panic!("tip_diff past its run limit did not return within 20 s");
+    };
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        matches!(
+            result,
+            Err(GitCmdError::Failed { .. } | GitCmdError::Output { .. })
+        ),
+        "a killed git is an error, never an empty success: {result:?}"
+    );
+    // The orphaned helper is reaped by whoever adopts it, so give that a moment.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while pids.iter().any(|p| alive(p)) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    for pid in &pids {
+        assert!(!pid.is_empty() && !alive(pid), "pid {pid} still runs");
+    }
+}
+
+#[test]
+fn a_run_limit_leaves_a_quick_git_alone() {
+    let s = Scratch::new();
+    s.write("a.t", b"one\n");
+    let old = s.commit("old");
+    s.write("a.t", b"two\n");
+    let new = s.commit("new");
+    s.publish("main");
+    let plain = git_for(&s).tip_diff(&sha(&old), &sha(&new)).unwrap();
+    let limited = git_for(&s)
+        .with_max_runtime(std::time::Duration::from_secs(60))
+        .tip_diff(&sha(&old), &sha(&new))
+        .unwrap();
+    assert_eq!(plain.len(), 1);
+    assert_eq!(limited, plain, "a generous limit never kills early");
+}

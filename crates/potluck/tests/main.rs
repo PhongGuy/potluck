@@ -53,6 +53,7 @@ mod name_checks;
 mod notices;
 mod objects;
 mod overrides;
+mod panic_hook;
 mod password;
 mod public_api;
 mod push_bookkeeping;

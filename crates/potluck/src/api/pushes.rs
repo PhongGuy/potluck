@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 
 use crate::api::AppState;
+use crate::git::GitEngine;
 use crate::git::access::PushContext;
 use crate::git::push::RefMove;
-use crate::kinds;
+use crate::kinds::{self, RuleSet};
 use crate::role::Role;
 use crate::secret_check::git::{Git, RefUpdate};
 
@@ -96,17 +97,52 @@ pub(crate) async fn recheck_admin_push(
     if updates.is_empty() {
         return;
     }
-    let git = Git::new(state.git().repos().git().to_path_buf(), Some(repo));
-    let workspace_id = push.workspace_id();
-    let pusher = push.pusher().to_owned();
-    let done = tokio::task::spawn_blocking(move || {
-        crate::secret_check::log_accepted_relaxations(workspace_id, &pusher, rules, &updates, &git);
-    })
+    recheck(
+        state.git(),
+        push.workspace_id(),
+        push.pusher(),
+        rules,
+        repo,
+        updates,
+    )
     .await;
-    if done.is_err() {
+}
+
+/// The re-check itself: `log_accepted_relaxations` over `repo` on a blocking thread, holding
+/// one of the engine's process slots throughout and with each git child under the engine's run
+/// limit. It waits for a slot without a timeout: the push is accepted, so its audit line should
+/// not drop under load. A re-check that cannot finish logs the warn line.
+pub(crate) async fn recheck(
+    engine: &GitEngine,
+    workspace_id: i64,
+    pusher: &str,
+    rules: &'static dyn RuleSet,
+    repo: PathBuf,
+    updates: Vec<RefUpdate>,
+) {
+    let slot = engine.slot().await;
+    let git = Git::new(engine.repos().git().to_path_buf(), Some(repo))
+        .with_max_runtime(engine.max_runtime());
+    let owned = pusher.to_owned();
+    let done = match slot {
+        Some(slot) => tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            crate::secret_check::log_accepted_relaxations(
+                workspace_id,
+                &owned,
+                rules,
+                &updates,
+                &git,
+            );
+        })
+        .await
+        .is_ok(),
+        None => false,
+    };
+    if !done {
         tracing::warn!(
             workspace_id,
-            pusher = push.pusher(),
+            pusher,
             "could not re-check an accepted admin push"
         );
     }

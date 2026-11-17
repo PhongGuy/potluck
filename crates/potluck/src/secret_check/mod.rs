@@ -76,6 +76,21 @@ pub fn quiet_panics() {
     std::panic::set_hook(Box::new(|_| {}));
 }
 
+/// Installs, once, a panic hook that prints nothing for a panic inside a rule-set call and
+/// hands every other panic to the hook that was there before. The scan already turns such a
+/// panic into `ScanError::Rules`, and the caller logs that.
+pub fn quiet_rule_panics() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !scan::in_rule_call() {
+                previous(info);
+            }
+        }));
+    });
+}
+
 /// Why `check` refused the push without a scan report.
 enum Refusal {
     /// A pushed ref name is not valid UTF-8; the whole push is refused on the name alone.

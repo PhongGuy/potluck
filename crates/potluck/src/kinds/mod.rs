@@ -84,6 +84,12 @@ pub fn by_name(name: &str) -> Option<&'static dyn Kind> {
     }
 }
 
+/// Every in-tree rule set, as the potluck-kind contract sees it.
+pub fn all() -> &'static [&'static dyn potluck_kind::RuleSet] {
+    static ALL: [&dyn potluck_kind::RuleSet; 1] = [&apinata::Apinata];
+    &ALL
+}
+
 /// A kind's own rules and seed. The generic set runs for every kind before these.
 pub trait Kind: Send + Sync + std::fmt::Debug {
     /// The kind's name as `POTLUCK_KIND` and the workspace record carry it.

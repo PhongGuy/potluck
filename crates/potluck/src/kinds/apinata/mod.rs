@@ -61,6 +61,91 @@ impl Kind for Apinata {
     }
 }
 
+impl potluck_kind::RuleSet for Apinata {
+    fn kind(&self) -> &'static str {
+        "apinata"
+    }
+
+    fn abi(&self) -> u32 {
+        potluck_kind::RULES_ABI
+    }
+
+    fn formats(&self) -> &'static [&'static str] {
+        &["1.0.0"]
+    }
+
+    fn format_file(&self) -> &'static str {
+        "opencollection.yml"
+    }
+
+    fn detect_format(&self, format_file: &[u8]) -> Option<String> {
+        detect_format(format_file)
+    }
+
+    /// No path rule of its own: `.env` belongs to the generic set.
+    fn path_rule(&self, _path: &str) -> Option<potluck_kind::Finding> {
+        None
+    }
+
+    fn reads(&self, path: &str) -> bool {
+        is_environment_file(path)
+    }
+
+    /// The environment rule on the new side of an environment file; a deleted file passes.
+    /// Baseline and role do not matter, and a blob the hook did not read is `env_unparsable`.
+    fn check(&self, change: &potluck_kind::Change<'_>) -> Vec<potluck_kind::Finding> {
+        let path = change.path();
+        if !is_environment_file(path) {
+            return Vec::new();
+        }
+        let found = match change.new_blob() {
+            None => None,
+            Some(potluck_kind::Blob::Bytes(blob)) => environment_rule(blob, NODE_CAP),
+            // An unread blob, or any side this version does not know, cannot be vouched for.
+            Some(_) => Some(Finding::new(Code::SecretValue, ENV_UNPARSABLE)),
+        };
+        found
+            .map(|f| potluck_kind::Finding::new(contract_code(f.code()), f.rule(), path))
+            .into_iter()
+            .collect()
+    }
+
+    fn seed(&self) -> Vec<potluck_kind::SeedFile> {
+        seed()
+            .into_iter()
+            .map(|f| potluck_kind::SeedFile::new(f.path(), f.bytes()))
+            .collect()
+    }
+}
+
+fn contract_code(code: Code) -> potluck_kind::Code {
+    match code {
+        Code::EnvFile => potluck_kind::Code::EnvFile,
+        Code::SecretValue => potluck_kind::Code::SecretValue,
+        Code::SecretPattern => potluck_kind::Code::SecretPattern,
+    }
+}
+
+/// The format version `opencollection.yml` declares: the first top-level `opencollection:`
+/// line's value, with a trailing ` #` comment and one pair of matching quotes removed.
+/// `None` for bytes that are not UTF-8, no such line, or an empty value.
+pub fn detect_format(bytes: &[u8]) -> Option<String> {
+    // A line scan, not a YAML parse: the version must be readable even when the rest of the
+    // file is not, and only a key at column 0 is top level.
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let line = text
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .find_map(|l| l.strip_prefix("opencollection:"))?;
+    let value = line.split_once(" #").map_or(line, |(v, _)| v).trim();
+    let value = ['"', '\'']
+        .iter()
+        .find_map(|q| value.strip_prefix(*q)?.strip_suffix(*q))
+        .unwrap_or(value);
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
 /// Nodes one document may hold after alias expansion: every scalar, sequence and mapping
 /// built, keys included, each alias expansion counted again. Above it the file is
 /// `env_unparsable`, as Apinata's loader refuses it.

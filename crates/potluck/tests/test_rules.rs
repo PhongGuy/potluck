@@ -11,6 +11,8 @@ pub enum Act {
     BadPathRuleName,
     Plain,
     BadRuleName,
+    BadLaterFinding,
+    EmptyRuleName,
     Detail(&'static str),
     Elsewhere,
     Relax,
@@ -71,6 +73,11 @@ impl RuleSet for TestRules {
             Act::Detail(d) => {
                 vec![Finding::new(Code::SecretValue, "with_detail", p).with_detail(d)]
             }
+            Act::BadLaterFinding => vec![
+                Finding::new(Code::SecretValue, "plain", p),
+                Finding::new(Code::SecretValue, "Bad Later", p),
+            ],
+            Act::EmptyRuleName => vec![Finding::new(Code::SecretValue, "", p)],
             Act::Elsewhere => vec![Finding::new(
                 Code::SecretValue,
                 "elsewhere",

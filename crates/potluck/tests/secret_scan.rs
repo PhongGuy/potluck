@@ -830,6 +830,28 @@ fn a_misnamed_path_rule_finding_fails_closed() {
 }
 
 #[test]
+fn a_malformed_finding_after_a_valid_one_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::BadLaterFinding), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
+fn an_empty_rule_name_fails_closed() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    assert!(matches!(
+        scan_rules(&s, &rules(Act::EmptyRuleName), &tip),
+        Err(ScanError::Rules)
+    ));
+}
+
+#[test]
 fn a_rule_set_detail_reaches_the_rejection() {
     let s = Scratch::new();
     s.write("a.t", b"x\n");

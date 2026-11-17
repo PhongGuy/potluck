@@ -1,5 +1,6 @@
 # Builds the container image natively on amd64 and arm64 from a v* tag, merges the two into
-# one manifest list on GHCR, attests its digest and drafts a release a human publishes.
+# one manifest list on GHCR, attests its digest, signs a release manifest naming its digest
+# and drafts a release a human publishes.
 name: Release
 
 on:
@@ -46,12 +47,14 @@ jobs:
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           cache-binary: false
-      # A publishing run refuses a malformed tag here, before it logs in or pushes anything.
+      # A publishing run refuses a malformed tag, or one that differs from the workspace version,
+      # here, before it logs in or pushes anything.
       - id: meta
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           if [[ $PUBLISH == true ]]; then scripts/release.sh version "$REF_NAME" > /dev/null; fi
+          if [[ $PUBLISH == true ]]; then scripts/release.sh check-version "$REF_NAME"; fi
           echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
       # Loaded into the local daemon for the smoke test; attestations need the registry exporter.
@@ -158,18 +161,41 @@ jobs:
       - id: index
         env:
           REF_NAME: ${{ github.ref_name }}
-        # Fails closed: a failed inspect or a malformed digest stops here, not in attest or draft.
+        # Fails closed: a failed inspect or a malformed digest stops here, not in manifest, sign or draft.
         run: |
           set -euo pipefail
           digest=$(docker buildx imagetools inspect "$IMAGE:$REF_NAME" --format '{{json .Manifest}}' |
             jq -re '.digest | select(test("^sha256:[0-9a-f]{64}$"))')
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-  # The only job bound to the release environment: it builds nothing and checks nothing out.
-  attest:
+  # Writes the unsigned release manifest; it holds no secret and needs only the repository.
+  manifest:
     needs: merge
-    # actions/attest needs a public repository; a private one skips here and drafts without it.
-    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && !github.event.repository.private }}
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - env:
+          REF_NAME: ${{ github.ref_name }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/release"
+          scripts/release.sh manifest "$REF_NAME" "$DIGEST" "$RUNNER_TEMP/release/potluck-release.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manifest-unsigned
+          path: ${{ runner.temp }}/release/potluck-release.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # The only job bound to the release environment: it signs the manifest and attests the
+  # image, and checks out and runs nothing from the repository.
+  sign:
+    needs: [merge, manifest]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment: release
@@ -179,21 +205,58 @@ jobs:
       attestations: write # store the attestation
       artifact-metadata: write # link it to the image
       packages: write # push the attestation beside the image
+    outputs:
+      attested: ${{ steps.attest.outcome == 'success' }}
     steps:
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: manifest-unsigned
+          path: ${{ runner.temp }}/release
+      - name: Install minisign
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends minisign=0.12-1build1
+      # The secret is a base64 minisign key box and the .sig file is the signature box
+      # base64-wrapped onto one line. Builtins pipe both secrets, so neither touches disk
+      # or a process's arguments.
+      - name: Sign the release manifest
+        shell: bash
+        working-directory: ${{ runner.temp }}/release
+        env:
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
+          CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
+        run: |
+          printf '%s\n' "$CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD" |
+            minisign -S -s <(printf '%s' "$CARGO_PACKAGER_SIGN_PRIVATE_KEY" | base64 -d) \
+              -m potluck-release.json -x potluck-release.json.minisig
+          base64 -w0 potluck-release.json.minisig > potluck-release.json.sig
+          rm potluck-release.json.minisig
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: manifest-signed
+          path: |
+            ${{ runner.temp }}/release/potluck-release.json
+            ${{ runner.temp }}/release/potluck-release.json.sig
+          if-no-files-found: error
+          retention-days: 1
+      # actions/attest needs a public repository; a private one signs and drafts without it.
+      - if: ${{ !github.event.repository.private }}
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      - if: ${{ !github.event.repository.private }}
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ needs.merge.outputs.digest }}
           push-to-registry: true
 
   draft:
-    needs: [merge, attest]
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run && needs.merge.result == 'success' && (needs.attest.result == 'success' || needs.attest.result == 'skipped') }}
+    needs: [merge, sign]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
@@ -203,17 +266,24 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: manifest-signed
+          path: ${{ runner.temp }}/release
       - env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
           DIGEST: ${{ needs.merge.outputs.digest }}
-          ATTESTED: ${{ needs.attest.result == 'success' }}
+          ATTESTED: ${{ needs.sign.outputs.attested }}
         run: |
           [[ $DIGEST =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no index digest from merge: '$DIGEST'"; exit 1; }
           version=$(scripts/release.sh version "$REF_NAME")
+          # Attach only the manifest this tag and digest produced.
+          jq -e --arg v "$version" --arg d "$DIGEST" '.version == $v and .digest == $d' "$RUNNER_TEMP/release/potluck-release.json"
           scripts/release.sh notes "$REF_NAME" "$GITHUB_REPOSITORY" "$DIGEST" release-notes.md
           # A pre-release tag such as v1.0.0-rc.1 must never become the repository's Latest release.
           flags=(--draft --verify-tag)
           if [[ $REF_NAME == *-* ]]; then flags+=(--prerelease); fi
           gh release create "$REF_NAME" --repo "$GITHUB_REPOSITORY" "${flags[@]}" \
-            --title "Potluck $version" --notes-file release-notes.md
+            --title "Potluck $version" --notes-file release-notes.md \
+            "$RUNNER_TEMP/release/potluck-release.json" "$RUNNER_TEMP/release/potluck-release.json.sig"

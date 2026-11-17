@@ -711,6 +711,54 @@ fn panic_child() {
     ));
 }
 
+/// Re-runs this test binary on `role_child` once per `POTLUCK_ROLE` value, since the hook reads
+/// its role from the process environment.
+#[test]
+fn the_hook_reads_its_role_from_potluck_role_and_falls_back_to_write() {
+    let cases: [(Option<&str>, &str); 7] = [
+        (None, "write"),
+        (Some(""), "write"),
+        (Some("admin"), "admin"),
+        (Some("write"), "write"),
+        (Some("read"), "read"),
+        (Some("Admin"), "write"),
+        (Some("owner"), "write"),
+    ];
+    for (value, expected) in cases {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "secret_scan::role_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("POTLUCK_TEST_ROLE_CHILD", expected)
+        .env_remove("POTLUCK_ROLE");
+        if let Some(v) = value {
+            cmd.env("POTLUCK_ROLE", v);
+        }
+        let out = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{value:?}: {stdout}{stderr}");
+        assert!(
+            stdout.contains("1 passed"),
+            "{value:?}: the child ran: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn role_child() {
+    let Some(expected) = std::env::var_os("POTLUCK_TEST_ROLE_CHILD") else {
+        return;
+    };
+    assert_eq!(
+        HookEnv::from_env().role().as_str(),
+        expected.to_str().unwrap()
+    );
+}
+
 #[test]
 fn a_panic_in_reads_fails_closed() {
     // A blob the server already has is content-checked at a new path only if the kind reads it,

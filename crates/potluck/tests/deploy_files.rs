@@ -489,6 +489,26 @@ fn the_image_runs_tini_as_pid_1_in_front_of_potluck() {
     );
 }
 
+/// The licences travel with every copy of the binary, in Debian's documentation path.
+#[test]
+fn the_image_carries_the_licences_and_the_notices() {
+    let text = containerfile();
+    let line = "COPY LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md /usr/share/doc/potluck/";
+    let runtime = text.rfind("\nFROM ").expect("no runtime stage");
+    assert!(
+        text[runtime..].lines().any(|l| l == line),
+        "the runtime stage lacks {line:?}"
+    );
+    let ignore = fs::read_to_string(repo_root().join(".dockerignore")).unwrap();
+    for file in ["LICENSE-MIT", "LICENSE-APACHE", "THIRD_PARTY_NOTICES.md"] {
+        assert!(repo_root().join(file).is_file(), "{file} is missing");
+        assert!(
+            !ignore.lines().any(|l| l.trim() == file || l.trim() == "*"),
+            ".dockerignore drops {file}"
+        );
+    }
+}
+
 #[test]
 fn the_smoke_test_checks_reaping_and_a_graceful_stop() {
     let script = fs::read_to_string(repo_root().join("scripts/container-smoke.sh")).unwrap();

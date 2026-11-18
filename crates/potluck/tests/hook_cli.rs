@@ -75,7 +75,7 @@ fn an_unknown_kind_refuses_with_one_error_line() {
     let s = Scratch::new();
     s.write("README", b"r\n");
     let tip = s.stage_commit("r");
-    let out = run_hook(&s, &[("POTLUCK_KIND", "dbento")], &line(&tip));
+    let out = run_hook(&s, &[("POTLUCK_KIND", "no-such-kind")], &line(&tip));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(stderr(&out), "potluck-error unsupported kind\n");
 }

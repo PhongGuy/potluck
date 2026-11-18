@@ -122,7 +122,6 @@ async fn creation_is_validated_and_leaves_no_directory_behind() {
         ("slug", json!("-x")),
         ("name", json!("  ")),
         ("name", json!("n".repeat(201))),
-        ("kind", json!("dbento")),
         ("kind", json!("nope")),
         ("default_branch", json!("")),
         ("default_branch", json!("-x")),

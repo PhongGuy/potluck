@@ -723,14 +723,14 @@ fn an_unknown_kind_is_refused_unless_every_update_is_a_delete() {
     s.write("README", b"r\n");
     let tip = s.stage_commit("r");
     let res = scan(
-        &env(Some("dbento")),
+        &env(Some("no-such-kind")),
         &[update(&tip, "refs/heads/main")],
         &git_for(&s),
     );
     assert!(matches!(res, Err(ScanError::UnsupportedKind)));
     let delete = RefUpdate::parse_line(format!("{tip} {ZERO} refs/heads/gone").as_bytes()).unwrap();
     assert!(
-        scan(&env(Some("dbento")), &[delete], &git_for(&s))
+        scan(&env(Some("no-such-kind")), &[delete], &git_for(&s))
             .unwrap()
             .is_empty()
     );

@@ -141,6 +141,10 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2021-2026 RustCrypto Developers
 - `ctutils` 0.4.8: Apache-2.0 OR MIT
   - Copyright (c) 2025-2026 The RustCrypto Project Developers
+- `dbento-rules` 0.1.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#fb3a851d): MIT OR Apache-2.0
+  - No copyright line, authors or repository published
+- `dbento-workspace` 0.2.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#fb3a851d): MIT OR Apache-2.0
+  - No copyright line, authors or repository published
 - `digest` 0.11.3: MIT OR Apache-2.0
   - Copyright (c) 2017 Artyom Pavlov
   - Copyright (c) 2017-2025 RustCrypto Developers
@@ -195,6 +199,10 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2015-2025 Sean McArthur
 - `httpdate` 1.0.3: MIT OR Apache-2.0
   - Copyright (c) 2016 Pyfisch
+- `humantime` 2.4.0: MIT OR Apache-2.0
+  - Copyright (c) 2016 Pyfisch
+  - Copyright (c) 2016 The humantime Developers
+  - Copyright © 2005-2013 Rich Felker
 - `hybrid-array` 0.4.15: MIT OR Apache-2.0
   - Copyright (c) 2022-2026 The RustCrypto Project Developers
 - `hyper-rustls` 0.27.10: Apache-2.0 OR ISC OR MIT
@@ -324,6 +332,9 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - No copyright line or authors published; see https://github.com/serde-rs/json
 - `serde_path_to_error` 0.1.20: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
+- `serde_spanned` 1.1.3: MIT OR Apache-2.0
+  - Copyright (c) Individual contributors
+  - Copyright Individual contributors
 - `serde` 1.0.229: MIT OR Apache-2.0
   - Authors: Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
 - `sha2` 0.11.1: MIT OR Apache-2.0
@@ -369,6 +380,18 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) Tokio Contributors
 - `tokio` 1.54.1: MIT
   - Copyright (c) Tokio Contributors
+- `toml_datetime` 1.1.3+spec-1.1.0: MIT OR Apache-2.0
+  - Copyright (c) Individual contributors
+  - Copyright Individual contributors
+- `toml_parser` 1.1.5+spec-1.1.0: MIT OR Apache-2.0
+  - Copyright (c) Individual contributors
+  - Copyright Individual contributors
+- `toml_writer` 1.2.0+spec-1.1.0: MIT OR Apache-2.0
+  - Copyright (c) Individual contributors
+  - Copyright Individual contributors
+- `toml` 1.2.1+spec-1.1.0: MIT OR Apache-2.0
+  - Copyright (c) Individual contributors
+  - Copyright Individual contributors
 - `tower-http` 0.6.11: MIT
   - Copyright (c) 2019-2021 Tower Contributors
 - `tower-layer` 0.3.3: MIT
@@ -403,6 +426,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright Mozilla Foundation
 - `want` 0.3.2: MIT
   - Copyright (c) 2018-2019 Sean McArthur
+- `winnow` 1.0.5: MIT
+  - No copyright line or authors published; see https://github.com/winnow-rs/winnow
 - `writeable` 0.6.4: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
 - `yaml_serde` 0.10.7: MIT OR Apache-2.0

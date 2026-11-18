@@ -20,12 +20,30 @@ fn every_rule_set_targets_this_abi() {
 }
 
 #[test]
-fn apinata_is_the_only_kind_and_states_its_contract() {
+fn apinata_and_dbento_are_the_kinds_and_state_their_contracts() {
     let kinds: Vec<&str> = all().iter().map(|k| k.kind()).collect();
-    assert_eq!(kinds, ["apinata"]);
+    assert_eq!(kinds, ["apinata", "dbento"]);
     assert_eq!(
         (apinata().formats(), apinata().format_file()),
         (&["1.0.0"] as &[&str], "opencollection.yml")
+    );
+    let dbento = by_name("dbento").expect("dbento is registered");
+    assert_eq!(
+        (dbento.formats(), dbento.format_file()),
+        (&["1"] as &[&str], "dbento.toml")
+    );
+}
+
+#[test]
+fn the_dbento_seed_is_what_dbento_init_writes() {
+    let seed = by_name("dbento").expect("dbento is registered").seed();
+    let files: Vec<(&str, &[u8])> = seed.iter().map(|f| (f.path(), f.bytes())).collect();
+    assert_eq!(
+        files,
+        [(
+            "dbento.toml",
+            &b"# Dbento workspace. Commit this file; passwords never go here.\ndbento = 1\n\n# [connections.local]\n# engine = \"sqlite\"\n# path = \"data/app.db\"\n# read_only = true\n#\n# [connections.prod]\n# engine = \"postgres\"\n# host = \"db.example.com\"\n# database = \"app\"\n# user = \"app\"\n# secret = { env = \"PROD_DB_PASSWORD\" }\n# color = \"red\"\n"[..]
+        )]
     );
 }
 
@@ -35,10 +53,6 @@ fn by_name_finds_every_rule_set_under_its_own_name() {
         assert_eq!(by_name(k.kind()).map(|f| f.kind()), Some(k.kind()));
     }
     assert!(by_name("no-such-kind").is_none());
-    assert!(
-        by_name("dbento").is_none(),
-        "dbento has no rule set before phase 2"
-    );
 }
 
 #[test]

@@ -269,11 +269,12 @@ fn list_refuses_a_tag_git_could_misread() {
     }
 }
 
-/// The crate-scoped tag the workspace pins apinata-rules at.
+/// The crate-scoped tags the workspace pins each rules crate at.
 const APINATA_RULES_TAG: &str = "apinata-rules-v0.1.0";
+const DBENTO_RULES_TAG: &str = "dbento-rules-v0.1.0";
 
 #[test]
-fn the_real_lock_pins_apinata_rules_at_its_tag() {
+fn the_real_lock_pins_each_rules_crate_at_its_tag() {
     let out = Command::new(repo_root().join("scripts/rules-crates.sh"))
         .args(["list", repo_root().join("Cargo.lock").to_str().unwrap()])
         .output()
@@ -285,21 +286,33 @@ fn the_real_lock_pins_apinata_rules_at_its_tag() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = stdout(&out);
-    assert_eq!(text.lines().count(), 1, "one rules crate pinned: {text}");
-    let fields: Vec<&str> = text.split_whitespace().collect();
+    let rows: Vec<Vec<&str>> = text
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    let pins: Vec<&[&str]> = rows.iter().map(|r| &r[..3]).collect();
     assert_eq!(
-        fields[..3],
+        pins,
         [
-            "apinata-rules",
-            "https://github.com/PhongGuy/apinata",
-            APINATA_RULES_TAG
+            &[
+                "apinata-rules",
+                "https://github.com/PhongGuy/apinata",
+                APINATA_RULES_TAG
+            ][..],
+            &[
+                "dbento-rules",
+                "https://github.com/PhongGuy/dbento",
+                DBENTO_RULES_TAG
+            ][..],
         ],
         "{text}"
     );
-    assert!(
-        fields[3].len() == 40 && fields[3].bytes().all(|b| b.is_ascii_hexdigit()),
-        "{text}"
-    );
+    for row in &rows {
+        assert!(
+            row[3].len() == 40 && row[3].bytes().all(|b| b.is_ascii_hexdigit()),
+            "{text}"
+        );
+    }
 }
 
 #[test]

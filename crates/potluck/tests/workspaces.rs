@@ -122,7 +122,6 @@ async fn creation_is_validated_and_leaves_no_directory_behind() {
         ("slug", json!("-x")),
         ("name", json!("  ")),
         ("name", json!("n".repeat(201))),
-        ("kind", json!("dbento")),
         ("kind", json!("nope")),
         ("default_branch", json!("")),
         ("default_branch", json!("-x")),
@@ -246,5 +245,37 @@ async fn a_hung_seed_git_is_killed_at_the_run_limit_and_does_not_hold_shutdown()
     assert!(
         hung_git_is_gone(dir.path()),
         "the hung git and its group child are killed and reaped"
+    );
+}
+
+#[tokio::test]
+async fn a_dbento_workspace_is_created_with_the_dbento_seed() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_team(&app.url(""), &root, "core").await;
+    let body = json!({"slug": "db", "name": "DB", "kind": "dbento", "default_branch": "main"});
+    let (status, created) = create(&app, &root, "core", body).await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["kind"], "dbento", "{created}");
+    let data = app._dir.path();
+    let repo = repo_path(data, "core", "db");
+    assert_eq!(
+        in_repo(data, &repo, &["ls-tree", "--name-only", "refs/heads/main"]),
+        "dbento.toml\n"
+    );
+    let seed = potluck::kinds::by_name("dbento")
+        .expect("dbento is registered")
+        .seed();
+    assert_eq!(
+        in_repo(data, &repo, &["show", "refs/heads/main:dbento.toml"]).as_bytes(),
+        seed[0].bytes()
+    );
+    assert_eq!(
+        in_repo(
+            data,
+            &repo,
+            &["log", "-1", "--format=%s", "refs/heads/main"]
+        ),
+        "Seed dbento workspace\n"
     );
 }

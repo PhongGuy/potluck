@@ -5,6 +5,8 @@
 use std::io::Write;
 use std::process::{Output, Stdio};
 
+use potluck::secret_check::git::{Git, RefUpdate};
+
 use crate::common::potluck;
 use crate::common::scratch::Scratch;
 
@@ -12,6 +14,8 @@ const ZERO: &str = "0000000000000000000000000000000000000000";
 const READ_ONLY: &[u8] = include_bytes!("fixtures/dbento/valid/read-only.toml");
 const FOLDERS: &[u8] = include_bytes!("fixtures/dbento/valid/folder-colours.toml");
 const SEED: &[u8] = include_bytes!("fixtures/dbento/valid/seed.toml");
+const RSA_KEY: &[u8] = include_bytes!("fixtures/secret-check/bad/rsa-private-key.pem");
+const CERT: &[u8] = include_bytes!("fixtures/secret-check/good/certificate.pem");
 
 /// Dbento's valid fixtures at the pinned tag: each opens in Dbento, so a push of it is accepted.
 const VALID: [(&str, &[u8]); 4] = [
@@ -210,6 +214,13 @@ fn stderr(out: &Output) -> String {
     String::from_utf8(out.stderr.clone()).unwrap()
 }
 
+/// The read-only fixture with its first `from` replaced by `to`; panics if the fixture lacks it.
+fn read_only_with(from: &str, to: &str) -> Vec<u8> {
+    let text = std::str::from_utf8(READ_ONLY).unwrap();
+    assert!(text.contains(from), "the read-only fixture lacks {from:?}");
+    text.replacen(from, to, 1).into_bytes()
+}
+
 #[test]
 fn every_valid_fixture_is_accepted_on_a_new_branch() {
     for (case, bytes) in VALID {
@@ -228,5 +239,198 @@ fn every_invalid_fixture_is_refused_with_these_bytes() {
         let (_s, _, _, out) = push_onto(SEED, &[("dbento.toml", bytes)], None);
         assert_eq!(out.status.code(), Some(1), "{case}");
         assert_eq!(stderr(&out), expected, "{case}");
+    }
+}
+
+#[test]
+fn database_and_key_files_are_refused_by_name_and_a_certificate_passes() {
+    let (_s, _, _, out) = push_onto(
+        SEED,
+        &[
+            ("data/app.db", b"x"),
+            ("a/b.SQLITE3-wal", b"x"),
+            ("x.duckdb.wal", b"x"),
+            ("certs/client.key", b"x"),
+            ("k.p12", b"x"),
+            ("certs/ca.pem", CERT),
+        ],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject secret_env_file refs/heads/main a/b.SQLITE3-wal database_file\n",
+            "potluck-reject secret_env_file refs/heads/main certs/client.key key_file\n",
+            "potluck-reject secret_env_file refs/heads/main data/app.db database_file\n",
+            "potluck-reject secret_env_file refs/heads/main k.p12 key_file\n",
+            "potluck-reject secret_env_file refs/heads/main x.duckdb.wal database_file\n",
+        )
+    );
+}
+
+#[test]
+fn a_pem_private_key_is_refused_by_the_generic_pattern() {
+    // dbento-rules leaves `.pem` to content: a certificate passes, a key is the generic rule's.
+    let (_s, _, _, out) = push_onto(SEED, &[("certs/client.pem", RSA_KEY)], None);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        "potluck-reject secret_pattern refs/heads/main certs/client.pem private_key\n"
+    );
+}
+
+#[test]
+fn a_dbento_toml_below_the_root_in_any_case_is_read_too() {
+    let (_s, _, _, out) = push_onto(
+        SEED,
+        &[("sub/DBENTO.toml", b"dbento = 1\npassword = \"x\"\n")],
+        None,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject secret_value refs/heads/main sub/DBENTO.toml password\n",
+            "potluck-reject-detail password\n",
+        )
+    );
+}
+
+#[test]
+fn an_unreadable_root_dbento_toml_fails_closed() {
+    let big = vec![b'#'; 1024 * 1024 + 1];
+    let (_s, _, _, out) = push_onto(SEED, &[("dbento.toml", &big)], None);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject secret_value refs/heads/main dbento.toml too_large\n",
+            "potluck-reject format_unsupported refs/heads/main dbento.toml format_unsupported\n",
+        )
+    );
+    let (_s, _, _, out) = push_onto(SEED, &[("dbento.toml", b"dbento = 1\n# \xff\n")], None);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject secret_value refs/heads/main dbento.toml parse\n",
+            "potluck-reject format_unsupported refs/heads/main dbento.toml format_unsupported\n",
+        )
+    );
+}
+
+#[test]
+fn a_relaxed_read_only_flag_is_refused_for_every_role_but_admin() {
+    let relaxed = read_only_with("read_only = true\n", "read_only = false\n");
+    // An unset or unknown role reads as write.
+    for role in [None, Some("read"), Some("write"), Some("owner")] {
+        let (_s, _, _, out) = push_onto(READ_ONLY, &[("dbento.toml", &relaxed)], role);
+        assert_eq!(out.status.code(), Some(1), "{role:?}");
+        assert_eq!(
+            stderr(&out),
+            concat!(
+                "potluck-reject safety_relaxation refs/heads/main dbento.toml relax_read_only\n",
+                "potluck-reject-detail connections.prod.read_only\n",
+            ),
+            "{role:?}"
+        );
+    }
+    let (_s, _, _, out) = push_onto(READ_ONLY, &[("dbento.toml", &relaxed)], Some("admin"));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn a_relaxed_red_colour_is_refused_whether_own_or_from_a_folder() {
+    let own = read_only_with("color = \"red\"\n", "color = \"orange\"\n");
+    let (_s, _, _, out) = push_onto(READ_ONLY, &[("dbento.toml", &own)], Some("write"));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject safety_relaxation refs/heads/main dbento.toml relax_color\n",
+            "potluck-reject-detail connections.prod.color\n",
+        )
+    );
+    let text = std::str::from_utf8(FOLDERS).unwrap();
+    let from = "[folders.\"Prod\"]\ncolor = \"red\"\n";
+    assert!(
+        text.contains(from),
+        "the folder-colours fixture lacks {from:?}"
+    );
+    let folder = text.replacen(from, "[folders.\"Prod\"]\ncolor = \"blue\"\n", 1);
+    let (_s, _, _, out) = push_onto(
+        FOLDERS,
+        &[("dbento.toml", folder.as_bytes())],
+        Some("write"),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject safety_relaxation refs/heads/main dbento.toml relax_color\n",
+            "potluck-reject-detail connections.us-main.color\n",
+        )
+    );
+}
+
+#[test]
+fn two_relaxations_in_one_file_print_only_the_first() {
+    // Potluck keeps one finding per path per check, so relax_color is not printed here.
+    let both = read_only_with(
+        "read_only = true\ncolor = \"red\"\n",
+        "read_only = false\ncolor = \"orange\"\n",
+    );
+    let (_s, _, _, out) = push_onto(READ_ONLY, &[("dbento.toml", &both)], Some("write"));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        concat!(
+            "potluck-reject safety_relaxation refs/heads/main dbento.toml relax_read_only\n",
+            "potluck-reject-detail connections.prod.read_only\n",
+        )
+    );
+}
+
+#[test]
+fn deleting_a_guarded_connection_is_not_a_relaxation() {
+    let (_s, _, _, out) = push_onto(
+        READ_ONLY,
+        &[("dbento.toml", b"dbento = 1\n")],
+        Some("write"),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn an_admin_relaxation_is_accepted_then_logged_by_the_recheck() {
+    let relaxed = read_only_with("read_only = true\n", "read_only = false\n");
+    let (s, old, new, out) = push_onto(READ_ONLY, &[("dbento.toml", &relaxed)], Some("admin"));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let git = Git::new(s.isolated_git(), Some(s.bare.clone()));
+    let update = RefUpdate::parse_line(format!("{old} {new} refs/heads/main").as_bytes()).unwrap();
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            potluck::kinds::by_name("dbento").expect("dbento is registered"),
+            &[update],
+            &git,
+        );
+    });
+    let line = text
+        .lines()
+        .find(|l| l.contains("safety relaxation accepted"))
+        .unwrap_or_else(|| panic!("{text}"));
+    for needle in [
+        " INFO ",
+        "workspace_id=7",
+        "alice",
+        "refs/heads/main",
+        "relax_read_only",
+    ] {
+        assert!(line.contains(needle), "{needle} in {line}");
     }
 }

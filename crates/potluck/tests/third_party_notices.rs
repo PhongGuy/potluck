@@ -510,6 +510,11 @@ fn the_committed_crate_list_is_current() {
         "- `saphyr-parser` ",
         "- `arraydeque` ",
         "- `yaml_serde` ",
+        "- `dbento-rules` 0.1.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#",
+        "- `dbento-workspace` 0.2.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#",
+        "- `toml` ",
+        "- `humantime` ",
+        "- `winnow` ",
     ] {
         assert!(list.contains(present), "list lacks {present:?}");
     }

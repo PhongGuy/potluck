@@ -233,7 +233,12 @@ pub fn scan_with(
             };
             if let Some(finding) = refused {
                 hits.push((
-                    HitKey::new(ri, 0, ei, 0),
+                    HitKey {
+                        ref_index: ri,
+                        pass: 0,
+                        entry: ei,
+                        finding: 0,
+                    },
                     rejection(update.name(), entry.path(), &path, finding),
                 ));
             } else if (fresh.as_ref().is_none_or(|f| f.contains(entry.sha()))
@@ -254,7 +259,12 @@ pub fn scan_with(
             (message_slots.get(sha), generic::content_rule("/", message))
         {
             hits.push((
-                HitKey::new(ri, 2, mi, 0),
+                HitKey {
+                    ref_index: ri,
+                    pass: 2,
+                    entry: mi,
+                    finding: 0,
+                },
                 rejection(updates[ri].name(), b"/", "/", finding),
             ));
         }
@@ -264,7 +274,15 @@ pub fn scan_with(
     for (ri, update) in updates.iter().enumerate() {
         let diff = ref_tip_diff(kind, update, git)?;
         for (at, r) in tip_pass(kind, update, diff.as_deref(), role, git)? {
-            hits.push((HitKey::new(ri, 3, at.entry, at.finding), r));
+            hits.push((
+                HitKey {
+                    ref_index: ri,
+                    pass: 3,
+                    entry: at.entry,
+                    finding: at.finding,
+                },
+                r,
+            ));
         }
         diffs.push(diff);
     }
@@ -272,7 +290,15 @@ pub fn scan_with(
     if env.kind().is_some() {
         for (ri, update) in updates.iter().enumerate() {
             if let Some(r) = format_pass(kind, update, diffs[ri].as_deref(), git)? {
-                hits.push((HitKey::new(ri, 4, 0, 0), r));
+                hits.push((
+                    HitKey {
+                        ref_index: ri,
+                        pass: 4,
+                        entry: 0,
+                        finding: 0,
+                    },
+                    r,
+                ));
             }
         }
     }
@@ -334,17 +360,6 @@ struct HitKey {
     pass: u8,
     entry: usize,
     finding: usize,
-}
-
-impl HitKey {
-    fn new(ref_index: usize, pass: u8, entry: usize, finding: usize) -> HitKey {
-        HitKey {
-            ref_index,
-            pass,
-            entry,
-            finding,
-        }
-    }
 }
 
 /// A tip-pass hit's place within its ref: the tip entry, then the finding of that entry's `check`.
@@ -587,7 +602,12 @@ fn content_pass(
                     };
                     for (fi, finding) in findings.into_iter().enumerate() {
                         hits.push((
-                            HitKey::new(*ri, 1, *ei, fi),
+                            HitKey {
+                                ref_index: *ri,
+                                pass: 1,
+                                entry: *ei,
+                                finding: fi,
+                            },
                             rejection(updates[*ri].name(), path, &lossy, finding),
                         ));
                     }
@@ -620,7 +640,12 @@ fn content_pass(
             };
             for (fi, finding) in findings.into_iter().enumerate() {
                 hits.push((
-                    HitKey::new(*ri, 1, *ei, fi),
+                    HitKey {
+                        ref_index: *ri,
+                        pass: 1,
+                        entry: *ei,
+                        finding: fi,
+                    },
                     rejection(updates[*ri].name(), path, &lossy, finding),
                 ));
             }

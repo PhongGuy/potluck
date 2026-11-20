@@ -586,6 +586,26 @@ fn the_same_blob_and_path_pushed_under_two_refs_is_reported_once() {
 }
 
 #[test]
+fn two_secret_blobs_at_one_path_in_one_push_are_both_reported() {
+    let s = Scratch::new();
+    s.write("README", b"seed\n");
+    s.commit("seed");
+    s.publish("main");
+    s.write("creds.txt", AWS);
+    s.commit("first secret");
+    s.write("creds.txt", &[AWS, b"rotated\n"].concat());
+    let tip = s.stage_commit("second secret");
+    assert_eq!(
+        scan_main(&s, &env(None), &tip),
+        [
+            "refs/heads/main creds.txt secret_pattern aws",
+            "refs/heads/main creds.txt secret_pattern aws",
+        ],
+        "each blob is its own finding, even at the same ref, path and rule"
+    );
+}
+
+#[test]
 fn an_environment_file_over_the_cap_is_refused_as_unparsable_and_other_big_files_pass() {
     let s = Scratch::new();
     s.write("opencollection.yml", APINATA_FORMAT);

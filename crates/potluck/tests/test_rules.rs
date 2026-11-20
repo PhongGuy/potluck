@@ -17,6 +17,10 @@ pub enum Act {
     Elsewhere,
     Relax,
     RelaxAlways,
+    TwoRules,
+    SameRuleTwice,
+    PlainAndRelax,
+    TwoRelaxations,
 }
 
 #[derive(Debug)]
@@ -85,19 +89,43 @@ impl RuleSet for TestRules {
             )],
             // Reported for every role; Potluck decides. Only a tip change whose new side says
             // "relaxed" while the old side did not is a relaxation.
-            Act::Relax => {
-                let says = |b: Option<Blob<'_>>| matches!(b, Some(Blob::Bytes(x)) if x.starts_with(b"relaxed"));
-                if change.has_baseline() && says(change.new_blob()) && !says(change.old_blob()) {
-                    vec![Finding::new(Code::SafetyRelaxation, "relax_test", p)]
-                } else {
-                    Vec::new()
-                }
+            Act::Relax if relaxing(change) => {
+                vec![Finding::new(Code::SafetyRelaxation, "relax_test", p)]
             }
+            Act::Relax => Vec::new(),
             // Reported at every path the kind reads, history and tip alike, whatever the role.
             Act::RelaxAlways => vec![Finding::new(Code::SafetyRelaxation, "relax_always", p)],
+            Act::TwoRules => vec![
+                Finding::new(Code::SecretValue, "first", p),
+                Finding::new(Code::SecretValue, "second", p),
+            ],
+            // The same rule at the same path twice, told apart only by detail.
+            Act::SameRuleTwice => vec![
+                Finding::new(Code::SecretValue, "twice", p).with_detail("one"),
+                Finding::new(Code::SecretValue, "twice", p).with_detail("two"),
+            ],
+            // A plain finding on every change, then a relaxation on a relaxing tip change.
+            Act::PlainAndRelax => {
+                let mut found = vec![Finding::new(Code::SecretValue, "plain", p)];
+                if relaxing(change) {
+                    found.push(Finding::new(Code::SafetyRelaxation, "relax_test", p));
+                }
+                found
+            }
+            Act::TwoRelaxations if relaxing(change) => vec![
+                Finding::new(Code::SafetyRelaxation, "relax_one", p),
+                Finding::new(Code::SafetyRelaxation, "relax_two", p),
+            ],
+            Act::TwoRelaxations => Vec::new(),
         }
     }
     fn seed(&self) -> Vec<SeedFile> {
         Vec::new()
     }
+}
+
+/// A tip change whose new side starts with "relaxed" while its old side does not.
+fn relaxing(change: &Change<'_>) -> bool {
+    let says = |b: Option<Blob<'_>>| matches!(b, Some(Blob::Bytes(x)) if x.starts_with(b"relaxed"));
+    change.has_baseline() && says(change.new_blob()) && !says(change.old_blob())
 }

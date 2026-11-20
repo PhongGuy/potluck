@@ -167,11 +167,11 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// call) or a finding whose rule is empty or not `[a-z0-9_]` fails with `ScanError::Rules`.
 /// After the history passes, every update whose old and new values both peel to commits gets a
 /// tip pass: `check` with `Change::tip` at each path between the two tips that the kind `reads`.
-/// Its findings sort after the ref's other hits, and one is dropped when its path already has a
-/// rejection anywhere in the push. When `env` names a kind and a rule set is given, every created
-/// or format-touching update to a commit gets a format pass: its `format_file` must hold a format
-/// the rule set lists, or the ref gets one `format_unsupported` finding, sorted last. A
-/// `safety_relaxation` finding is dropped for an admin pusher.
+/// Its findings sort after the ref's other hits, and a tip or format finding is dropped when an
+/// earlier hit has the same ref, path and rule. When `env` names a kind and a rule set is given,
+/// every created or format-touching update to a commit gets a format pass: its `format_file` must
+/// hold a format the rule set lists, or the ref gets one `format_unsupported` finding, sorted
+/// last. A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
     rules: Option<&dyn RuleSet>,
@@ -185,9 +185,9 @@ pub fn scan_with(
     }
     let kind = GuardedRules(rules);
     let role = kind_role(env.role());
-    // Hits are keyed (ref index, pass, entry index), passes 0 to 4 being path rule, content,
-    // message, tip and format, so the final sort groups each ref's hits by pass in entry order.
-    let mut hits: Vec<((usize, u8, usize), Rejection)> = Vec::new();
+    // Passes 0 to 4 are path rule, content, message, tip and format, so the final sort groups
+    // each ref's hits by pass in entry order, then in the order `check` returned them.
+    let mut hits: Vec<(HitKey, Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
     let mut seen: Vec<Sha> = Vec::new();
     // A (blob, path) pair is content-checked once, under the first ref that brings it.
@@ -233,7 +233,7 @@ pub fn scan_with(
             };
             if let Some(finding) = refused {
                 hits.push((
-                    (ri, 0, ei),
+                    HitKey::new(ri, 0, ei, 0),
                     rejection(update.name(), entry.path(), &path, finding),
                 ));
             } else if (fresh.as_ref().is_none_or(|f| f.contains(entry.sha()))
@@ -254,7 +254,7 @@ pub fn scan_with(
             (message_slots.get(sha), generic::content_rule("/", message))
         {
             hits.push((
-                (ri, 2, mi),
+                HitKey::new(ri, 2, mi, 0),
                 rejection(updates[ri].name(), b"/", "/", finding),
             ));
         }
@@ -263,8 +263,8 @@ pub fn scan_with(
     let mut diffs = Vec::with_capacity(updates.len());
     for (ri, update) in updates.iter().enumerate() {
         let diff = ref_tip_diff(kind, update, git)?;
-        for (ei, r) in tip_pass(kind, update, diff.as_deref(), role, git)? {
-            hits.push(((ri, 3, ei), r));
+        for (at, r) in tip_pass(kind, update, diff.as_deref(), role, git)? {
+            hits.push((HitKey::new(ri, 3, at.entry, at.finding), r));
         }
         diffs.push(diff);
     }
@@ -272,28 +272,32 @@ pub fn scan_with(
     if env.kind().is_some() {
         for (ri, update) in updates.iter().enumerate() {
             if let Some(r) = format_pass(kind, update, diffs[ri].as_deref(), git)? {
-                hits.push(((ri, 4, 0), r));
+                hits.push((HitKey::new(ri, 4, 0, 0), r));
             }
         }
     }
     if role == Role::Admin {
         hits.retain(|(_, r)| r.finding.code() != Code::SafetyRelaxation);
     }
-    // A tip finding repeats nothing: a path refused by any other pass, or by an earlier ref's
-    // tip pass, is already in the output once.
-    let mut refused: HashSet<Vec<u8>> = hits
-        .iter()
-        .filter(|((_, pass, _), _)| *pass != 3)
-        .map(|(_, r)| r.path.clone())
-        .collect();
+    // Passes 0 to 2 are already once per object per push; a tip or format hit is dropped only
+    // when an earlier hit names the same ref, path and rule.
     hits.sort_by_key(|(key, _)| *key);
-    hits.retain(|((_, pass, _), r)| *pass != 3 || refused.insert(r.path.clone()));
+    let mut reported: HashSet<(Vec<u8>, Vec<u8>, String)> = HashSet::new();
+    hits.retain(|(key, r)| {
+        let fresh = reported.insert((
+            r.ref_name.clone(),
+            r.path.clone(),
+            r.finding.rule().to_owned(),
+        ));
+        fresh || key.pass < 3
+    });
     Ok(hits.into_iter().map(|(_, r)| r).collect())
 }
 
 /// The safety relaxations a push the server has already accepted would carry for a non-admin:
 /// the tip pass alone over `updates`, as `Role::Write`, keeping only `safety_relaxation`
-/// findings, in update order. Fails like `scan_with` on a git error or a failing rule set.
+/// findings, each once per (ref, path, rule), in update order then tip-pass order. Fails like
+/// `scan_with` on a git error or a failing rule set.
 pub fn accepted_relaxations(
     rules: &dyn RuleSet,
     updates: &[RefUpdate],
@@ -303,16 +307,51 @@ pub fn accepted_relaxations(
         return Err(ScanError::Rules);
     }
     let mut found = Vec::new();
+    // Two tip entries may yield a finding at the same path, so the key guards against a repeat.
+    let mut logged: HashSet<(Vec<u8>, Vec<u8>, String)> = HashSet::new();
     for update in updates {
         let kind = GuardedRules(Some(rules));
         let diff = ref_tip_diff(kind, update, git)?;
         for (_, r) in tip_pass(kind, update, diff.as_deref(), Role::Write, git)? {
-            if r.finding.code() == Code::SafetyRelaxation {
+            if r.finding.code() == Code::SafetyRelaxation
+                && logged.insert((
+                    r.ref_name.clone(),
+                    r.path.clone(),
+                    r.finding.rule().to_owned(),
+                ))
+            {
                 found.push(r);
             }
         }
     }
     Ok(found)
+}
+
+/// Where a hit sorts: by ref, then pass, then entry, then its place among one `check`'s findings.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct HitKey {
+    ref_index: usize,
+    pass: u8,
+    entry: usize,
+    finding: usize,
+}
+
+impl HitKey {
+    fn new(ref_index: usize, pass: u8, entry: usize, finding: usize) -> HitKey {
+        HitKey {
+            ref_index,
+            pass,
+            entry,
+            finding,
+        }
+    }
+}
+
+/// A tip-pass hit's place within its ref: the tip entry, then the finding of that entry's `check`.
+#[derive(Clone, Copy)]
+struct TipHit {
+    entry: usize,
+    finding: usize,
 }
 
 /// The kind's view of the pusher's role.
@@ -353,15 +392,15 @@ const _: () = assert!(
 );
 
 /// Judges one update old tip against new tip: `check` with `Change::tip` at every path the
-/// kind `reads` among those `diff` (from `ref_tip_diff`) lists, as `(entry index, rejection)`
-/// in entry order; no diff yields nothing. Every finding is kept, whatever `role`.
+/// kind `reads` among those `diff` (from `ref_tip_diff`) lists, as `(TipHit, rejection)` in
+/// entry order, then `check` order; no diff yields nothing. Every finding is kept, whatever `role`.
 fn tip_pass(
     kind: GuardedRules<'_>,
     update: &RefUpdate,
     diff: Option<&[TipEntry]>,
     role: Role,
     git: &Git,
-) -> Result<Vec<(usize, Rejection)>, ScanError> {
+) -> Result<Vec<(TipHit, Rejection)>, ScanError> {
     let Some(diff) = diff else {
         return Ok(Vec::new());
     };
@@ -430,7 +469,7 @@ fn judge_tip_batch(
     git: &Git,
     batch: &[&(usize, &TipEntry, String)],
     blobs: &HashSet<Sha>,
-    found: &mut Vec<(usize, Rejection)>,
+    found: &mut Vec<(TipHit, Rejection)>,
 ) -> Result<(), ScanError> {
     let names: Vec<Sha> = blobs.iter().cloned().collect();
     let mut read: HashMap<Sha, Vec<u8>> = HashMap::with_capacity(names.len());
@@ -449,8 +488,12 @@ fn judge_tip_batch(
     };
     for (ei, entry, lossy) in batch {
         let change = Change::tip(lossy, side(entry.old())?, side(entry.new())?, role);
-        if let Some(finding) = kind.check(&change)? {
-            found.push((*ei, rejection(update.name(), entry.path(), lossy, finding)));
+        for (fi, finding) in kind.check(&change)?.into_iter().enumerate() {
+            let at = TipHit {
+                entry: *ei,
+                finding: fi,
+            };
+            found.push((at, rejection(update.name(), entry.path(), lossy, finding)));
         }
     }
     Ok(())
@@ -516,15 +559,16 @@ fn no_size() -> ScanError {
 }
 
 /// Streams every candidate blob at or under the cap once and runs the content rules for each
-/// path it sits at: the generic set on the bytes, then the kind's first `check` finding. A blob
-/// over the cap is never read; only the kind's `check` with `Blob::TooLarge` may refuse it.
+/// path it sits at: the generic set on the bytes, then, when it finds nothing, every distinct
+/// `check` finding of the kind. A blob over the cap is never read; only the kind's `check` with
+/// `Blob::TooLarge` may refuse it.
 fn content_pass(
     git: &Git,
     kind: GuardedRules<'_>,
     role: Role,
     updates: &[RefUpdate],
     candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>>,
-    hits: &mut Vec<((usize, u8, usize), Rejection)>,
+    hits: &mut Vec<(HitKey, Rejection)>,
 ) -> Result<(), ScanError> {
     let names: Vec<Sha> = candidates.keys().cloned().collect();
     let sizes = git.blob_sizes(&names)?;
@@ -536,14 +580,14 @@ fn content_pass(
             Some(_) => {
                 for (ri, ei, path) in candidates.get(&sha).into_iter().flatten() {
                     let lossy = String::from_utf8_lossy(path);
-                    let finding = if kind.reads(&lossy)? {
+                    let findings = if kind.reads(&lossy)? {
                         kind.check(&Change::history(&lossy, Blob::TooLarge, role))?
                     } else {
-                        None
+                        Vec::new()
                     };
-                    if let Some(finding) = finding {
+                    for (fi, finding) in findings.into_iter().enumerate() {
                         hits.push((
-                            (*ri, 1, *ei),
+                            HitKey::new(*ri, 1, *ei, fi),
                             rejection(updates[*ri].name(), path, &lossy, finding),
                         ));
                     }
@@ -564,19 +608,19 @@ fn content_pass(
         let generic_hit = generic::content_rule("", bytes);
         for (ri, ei, path) in candidates.get(sha).into_iter().flatten() {
             let lossy = String::from_utf8_lossy(path);
-            let finding = match &generic_hit {
-                Some(f) => Some(Finding::new(f.code(), f.rule(), &lossy)),
+            let findings = match &generic_hit {
+                Some(f) => vec![Finding::new(f.code(), f.rule(), &lossy)],
                 None => match kind.check(&Change::history(&lossy, Blob::Bytes(bytes), role)) {
-                    Ok(finding) => finding,
+                    Ok(findings) => findings,
                     Err(e) => {
                         failed = Some(e);
                         return;
                     }
                 },
             };
-            if let Some(finding) = finding {
+            for (fi, finding) in findings.into_iter().enumerate() {
                 hits.push((
-                    (*ri, 1, *ei),
+                    HitKey::new(*ri, 1, *ei, fi),
                     rejection(updates[*ri].name(), path, &lossy, finding),
                 ));
             }
@@ -619,14 +663,21 @@ impl GuardedRules<'_> {
         self.0.map_or(Ok(false), |r| guarded(|| r.reads(path)))
     }
 
-    /// The first finding of `check`, once every finding it returned has passed `valid`.
-    fn check(self, change: &Change<'_>) -> Result<Option<Finding>, ScanError> {
-        let Some(r) = self.0 else { return Ok(None) };
-        let findings = guarded(|| r.check(change))?;
-        let mut valid_findings = findings.into_iter().map(valid);
-        let first = valid_findings.next().transpose()?;
-        valid_findings.try_for_each(|f| f.map(drop))?;
-        Ok(first)
+    /// Every distinct finding of `check` in its order, the first of each (path, rule) kept, once
+    /// every finding it returned has passed `valid`.
+    fn check(self, change: &Change<'_>) -> Result<Vec<Finding>, ScanError> {
+        let Some(r) = self.0 else {
+            return Ok(Vec::new());
+        };
+        let findings = guarded(|| r.check(change))?
+            .into_iter()
+            .map(valid)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut kept: HashSet<(String, String)> = HashSet::new();
+        Ok(findings
+            .into_iter()
+            .filter(|f| kept.insert((f.path().to_owned(), f.rule().to_owned())))
+            .collect())
     }
 }
 

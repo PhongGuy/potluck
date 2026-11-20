@@ -434,3 +434,36 @@ fn an_admin_relaxation_is_accepted_then_logged_by_the_recheck() {
         assert!(line.contains(needle), "{needle} in {line}");
     }
 }
+
+#[test]
+fn an_admin_push_relaxing_two_rules_is_accepted_and_logs_both() {
+    let both = read_only_with(
+        "read_only = true\ncolor = \"red\"\n",
+        "read_only = false\ncolor = \"orange\"\n",
+    );
+    let (s, old, new, out) = push_onto(READ_ONLY, &[("dbento.toml", &both)], Some("admin"));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    let git = Git::new(s.isolated_git(), Some(s.bare.clone()));
+    let update = RefUpdate::parse_line(format!("{old} {new} refs/heads/main").as_bytes()).unwrap();
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            potluck::kinds::by_name("dbento").expect("dbento is registered"),
+            &[update],
+            &git,
+        );
+    });
+    let logged: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("safety relaxation accepted"))
+        .map(|l| {
+            ["relax_read_only", "relax_color"]
+                .into_iter()
+                .find(|rule| l.contains(rule))
+                .unwrap_or(l)
+        })
+        .collect();
+    assert_eq!(logged, ["relax_read_only", "relax_color"], "{text}");
+}

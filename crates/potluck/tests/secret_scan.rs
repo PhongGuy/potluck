@@ -1271,3 +1271,124 @@ fn the_tip_pass_reads_its_blobs_in_batches_under_the_budget() {
     assert!(tip_calls.iter().all(|&n| n <= most), "{tip_calls:?}");
     assert_eq!(tip_calls.iter().sum::<usize>(), 2 * PATHS, "{tip_calls:?}");
 }
+
+#[test]
+fn every_distinct_rule_check_returns_for_a_path_is_reported_in_order() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    s.write("b.t", b"y\n");
+    let tip = s.stage_commit("t");
+    // The content pass walks a hash map, so repeated scans pin the order as well as the rows.
+    for _ in 0..8 {
+        assert_eq!(
+            scan_rules(&s, &rules(Act::TwoRules), &tip).unwrap(),
+            [
+                "refs/heads/main a.t secret_value first",
+                "refs/heads/main a.t secret_value second",
+                "refs/heads/main b.t secret_value first",
+                "refs/heads/main b.t secret_value second",
+            ]
+        );
+    }
+}
+
+#[test]
+fn every_rule_for_a_blob_over_the_cap_is_reported() {
+    let s = Scratch::new();
+    let cap = usize::try_from(potluck::kinds::generic::MAX_CONTENT_BYTES).unwrap();
+    s.write("big.t", &vec![b'x'; cap + 1]);
+    let tip = s.stage_commit("big");
+    assert_eq!(
+        scan_rules(&s, &rules(Act::TwoRules), &tip).unwrap(),
+        [
+            "refs/heads/main big.t secret_value first",
+            "refs/heads/main big.t secret_value second",
+        ]
+    );
+}
+
+#[test]
+fn a_rule_check_returns_twice_for_one_path_is_reported_once_with_its_first_detail() {
+    let s = Scratch::new();
+    s.write("a.t", b"x\n");
+    let tip = s.stage_commit("t");
+    let r = scan_with(
+        &env(None),
+        Some(&rules(Act::SameRuleTwice)),
+        &[update(&tip, "refs/heads/main")],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(rows(&r), ["refs/heads/main a.t secret_value twice"]);
+    assert_eq!(r[0].finding().detail(), Some("one"));
+}
+
+#[test]
+fn accepted_relaxations_keeps_a_relaxation_that_follows_another_finding() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.commit("relax");
+    s.publish("main");
+    let got = potluck::secret_check::scan::accepted_relaxations(
+        &rules(Act::PlainAndRelax),
+        &[moved(&old, &new, "refs/heads/main")],
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(rows(&got), RELAXED);
+}
+
+#[test]
+fn every_relaxing_rule_under_every_ref_is_logged_once() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.commit("relax");
+    s.publish("main");
+    let updates = [
+        moved(&old, &new, "refs/heads/main"),
+        moved(&old, &new, "refs/heads/copy"),
+    ];
+    let got = potluck::secret_check::scan::accepted_relaxations(
+        &rules(Act::TwoRelaxations),
+        &updates,
+        &git_for(&s),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&got),
+        [
+            "refs/heads/main a.t safety_relaxation relax_one",
+            "refs/heads/main a.t safety_relaxation relax_two",
+            "refs/heads/copy a.t safety_relaxation relax_one",
+            "refs/heads/copy a.t safety_relaxation relax_two",
+        ]
+    );
+    let text = crate::logs::captured_logs(|| {
+        potluck::secret_check::log_accepted_relaxations(
+            7,
+            "alice",
+            &rules(Act::TwoRelaxations),
+            &updates,
+            &git_for(&s),
+        );
+    });
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("safety relaxation accepted"))
+        .collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    for (line, (r#ref, rule)) in lines.iter().zip([
+        ("refs/heads/main", "relax_one"),
+        ("refs/heads/main", "relax_two"),
+        ("refs/heads/copy", "relax_one"),
+        ("refs/heads/copy", "relax_two"),
+    ]) {
+        assert!(line.contains(r#ref) && line.contains(rule), "{line}");
+    }
+}

@@ -2,6 +2,20 @@
 
 A self-hosted team server for sharing workspaces of local-first desktop apps, git-style. Its first clients are [Apinata](https://github.com/PhongGuy/apinata), a native API client, and [Dbento](https://github.com/PhongGuy/dbento), a native database client. It runs as one container under podman or docker.
 
+This page is for people who run Potluck. To build it from source or work on it, see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## How it works
+
+A team shares its work in workspaces. Each workspace is a bare git repository on the server, served over git's smart HTTP protocol by the `git` binary in the image. The repositories are plain git, so if you stop running Potluck you keep every workspace with its full history.
+
+- **Kinds.** Each workspace has a kind that names the app whose files it holds: `apinata` or `dbento`. Each app owns the push rules and the starting files for its kind, in a small rules crate in the app's own repository. Potluck builds against each rules crate at a pinned git tag and knows no app file format itself.
+- **Formats.** `GET /api/v1/server` lists each kind with the workspace formats this server accepts. A push in a format the server does not list is refused.
+- **Push check.** Secrets stay on each person's machine. Before git accepts a push, a pre-receive check scans the objects the push adds. It refuses `.env` files, private keys, and AWS, GitHub, Slack and Potluck tokens, plus whatever the workspace's kind rules refuse.
+- **Overrides.** A workspace admin can arm an override that lets one person's next push through the check. Arming, disarming and using an override are logged, and a used override stays in the workspace's history.
+- **Accounts and roles.** People sign in with a local password account and use personal access tokens for git, the JSON API and automation. Each workspace grants a user or a team one of three roles: read (clone and fetch), write (also push) or admin (also manage grants and overrides).
+- **Change notices.** `GET /api/v1/workspaces/{team}/{ws}/events` is a server-sent events stream that carries only which ref now points at which commit; apps then fetch the commits over git. An app that cannot keep the stream open can poll instead.
+- **Administration.** `potluck admin` on the host manages users, tokens, teams, workspaces, grants and overrides (see [First admin](#first-admin)). The same operations are in the JSON API under `/api/v1`. There is no web UI.
+
 ## Status
 
 Potluck is not ready for use yet, and may still change in ways that break existing setups. Watch the repository's releases to hear when it is ready.

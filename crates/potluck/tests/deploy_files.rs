@@ -217,6 +217,7 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
     assert_eq!(
         headings,
         [
+            "## How it works",
             "## Status",
             "## Run it",
             "## First admin",

@@ -138,7 +138,7 @@ async fn workspace_create_list_show_and_delete() {
         "",
     )
     .await;
-    assert_eq!(json(&out), json!([]), "an unknown kind filters to nothing");
+    assert_eq!(json(&out), json!([]), "no dbento workspace exists to list");
     let (result, out) = admin(dir.path(), &["--json", "workspace", "show", "core/api"], "").await;
     result.unwrap();
     assert_eq!(

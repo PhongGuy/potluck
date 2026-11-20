@@ -49,8 +49,8 @@ pub(super) async fn create(
     let ApiJson(body) = body?;
     let slug = check_slug(&body.slug)?;
     let name = validate::name("name", &body.name)?.to_owned();
-    // The kind is checked before the claim: the schema CHECK would admit a reserved kind, and
-    // an unknown one would only surface from the insert as a 500.
+    // The kind is checked before the claim: an unregistered kind would otherwise only surface
+    // from the schema CHECK on insert, as a 500.
     let Some(kind) = kinds::by_name(&body.kind) else {
         return Err(
             ApiError::invalid_value("kind", "kind must be a supported workspace kind").into(),

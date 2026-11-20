@@ -376,8 +376,7 @@ fn a_relaxed_red_colour_is_refused_whether_own_or_from_a_folder() {
 }
 
 #[test]
-fn two_relaxations_in_one_file_print_only_the_first() {
-    // Potluck keeps one finding per path per check, so relax_color is not printed here.
+fn two_relaxations_in_one_file_print_both_each_with_its_detail() {
     let both = read_only_with(
         "read_only = true\ncolor = \"red\"\n",
         "read_only = false\ncolor = \"orange\"\n",
@@ -389,6 +388,8 @@ fn two_relaxations_in_one_file_print_only_the_first() {
         concat!(
             "potluck-reject safety_relaxation refs/heads/main dbento.toml relax_read_only\n",
             "potluck-reject-detail connections.prod.read_only\n",
+            "potluck-reject safety_relaxation refs/heads/main dbento.toml relax_color\n",
+            "potluck-reject-detail connections.prod.color\n",
         )
     );
 }

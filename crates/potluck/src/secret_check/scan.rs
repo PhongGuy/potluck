@@ -167,11 +167,11 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// call) or a finding whose rule is empty or not `[a-z0-9_]` fails with `ScanError::Rules`.
 /// After the history passes, every update whose old and new values both peel to commits gets a
 /// tip pass: `check` with `Change::tip` at each path between the two tips that the kind `reads`.
-/// Its findings sort after the ref's other hits, and one is dropped when its path already has a
-/// rejection anywhere in the push. When `env` names a kind and a rule set is given, every created
-/// or format-touching update to a commit gets a format pass: its `format_file` must hold a format
-/// the rule set lists, or the ref gets one `format_unsupported` finding, sorted last. A
-/// `safety_relaxation` finding is dropped for an admin pusher.
+/// Its findings sort after the ref's other hits, and a tip or format finding is dropped when an
+/// earlier hit has the same ref, path and rule. When `env` names a kind and a rule set is given,
+/// every created or format-touching update to a commit gets a format pass: its `format_file` must
+/// hold a format the rule set lists, or the ref gets one `format_unsupported` finding, sorted
+/// last. A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
     rules: Option<&dyn RuleSet>,
@@ -279,15 +279,18 @@ pub fn scan_with(
     if role == Role::Admin {
         hits.retain(|(_, r)| r.finding.code() != Code::SafetyRelaxation);
     }
-    // A tip finding repeats nothing: a path refused by any other pass, or by an earlier ref's
-    // tip pass, is already in the output once.
-    let mut refused: HashSet<Vec<u8>> = hits
-        .iter()
-        .filter(|(key, _)| key.pass != 3)
-        .map(|(_, r)| r.path.clone())
-        .collect();
+    // Passes 0 to 2 are already once per object per push; a tip or format hit is dropped only
+    // when an earlier hit names the same ref, path and rule.
     hits.sort_by_key(|(key, _)| *key);
-    hits.retain(|(key, r)| key.pass != 3 || refused.insert(r.path.clone()));
+    let mut reported: HashSet<(Vec<u8>, Vec<u8>, String)> = HashSet::new();
+    hits.retain(|(key, r)| {
+        let fresh = reported.insert((
+            r.ref_name.clone(),
+            r.path.clone(),
+            r.finding.rule().to_owned(),
+        ));
+        fresh || key.pass < 3
+    });
     Ok(hits.into_iter().map(|(_, r)| r).collect())
 }
 

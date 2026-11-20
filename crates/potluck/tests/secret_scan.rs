@@ -1029,7 +1029,7 @@ fn scan_main_moved(s: &Scratch, old: &str, new: &str) -> Vec<String> {
 }
 
 #[test]
-fn a_tip_finding_at_a_path_another_ref_already_reported_prints_once() {
+fn a_tip_finding_is_reported_under_each_ref_that_carries_it() {
     let s = Scratch::new();
     s.write("opencollection.yml", b"opencollection: 1.0.0\n");
     let old = s.commit("seed");
@@ -1042,8 +1042,11 @@ fn a_tip_finding_at_a_path_another_ref_already_reported_prints_once() {
     ];
     assert_eq!(
         rows(&scan(&env(Some("apinata")), &both, &git_for(&s)).unwrap()),
-        ["refs/heads/feat environments/dev.yml secret_value secret_value"],
-        "feat brings the commit; main's tip finding at the same path is not repeated"
+        [
+            "refs/heads/feat environments/dev.yml secret_value secret_value",
+            "refs/heads/main environments/dev.yml secret_value secret_value",
+        ],
+        "feat's history pass and main's tip pass each report the path under their own ref"
     );
 }
 
@@ -1391,4 +1394,68 @@ fn every_relaxing_rule_under_every_ref_is_logged_once() {
     ]) {
         assert!(line.contains(r#ref) && line.contains(rule), "{line}");
     }
+}
+
+#[test]
+fn a_tip_rule_the_history_pass_did_not_report_follows_it_for_write_only() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.stage_commit("relax");
+    let scan_as = |role: Role| {
+        let e = HookEnv::new(None, false, None).with_role(role);
+        rows(
+            &scan_with(
+                &e,
+                Some(&rules(Act::PlainAndRelax)),
+                &[moved(&old, &new, "refs/heads/main")],
+                &git_for(&s),
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(
+        scan_as(Role::Write),
+        [
+            "refs/heads/main a.t secret_value plain",
+            "refs/heads/main a.t safety_relaxation relax_test",
+        ],
+        "the tip pass repeats plain, which prints once, and adds relax_test"
+    );
+    assert_eq!(
+        scan_as(Role::Admin),
+        ["refs/heads/main a.t secret_value plain"]
+    );
+}
+
+#[test]
+fn every_relaxing_rule_of_a_tip_change_is_reported() {
+    let s = Scratch::new();
+    s.write("a.t", b"strict\n");
+    let old = s.commit("strict");
+    s.publish("main");
+    s.write("a.t", b"relaxed\n");
+    let new = s.stage_commit("relax");
+    let scan_as = |role: Role| {
+        let e = HookEnv::new(None, false, None).with_role(role);
+        rows(
+            &scan_with(
+                &e,
+                Some(&rules(Act::TwoRelaxations)),
+                &[moved(&old, &new, "refs/heads/main")],
+                &git_for(&s),
+            )
+            .unwrap(),
+        )
+    };
+    assert_eq!(
+        scan_as(Role::Write),
+        [
+            "refs/heads/main a.t safety_relaxation relax_one",
+            "refs/heads/main a.t safety_relaxation relax_two",
+        ]
+    );
+    assert!(scan_as(Role::Admin).is_empty());
 }

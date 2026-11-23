@@ -830,7 +830,7 @@ async fn no_audit_column_carries_a_secret() {
     assert_ne!(first_phc, phc, "the password change rehashed");
 
     let mut needles = vec![password.to_owned(), new_password.to_owned(), first_phc, phc];
-    for secret in [&session_secret, &api_secret] {
+    for secret in [&session_secret, &api_secret, &root] {
         needles.push(secret.clone());
         needles.push(secret[..8].to_owned());
         let digest = potluck::auth::token::digest(secret);

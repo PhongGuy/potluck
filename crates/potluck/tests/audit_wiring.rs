@@ -784,6 +784,10 @@ async fn no_audit_column_carries_a_secret() {
         .0,
         204
     );
+    // Salts are random, so the hash the user.create row saw differs from the one after the
+    // password change: both are searched for.
+    let bob = app.db.user_by_username("bob").await.unwrap().unwrap();
+    let first_phc = bob.password_hash().unwrap().to_owned();
     let (status, _) = call(
         &app.url("/users/bob"),
         Method::PATCH,
@@ -813,12 +817,16 @@ async fn no_audit_column_carries_a_secret() {
         .unwrap()
         .to_owned();
 
-    let mut needles = vec![password.to_owned(), new_password.to_owned(), phc];
+    assert_ne!(first_phc, phc, "the password change rehashed");
+
+    let mut needles = vec![password.to_owned(), new_password.to_owned(), first_phc, phc];
     for secret in [&session_secret, &api_secret] {
         needles.push(secret.clone());
         needles.push(secret[..8].to_owned());
         let digest = potluck::auth::token::digest(secret);
-        needles.push(digest.iter().map(|b| format!("{b:02x}")).collect());
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        needles.push(hex.to_uppercase());
+        needles.push(hex);
     }
     let c = rusqlite::Connection::open(app._dir.path().join("server.db")).unwrap();
     let mut stmt = c.prepare("SELECT * FROM audit").unwrap();

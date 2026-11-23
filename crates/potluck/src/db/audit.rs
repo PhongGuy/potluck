@@ -185,6 +185,27 @@ pub(crate) struct TokenOwner<'a> {
     pub(crate) user: &'a str,
 }
 
+/// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SignInFailure {
+    /// No account has the given username.
+    UnknownUser,
+    /// The account is disabled.
+    Disabled,
+    /// The account has no password set.
+    NoPassword,
+    /// The password did not match.
+    WrongPassword,
+}
+
+/// The `session.failed` detail.
+#[derive(serde::Serialize)]
+struct SignInFailed {
+    reason: SignInFailure,
+}
+
 /// Inserts one row stamped now; call it on the open transaction of the change it records.
 pub(crate) fn insert(
     conn: &rusqlite::Connection,
@@ -438,6 +459,30 @@ impl Db {
                 .query_map(params_from_iter(values), record_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// One `session.failed` row: actor `anonymous`, target the user only when `user` is given,
+    /// so a name that matched no account is never stored.
+    pub async fn record_failed_sign_in(
+        &self,
+        user: Option<(i64, &str)>,
+        reason: SignInFailure,
+        client_ip: Option<IpAddr>,
+    ) -> Result<(), DbError> {
+        let user = user.map(|(id, name)| (id, name.to_owned()));
+        let ctx = match client_ip {
+            Some(ip) => AuditCtx::anonymous().with_client_ip(ip),
+            None => AuditCtx::anonymous(),
+        };
+        self.call(move |conn| {
+            let mut entry = Entry::new(AuditAction::SessionFailed);
+            if let Some((id, name)) = &user {
+                entry = entry.target("user", Some(*id), Some(name));
+            }
+            insert(conn, &ctx, &entry.detail(&SignInFailed { reason })?)?;
+            Ok(())
         })
         .await
     }

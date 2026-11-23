@@ -7,7 +7,7 @@ use potluck::db::audit::{AuditCtx, AuditFilter, AuditRecord};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::common::{api_admin, api_user, call, test_app};
+use crate::common::{TestApp, api_admin, api_user, call, test_app};
 
 /// The rows of `action`, oldest first.
 async fn rows(db: &Db, action: &str) -> Vec<AuditRecord> {
@@ -241,5 +241,103 @@ async fn a_failed_insert_mints_no_token() {
     assert_eq!(
         app.db.tokens_for_user(bob_user.id()).await.unwrap().len(),
         count
+    );
+}
+
+async fn sign_in(app: &TestApp, username: &str, password: &str) -> u16 {
+    call(
+        &app.url("/session"),
+        Method::POST,
+        None,
+        Some(json!({"username": username, "password": password, "token_name": "t"})),
+    )
+    .await
+    .0
+}
+
+#[tokio::test]
+async fn a_wrong_password_names_the_user_and_the_reason() {
+    let app = test_app().await;
+    let (bob, _) = api_user(&app.db, "bob").await;
+    assert_eq!(sign_in(&app, "bob", "nope-nope").await, 401);
+    let row = rows(&app.db, "session.failed").await.pop().unwrap();
+    assert_eq!(
+        (row.actor_kind(), row.actor_id(), row.actor_name()),
+        ("anonymous", None, None)
+    );
+    assert_eq!(
+        (row.target_kind(), row.target_id(), row.target_name()),
+        (Some("user"), Some(bob.id()), Some("bob"))
+    );
+    assert_eq!(row.client_ip(), Some("127.0.0.1"));
+    assert_eq!(detail(&row), json!({"reason": "wrong_password"}));
+}
+
+#[tokio::test]
+async fn an_unknown_name_is_stored_nowhere() {
+    let app = test_app().await;
+    assert_eq!(sign_in(&app, "pasted-secret-xyz", "pw").await, 401);
+    let row = rows(&app.db, "session.failed").await.pop().unwrap();
+    assert_eq!((row.target_kind(), row.target_name()), (None, None));
+    assert_eq!(detail(&row), json!({"reason": "unknown_user"}));
+    assert!(!row.detail().unwrap().contains("pasted"));
+}
+
+#[tokio::test]
+async fn disabled_and_passwordless_users_have_their_reasons() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_user(&app.db, "bob").await;
+    let (status, _) = call(
+        &app.url("/users/bob"),
+        Method::PATCH,
+        Some(&root),
+        Some(json!({"disabled": true})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    app.db
+        .create_user(
+            potluck::db::accounts::NewUser::new("np", "No Password"),
+            &AuditCtx::system(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sign_in(&app, "bob", "pw-123456").await, 401);
+    assert_eq!(sign_in(&app, "np", "anything").await, 401);
+    let reasons: Vec<Value> = rows(&app.db, "session.failed")
+        .await
+        .iter()
+        .map(|r| detail(r)["reason"].clone())
+        .collect();
+    assert_eq!(reasons, [json!("disabled"), json!("no_password")]);
+}
+
+#[tokio::test]
+async fn rate_limited_attempts_write_nothing() {
+    let app = test_app().await;
+    api_user(&app.db, "ann").await;
+    let mut statuses = Vec::new();
+    for _ in 0..6 {
+        statuses.push(sign_in(&app, "ann", "wrong-pw").await);
+    }
+    assert_eq!(statuses, [401, 401, 401, 401, 401, 429]);
+    assert_eq!(rows(&app.db, "session.failed").await.len(), 5);
+}
+
+#[tokio::test]
+async fn a_failing_log_still_answers_401_and_blocks_success() {
+    let app = test_app().await;
+    api_user(&app.db, "bob").await;
+    boom(app._dir.path());
+    assert_eq!(
+        sign_in(&app, "bob", "wrong-pw").await,
+        401,
+        "the refusal does not change"
+    );
+    assert_eq!(
+        sign_in(&app, "bob", "pw-123456").await,
+        500,
+        "no token without its row"
     );
 }

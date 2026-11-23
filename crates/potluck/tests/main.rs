@@ -54,6 +54,7 @@ mod measurements;
 mod name_checks;
 mod notices;
 mod objects;
+mod oidc_http;
 mod overrides;
 mod panic_hook;
 mod password;

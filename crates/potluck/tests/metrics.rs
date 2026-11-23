@@ -2,10 +2,12 @@
 
 use std::net::SocketAddr;
 
+use potluck::admin::client::{AdminClient, Verb};
 use potluck::api::AppState;
 use potluck::db::Db;
-use potluck::server::{Running, ServerError, start, start_with};
+use potluck::server::{Running, ServerError, start, start_with, start_with_updates};
 
+use crate::common::release::{ReleaseServer, TestKey, manifest};
 use crate::common::{client, config_for, create_user, fast_passwords, parse_config};
 
 /// The value of the first sample whose series is exactly `series`.
@@ -259,5 +261,79 @@ async fn a_bad_bearer_token_on_the_api_counts_one_auth_failure() {
         "{text}"
     );
     assert!(!text.contains("plk_definitely"), "{text}");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_scrape_reads_slots_queue_and_the_update_check() {
+    let (server, key) = (ReleaseServer::start().await, TestKey::new());
+    server.publish(&key, &manifest("9.0.0"));
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().to_str().unwrap().to_owned();
+    let config = parse_config(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--metrics-listen",
+        "127.0.0.1:0",
+        "--data",
+        &data,
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--no-update-check",
+    ])
+    .unwrap();
+    let running = start_with_updates(&config, server.source(&key))
+        .await
+        .unwrap();
+    let before = scrape(&running).await;
+    assert_eq!(
+        sample(&before, "potluck_update_available"),
+        Some(0.0),
+        "{before}"
+    );
+    assert_eq!(
+        sample(&before, "potluck_git_slots_in_use"),
+        Some(0.0),
+        "{before}"
+    );
+    assert!(
+        sample(&before, "potluck_git_slots_limit").unwrap() >= 2.0,
+        "{before}"
+    );
+    assert_eq!(
+        sample(&before, "potluck_sse_subscribers"),
+        Some(0.0),
+        "{before}"
+    );
+    assert_eq!(
+        sample(&before, "potluck_db_queue_depth"),
+        Some(0.0),
+        "{before}"
+    );
+    // The first check records 9.0.0 (found); the second sees nothing newer (current).
+    for _ in 0..2 {
+        let response = AdminClient::connect(running.admin_socket())
+            .await
+            .unwrap()
+            .send(Verb::Post, "/api/v1/update/check", None)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{}", response.text());
+    }
+    let after = scrape(&running).await;
+    assert_eq!(
+        sample(&after, "potluck_update_available"),
+        Some(1.0),
+        "{after}"
+    );
+    for (outcome, want) in [
+        ("found", 1.0),
+        ("current", 1.0),
+        ("not_found", 0.0),
+        ("failed", 0.0),
+    ] {
+        let series = format!("potluck_update_checks_total{{outcome=\"{outcome}\"}}");
+        assert_eq!(sample(&after, &series), Some(want), "{series} in {after}");
+    }
     running.shutdown().await;
 }

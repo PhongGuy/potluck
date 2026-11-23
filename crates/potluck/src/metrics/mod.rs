@@ -358,7 +358,20 @@ pub(crate) fn router(state: AppState) -> Router {
 }
 
 async fn scrape(State(state): State<AppState>) -> impl IntoResponse {
-    let body = state.metrics().render(&Snapshot::default());
+    let (slots_in_use, slots_limit) = state.git().slots();
+    let (update_available, update_checks) = state.updates().map_or_else(
+        || (false, UpdateCounts::default()),
+        |c| (c.status().latest().is_some(), c.check_counts()),
+    );
+    let snapshot = Snapshot {
+        sse_subscribers: state.notices().open() as u64,
+        slots_in_use,
+        slots_limit,
+        db_queue_depth: state.db().queue_depth(),
+        update_available,
+        update_checks,
+    };
+    let body = state.metrics().render(&snapshot);
     ([(header::CONTENT_TYPE, OPENMETRICS)], body)
 }
 
@@ -423,7 +436,7 @@ impl Collector for Snapshot {
             ),
             (
                 "potluck_db_queue_depth",
-                "Database jobs waiting or running",
+                "Database jobs waiting to run",
                 self.db_queue_depth,
             ),
             (

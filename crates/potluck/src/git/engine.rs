@@ -76,6 +76,7 @@ pub struct GitEngine {
     tmp_dir: PathBuf,
     max_body: u64,
     permits: Arc<Semaphore>,
+    processes: usize,
     queue_wait: Duration,
     upload_timeout: Duration,
     max_runtime: Duration,
@@ -100,12 +101,20 @@ impl GitEngine {
             tmp_dir,
             max_body,
             permits: Arc::new(Semaphore::new(limits.processes)),
+            processes: limits.processes,
             queue_wait: limits.queue_wait,
             upload_timeout: limits.upload_timeout,
             max_runtime: limits.max_runtime,
             writers: sweep::Writers::default(),
             tasks: TaskTracker::new(),
         }
+    }
+
+    /// Git slots held now and the configured limit, as `(in_use, limit)`.
+    pub(crate) fn slots(&self) -> (u64, u64) {
+        let limit = self.processes as u64;
+        let free = self.permits.available_permits() as u64;
+        (limit.saturating_sub(free), limit)
     }
 
     /// Marks each of `repos` dirty, so the next push to leave it sweeps it.

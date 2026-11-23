@@ -63,6 +63,7 @@ mod reject_golden;
 mod release_notes;
 mod release_workflow;
 mod repos;
+mod retention;
 mod rules_crates;
 mod secret_entries;
 mod secret_git;

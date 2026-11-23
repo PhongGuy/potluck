@@ -6,7 +6,9 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
 
+use super::audit;
 use super::auth::{Authenticated, token_required};
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::json::ApiJson;
 use super::objects::{WorkspaceJson, noreply_host};
@@ -42,6 +44,7 @@ pub(super) struct CreateWorkspace {
 pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     Path(team): Path<String>,
     body: Result<ApiJson<CreateWorkspace>, ErrorResponse>,
 ) -> ApiResult<(StatusCode, Json<WorkspaceJson>)> {
@@ -79,6 +82,7 @@ pub(super) async fn create(
     );
     let row =
         NewWorkspace::new(team.id(), &slug, &name, kind.kind(), &branch).import_pending(!seed);
+    let ctx = audit::ctx(&auth, ip);
     // A spawned task runs to its end even when axum drops this future on a disconnect, so a
     // claimed directory is always either completed with its row or removed again.
     let task = state.git().tasks().spawn(async move {
@@ -94,7 +98,7 @@ pub(super) async fn create(
                     .await
                     .map_err(repo_error)?;
             }
-            Ok::<_, ApiError>(db.create_workspace(row).await?)
+            Ok::<_, ApiError>(db.create_workspace(row, &ctx).await?)
         })
         .await
     });
@@ -200,6 +204,7 @@ pub(super) async fn get(
 pub(super) async fn delete(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     path: WsPath,
 ) -> ApiResult<StatusCode> {
     let (ws, role) = load(&state, &auth, path).await?;
@@ -211,10 +216,11 @@ pub(super) async fn delete(
     let repos = state.git().repos().clone();
     let db = state.db().clone();
     let notices = state.notices().clone();
+    let ctx = audit::ctx(&auth, ip);
     // Row first, so a git request never meets a live workspace without its repository; the
     // spawned task finishes both steps even when axum drops this future on a disconnect.
     let task = state.git().tasks().spawn(async move {
-        if !db.delete_workspace(ws.id()).await? {
+        if !db.delete_workspace(ws.id(), &ctx).await? {
             return Err(ApiError::not_found("no such workspace"));
         }
         // The rows are gone, so the streams go now, even if removing the repository fails.

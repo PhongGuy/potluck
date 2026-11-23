@@ -2,6 +2,7 @@
 
 use potluck::api::error::{ApiError, ErrorCode};
 use potluck::db::DbError;
+use potluck::db::audit::AuditCtx;
 use potluck::db::workspaces::NewWorkspace;
 use potluck::slug::Slug;
 
@@ -14,16 +15,19 @@ fn slug(s: &str) -> Slug {
 #[tokio::test]
 async fn workspaces_are_created_found_listed_and_deleted() {
     let (_dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
-    let other = db.create_team(&slug("other"), "Other").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
+    let other = db
+        .create_team(&slug("other"), "Other", &AuditCtx::system())
+        .await
+        .unwrap();
     let api = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "API", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -43,6 +47,7 @@ async fn workspaces_are_created_found_listed_and_deleted() {
         .create_workspace(
             NewWorkspace::new(other.id(), &slug("api"), "API", "apinata", "trunk")
                 .import_pending(true),
+            &AuditCtx::system(),
         )
         .await
         .unwrap();
@@ -68,19 +73,22 @@ async fn workspaces_are_created_found_listed_and_deleted() {
         .collect();
     assert_eq!(names, ["core/api", "other/api"]);
     let err = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "Again",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "Again", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::Conflict { .. }), "got {err:?}");
-    assert!(db.delete_workspace(api.id()).await.unwrap());
     assert!(
-        !db.delete_workspace(api.id()).await.unwrap(),
+        db.delete_workspace(api.id(), &AuditCtx::system())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.delete_workspace(api.id(), &AuditCtx::system())
+            .await
+            .unwrap(),
         "already gone"
     );
     assert_eq!(db.workspace_by_slugs("core", "api").await.unwrap(), None);
@@ -90,15 +98,15 @@ async fn workspaces_are_created_found_listed_and_deleted() {
 #[tokio::test]
 async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
     let (_dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
     let err = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("x"),
-            "X",
-            "unknown",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("x"), "X", "unknown", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -106,7 +114,10 @@ async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
         "the CHECK constraint holds: {err:?}"
     );
     let err = db
-        .create_workspace(NewWorkspace::new(999, &slug("x"), "X", "apinata", "main"))
+        .create_workspace(
+            NewWorkspace::new(999, &slug("x"), "X", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -119,7 +130,10 @@ async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
 #[tokio::test]
 async fn a_workspace_create_that_loses_the_race_is_a_conflict() {
     let (dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
     // A second writer on the same file claims (team, slug) just before our insert lands.
     rusqlite::Connection::open(dir.path().join("server.db"))
         .unwrap()
@@ -132,13 +146,10 @@ async fn a_workspace_create_that_loses_the_race_is_a_conflict() {
         )
         .unwrap();
     let err = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "API", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     match &err {

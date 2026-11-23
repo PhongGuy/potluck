@@ -1,6 +1,7 @@
 //! The readable workspace list, `GET W`, `/me` carrying the same list, and `System`.
 
 use potluck::db::accounts::UserPatch;
+use potluck::db::audit::AuditCtx;
 use potluck::db::grants::Subject;
 use potluck::db::workspaces::NewWorkspace;
 use potluck::role::Role;
@@ -36,16 +37,34 @@ async fn the_list_and_me_show_held_workspaces_with_the_highest_role() {
         .unwrap()
         .unwrap();
     app.db
-        .put_grant(docs.id(), Subject::User("bob".into()), Role::Read)
+        .put_grant(
+            docs.id(),
+            Subject::User("bob".into()),
+            Role::Read,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
-    app.db.add_member(core.id(), bob_rec.id()).await.unwrap();
     app.db
-        .put_grant(api_ws.id(), Subject::Team("core".into()), Role::Write)
+        .add_member(core.id(), bob_rec.id(), &AuditCtx::system())
         .await
         .unwrap();
     app.db
-        .put_grant(api_ws.id(), Subject::User("bob".into()), Role::Read)
+        .put_grant(
+            api_ws.id(),
+            Subject::Team("core".into()),
+            Role::Write,
+            &AuditCtx::system(),
+        )
+        .await
+        .unwrap();
+    app.db
+        .put_grant(
+            api_ws.id(),
+            Subject::User("bob".into()),
+            Role::Read,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, list) = call(&app.url("/workspaces"), Method::GET, Some(&bob), None).await;
@@ -105,7 +124,12 @@ async fn get_workspace_needs_read_and_hides_what_the_caller_cannot_see() {
         .unwrap()
         .unwrap();
     app.db
-        .put_grant(ws.id(), Subject::User("bob".into()), Role::Read)
+        .put_grant(
+            ws.id(),
+            Subject::User("bob".into()),
+            Role::Read,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, body) = call(&url, Method::GET, Some(&bob), None).await;
@@ -127,7 +151,11 @@ async fn get_workspace_needs_read_and_hides_what_the_caller_cannot_see() {
     let (status, _) = call(&url, Method::GET, None, None).await;
     assert_eq!(status, 401);
     app.db
-        .update_user("bob", UserPatch::default().disabled(true))
+        .update_user(
+            "bob",
+            UserPatch::default().disabled(true),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, err) = call(&url, Method::GET, Some(&bob), None).await;
@@ -146,18 +174,21 @@ async fn the_admin_socket_sees_every_workspace_as_admin() {
         .unwrap();
     let core = running
         .db()
-        .create_team(&Slug::parse("core").unwrap(), "Core")
+        .create_team(&Slug::parse("core").unwrap(), "Core", &AuditCtx::system())
         .await
         .unwrap();
     running
         .db()
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &Slug::parse("api").unwrap(),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(
+                core.id(),
+                &Slug::parse("api").unwrap(),
+                "API",
+                "apinata",
+                "main",
+            ),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, body) = unix_get(running.admin_socket(), "/api/v1/workspaces").await;

@@ -1,7 +1,8 @@
 //! The token queries on the one database thread.
 
 use potluck::db::Db;
-use potluck::db::accounts::{NewToken, NewUser};
+use potluck::db::accounts::{NewToken, NewUser, TokenOrigin};
+use potluck::db::audit::AuditCtx;
 
 use crate::common::migrated_db;
 
@@ -21,25 +22,30 @@ async fn last_used(db: &Db, id: i64) -> Option<String> {
 #[tokio::test]
 async fn tokens_round_trip_by_prefix_user_and_id() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let t1 = db
-        .create_token(NewToken::new(
-            bob.id(),
-            "laptop",
-            "plk_aaaa",
-            digest(1),
-            None,
-        ))
+        .create_token(
+            NewToken::new(bob.id(), "laptop", "plk_aaaa", digest(1), None),
+            TokenOrigin::Api,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let t2 = db
-        .create_token(NewToken::new(
-            bob.id(),
-            "ci",
-            "plk_aaaa",
-            digest(2),
-            Some("2030-01-01T00:00:00Z"),
-        ))
+        .create_token(
+            NewToken::new(
+                bob.id(),
+                "ci",
+                "plk_aaaa",
+                digest(2),
+                Some("2030-01-01T00:00:00Z"),
+            ),
+            TokenOrigin::Api,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     assert_eq!(t1.name(), "laptop");
@@ -73,13 +79,20 @@ async fn tokens_round_trip_by_prefix_user_and_id() {
 #[tokio::test]
 async fn delete_token_reports_whether_a_row_went() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
-    let t = db
-        .create_token(NewToken::new(bob.id(), "x", "plk_aaaa", digest(3), None))
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
         .await
         .unwrap();
-    assert!(db.delete_token(t.id()).await.unwrap());
-    assert!(!db.delete_token(t.id()).await.unwrap());
+    let t = db
+        .create_token(
+            NewToken::new(bob.id(), "x", "plk_aaaa", digest(3), None),
+            TokenOrigin::Api,
+            &AuditCtx::system(),
+        )
+        .await
+        .unwrap();
+    assert!(db.delete_token(t.id(), &AuditCtx::system()).await.unwrap());
+    assert!(!db.delete_token(t.id(), &AuditCtx::system()).await.unwrap());
     assert!(db.tokens_for_user(bob.id()).await.unwrap().is_empty());
     db.touch_token(t.id(), "2026-11-15T10:00:00Z", "2026-11-15T09:59:00Z")
         .await
@@ -89,9 +102,16 @@ async fn delete_token_reports_whether_a_row_went() {
 #[tokio::test]
 async fn touch_token_writes_only_when_stale() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let t = db
-        .create_token(NewToken::new(bob.id(), "x", "plk_aaaa", digest(4), None))
+        .create_token(
+            NewToken::new(bob.id(), "x", "plk_aaaa", digest(4), None),
+            TokenOrigin::Api,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let id = t.id();
@@ -125,7 +145,10 @@ async fn touch_token_writes_only_when_stale() {
 async fn debug_redacts_digests() {
     let (_dir, db) = migrated_db().await;
     let bob = db
-        .create_user(NewUser::new("bob", "Bob").password_hash("$argon2id$hashhash"))
+        .create_user(
+            NewUser::new("bob", "Bob").password_hash("$argon2id$hashhash"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let new_token = NewToken::new(bob.id(), "x", "plk_aaaa", [0xAB; 32], None);
@@ -138,7 +161,9 @@ async fn debug_redacts_digests() {
         !shown.contains("171, 171") && !shown.contains("0xab"),
         "NewToken leaked: {shown}"
     );
-    db.create_token(new_token).await.unwrap();
+    db.create_token(new_token, TokenOrigin::Api, &AuditCtx::system())
+        .await
+        .unwrap();
     let candidates = db.tokens_by_prefix("plk_aaaa").await.unwrap();
     let shown = format!("{:?}", candidates[0]);
     assert!(

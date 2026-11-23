@@ -1,6 +1,5 @@
 //! The append-only `audit` table: who did what to which target, written inside the
 //! transaction of the change it records.
-#![cfg_attr(not(test), allow(dead_code, reason = "wired by the audit wiring plan"))]
 
 use std::net::IpAddr;
 
@@ -160,6 +159,78 @@ impl Entry {
             ..self
         })
     }
+}
+
+/// The `user.create` detail.
+#[derive(serde::Serialize)]
+pub(crate) struct UserCreated {
+    pub(crate) server_admin: bool,
+}
+
+/// The `user.update` detail: the set fields in assignment order, the hash named `password`, and
+/// the new value of each flag the patch set.
+#[derive(serde::Serialize)]
+pub(crate) struct UserUpdated {
+    pub(crate) fields: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) server_admin: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disabled: Option<bool>,
+}
+
+/// The `token.create` and `token.revoke` detail: the token owner's username.
+#[derive(serde::Serialize)]
+pub(crate) struct TokenOwner<'a> {
+    pub(crate) user: &'a str,
+}
+
+/// The `team.member_add` and `team.member_remove` detail: the member's username.
+#[derive(serde::Serialize)]
+pub(crate) struct MemberDetail<'a> {
+    pub(crate) user: &'a str,
+}
+
+/// The `workspace.create` detail: the kind and whether the repository was seeded.
+#[derive(serde::Serialize)]
+pub(crate) struct WorkspaceCreated<'a> {
+    pub(crate) kind: &'a str,
+    pub(crate) seed: bool,
+}
+
+/// The `grant.put` and `grant.delete` detail: the role before, null for a new grant, and the
+/// role after, absent on a delete.
+#[derive(serde::Serialize)]
+pub(crate) struct GrantChange<'a> {
+    pub(crate) old: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) new: Option<&'a str>,
+}
+
+/// The `override.use` detail: how many refs the consuming push moved.
+#[derive(serde::Serialize)]
+pub(crate) struct OverrideUsed {
+    pub(crate) refs: usize,
+}
+
+/// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SignInFailure {
+    /// No account has the given username.
+    UnknownUser,
+    /// The account is disabled.
+    Disabled,
+    /// The account has no password set.
+    NoPassword,
+    /// The password did not match.
+    WrongPassword,
+}
+
+/// The `session.failed` detail.
+#[derive(serde::Serialize)]
+struct SignInFailed {
+    reason: SignInFailure,
 }
 
 /// Inserts one row stamped now; call it on the open transaction of the change it records.
@@ -415,6 +486,30 @@ impl Db {
                 .query_map(params_from_iter(values), record_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// One `session.failed` row: actor `anonymous`, target the user only when `user` is given,
+    /// so a name that matched no account is never stored.
+    pub async fn record_failed_sign_in(
+        &self,
+        user: Option<(i64, &str)>,
+        reason: SignInFailure,
+        client_ip: Option<IpAddr>,
+    ) -> Result<(), DbError> {
+        let user = user.map(|(id, name)| (id, name.to_owned()));
+        let ctx = match client_ip {
+            Some(ip) => AuditCtx::anonymous().with_client_ip(ip),
+            None => AuditCtx::anonymous(),
+        };
+        self.call(move |conn| {
+            let mut entry = Entry::new(AuditAction::SessionFailed);
+            if let Some((id, name)) = &user {
+                entry = entry.target("user", Some(*id), Some(name));
+            }
+            insert(conn, &ctx, &entry.detail(&SignInFailed { reason })?)?;
+            Ok(())
         })
         .await
     }

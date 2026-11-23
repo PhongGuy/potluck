@@ -474,3 +474,116 @@ async fn a_failed_insert_leaves_no_workspace_and_no_directory() {
         "the claimed directory is removed"
     );
 }
+
+/// A grant row's target kind, target name, workspace and detail.
+type GrantRow<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, Value);
+
+async fn grant(app: &TestApp, token: &str, path: &str, method: Method, role: Option<&str>) -> u16 {
+    call(
+        &app.url(&format!("/workspaces/core/api/grants/{path}")),
+        method,
+        Some(token),
+        role.map(|r| json!({"role": r})),
+    )
+    .await
+    .0
+}
+
+#[tokio::test]
+async fn grants_record_old_and_new_roles() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_user(&app.db, "bob").await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", true).await;
+    assert_eq!(
+        grant(&app, &root, "user/bob", Method::PUT, Some("write")).await,
+        200
+    );
+    assert_eq!(
+        grant(&app, &root, "user/bob", Method::PUT, Some("admin")).await,
+        200
+    );
+    assert_eq!(
+        grant(&app, &root, "team/core", Method::PUT, Some("read")).await,
+        200
+    );
+    let put = rows(&app.db, "grant.put").await;
+    let got: Vec<GrantRow<'_>> = put
+        .iter()
+        .map(|r| (r.target_kind(), r.target_name(), r.workspace(), detail(r)))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Some("user"),
+                Some("bob"),
+                Some("core/api"),
+                json!({"old": null, "new": "write"})
+            ),
+            (
+                Some("user"),
+                Some("bob"),
+                Some("core/api"),
+                json!({"old": "write", "new": "admin"})
+            ),
+            (
+                Some("team"),
+                Some("core"),
+                Some("core/api"),
+                json!({"old": null, "new": "read"})
+            ),
+        ]
+    );
+    assert_eq!(
+        grant(&app, &root, "user/bob", Method::DELETE, None).await,
+        204
+    );
+    assert_eq!(
+        grant(&app, &root, "user/bob", Method::DELETE, None).await,
+        404
+    );
+    assert_eq!(
+        grant(&app, &root, "user/ghost", Method::PUT, Some("read")).await,
+        404
+    );
+    let deleted = rows(&app.db, "grant.delete").await;
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(detail(&deleted[0]), json!({"old": "admin"}));
+    assert_eq!(
+        rows(&app.db, "grant.put").await.len(),
+        3,
+        "the unknown subject wrote nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_insert_leaves_the_grant_unchanged() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_user(&app.db, "bob").await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", true).await;
+    assert_eq!(
+        grant(&app, &root, "user/bob", Method::PUT, Some("read")).await,
+        200
+    );
+    boom(app._dir.path());
+    assert_eq!(
+        grant(&app, &root, "user/bob", Method::PUT, Some("admin")).await,
+        500
+    );
+    let (status, body) = call(
+        &app.url("/workspaces/core/api/grants"),
+        Method::GET,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body,
+        json!([{"subject": {"kind": "user", "name": "bob"}, "role": "read"}])
+    );
+}

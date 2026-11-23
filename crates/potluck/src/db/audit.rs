@@ -198,6 +198,15 @@ pub(crate) struct WorkspaceCreated<'a> {
     pub(crate) seed: bool,
 }
 
+/// The `grant.put` and `grant.delete` detail: the role before, null for a new grant, and the
+/// role after, absent on a delete.
+#[derive(serde::Serialize)]
+pub(crate) struct GrantChange<'a> {
+    pub(crate) old: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) new: Option<&'a str>,
+}
+
 /// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

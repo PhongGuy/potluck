@@ -7,7 +7,9 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use super::AppState;
+use super::audit;
 use super::auth::Authenticated;
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::events;
 use super::json::ApiJson;
@@ -44,6 +46,7 @@ pub(super) async fn list(
 pub(super) async fn put(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     path: GrantPath,
     body: Result<ApiJson<PutGrant>, ErrorResponse>,
 ) -> ApiResult<Json<GrantJson>> {
@@ -52,7 +55,11 @@ pub(super) async fn put(
     let Some(role) = Role::parse(&body.role) else {
         return Err(ApiError::invalid_value("role", "role must be read, write or admin").into());
     };
-    match state.db().put_grant(ws.id(), subject, role).await? {
+    match state
+        .db()
+        .put_grant(ws.id(), subject, role, &audit::ctx(&auth, ip))
+        .await?
+    {
         Some(grant) => Ok(Json(GrantJson::from(&grant))),
         None => Err(ApiError::not_found("no such user or team").into()),
     }
@@ -62,10 +69,15 @@ pub(super) async fn put(
 pub(super) async fn delete(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     path: GrantPath,
 ) -> ApiResult<StatusCode> {
     let (ws, subject) = load_subject(&state, &auth, path).await?;
-    if !state.db().delete_grant(ws.id(), subject.clone()).await? {
+    if !state
+        .db()
+        .delete_grant(ws.id(), subject.clone(), &audit::ctx(&auth, ip))
+        .await?
+    {
         return Err(ApiError::not_found("no such grant").into());
     }
     // Everyone who held the grant may have lost their last way in; their streams close here.

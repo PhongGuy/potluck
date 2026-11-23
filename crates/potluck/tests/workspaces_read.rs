@@ -37,7 +37,12 @@ async fn the_list_and_me_show_held_workspaces_with_the_highest_role() {
         .unwrap()
         .unwrap();
     app.db
-        .put_grant(docs.id(), Subject::User("bob".into()), Role::Read)
+        .put_grant(
+            docs.id(),
+            Subject::User("bob".into()),
+            Role::Read,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     app.db
@@ -45,11 +50,21 @@ async fn the_list_and_me_show_held_workspaces_with_the_highest_role() {
         .await
         .unwrap();
     app.db
-        .put_grant(api_ws.id(), Subject::Team("core".into()), Role::Write)
+        .put_grant(
+            api_ws.id(),
+            Subject::Team("core".into()),
+            Role::Write,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     app.db
-        .put_grant(api_ws.id(), Subject::User("bob".into()), Role::Read)
+        .put_grant(
+            api_ws.id(),
+            Subject::User("bob".into()),
+            Role::Read,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, list) = call(&app.url("/workspaces"), Method::GET, Some(&bob), None).await;
@@ -109,7 +124,12 @@ async fn get_workspace_needs_read_and_hides_what_the_caller_cannot_see() {
         .unwrap()
         .unwrap();
     app.db
-        .put_grant(ws.id(), Subject::User("bob".into()), Role::Read)
+        .put_grant(
+            ws.id(),
+            Subject::User("bob".into()),
+            Role::Read,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, body) = call(&url, Method::GET, Some(&bob), None).await;

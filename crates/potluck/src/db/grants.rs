@@ -2,6 +2,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
+use super::audit::{self, AuditAction, AuditCtx, Entry, GrantChange};
 use super::workspaces::{WORKSPACE_COLUMNS, WorkspaceRecord, workspace_from_row};
 use super::{Db, DbError};
 use crate::clock;
@@ -120,42 +121,126 @@ fn subject_id(conn: &Connection, subject: &Subject) -> rusqlite::Result<Option<i
         .optional()
 }
 
+/// The role text of the subject's grant on the workspace, if it holds one.
+fn current_role(
+    conn: &Connection,
+    workspace_id: i64,
+    subject: &Subject,
+    id: i64,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT role FROM grants \
+         WHERE workspace_id = ?1 AND subject_kind = ?2 AND subject_id = ?3",
+        params![workspace_id, subject.kind(), id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Writes a grant's audit row, naming the workspace as `{team}/{ws}` as it stands now.
+fn log_grant(
+    conn: &Connection,
+    ctx: &AuditCtx,
+    action: AuditAction,
+    workspace_id: i64,
+    subject: &Subject,
+    id: i64,
+    change: &GrantChange<'_>,
+) -> Result<(), DbError> {
+    let workspace: String = conn.query_row(
+        "SELECT t.slug || '/' || w.slug FROM workspaces w \
+         JOIN teams t ON t.id = w.team_id WHERE w.id = ?1",
+        [workspace_id],
+        |row| row.get(0),
+    )?;
+    let entry = Entry::new(action)
+        .target(subject.kind(), Some(id), Some(subject.name()))
+        .workspace(&workspace)
+        .detail(change)?;
+    Ok(audit::insert(conn, ctx, &entry)?)
+}
+
 impl Db {
-    /// Inserts or replaces the subject's grant; `Ok(None)` when no such user or team exists.
+    /// Inserts or replaces the subject's grant and writes its `grant.put` row in one
+    /// transaction; `Ok(None)`, and no audit row, when no such user or team exists.
     pub async fn put_grant(
         &self,
         workspace_id: i64,
         subject: Subject,
         role: Role,
+        ctx: &AuditCtx,
     ) -> Result<Option<GrantRecord>, DbError> {
+        let ctx = ctx.clone();
+        // An error at any step drops `tx` uncommitted.
         self.call(move |conn| {
-            let Some(id) = subject_id(conn, &subject)? else {
+            let tx = conn.transaction()?;
+            let Some(id) = subject_id(&tx, &subject)? else {
                 return Ok(None);
             };
-            conn.execute(
+            let old = current_role(&tx, workspace_id, &subject, id)?;
+            tx.execute(
                 "INSERT INTO grants (workspace_id, subject_kind, subject_id, role) \
                  VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT(workspace_id, subject_kind, subject_id) \
                  DO UPDATE SET role = excluded.role",
                 params![workspace_id, subject.kind(), id, role.as_str()],
             )?;
+            let change = GrantChange {
+                old: old.as_deref(),
+                new: Some(role.as_str()),
+            };
+            log_grant(
+                &tx,
+                &ctx,
+                AuditAction::GrantPut,
+                workspace_id,
+                &subject,
+                id,
+                &change,
+            )?;
+            tx.commit()?;
             Ok(Some(GrantRecord::new(subject, role)))
         })
         .await
     }
 
-    /// `Ok(true)` when a grant went; `Ok(false)` for no such grant or subject.
-    pub async fn delete_grant(&self, workspace_id: i64, subject: Subject) -> Result<bool, DbError> {
+    /// Deletes the subject's grant and writes its `grant.delete` row in one transaction.
+    /// `Ok(true)` when a grant went; `Ok(false)`, and no audit row, for no such grant or subject.
+    pub async fn delete_grant(
+        &self,
+        workspace_id: i64,
+        subject: Subject,
+        ctx: &AuditCtx,
+    ) -> Result<bool, DbError> {
+        let ctx = ctx.clone();
         self.call(move |conn| {
-            let Some(id) = subject_id(conn, &subject)? else {
+            let tx = conn.transaction()?;
+            let Some(id) = subject_id(&tx, &subject)? else {
                 return Ok(false);
             };
-            let changed = conn.execute(
+            let Some(old) = current_role(&tx, workspace_id, &subject, id)? else {
+                return Ok(false);
+            };
+            tx.execute(
                 "DELETE FROM grants \
                  WHERE workspace_id = ?1 AND subject_kind = ?2 AND subject_id = ?3",
                 params![workspace_id, subject.kind(), id],
             )?;
-            Ok(changed > 0)
+            let change = GrantChange {
+                old: Some(&old),
+                new: None,
+            };
+            log_grant(
+                &tx,
+                &ctx,
+                AuditAction::GrantDelete,
+                workspace_id,
+                &subject,
+                id,
+                &change,
+            )?;
+            tx.commit()?;
+            Ok(true)
         })
         .await
     }

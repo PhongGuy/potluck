@@ -56,6 +56,7 @@ mod notices;
 mod objects;
 mod oidc_http;
 mod oidc_mock_idp;
+mod oidc_provider;
 mod oidc_settings;
 mod overrides;
 mod panic_hook;

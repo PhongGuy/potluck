@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use reqwest::redirect::Policy;
 
 /// Connect timeout for an identity provider request.
@@ -67,17 +69,41 @@ impl IdpHttp {
 
     /// GET `url`: the status and the whole body; any 3xx is `Redirect`.
     pub async fn get(&self, url: &str) -> Result<(u16, Vec<u8>), IdpHttpError> {
-        self.send(self.client.get(url)).await
+        let (status, _, body) = self.send(self.client.get(url)).await?;
+        Ok((status.as_u16(), body))
+    }
+
+    /// Sends one request openidconnect built and hands back its answer; any 3xx is `Redirect`.
+    /// Crate-private because its types come from the `http` crate.
+    pub(crate) async fn call(
+        &self,
+        request: openidconnect::HttpRequest,
+    ) -> Result<openidconnect::HttpResponse, IdpHttpError> {
+        let (parts, body) = request.into_parts();
+        let builder = self
+            .client
+            .request(parts.method, parts.uri.to_string())
+            .headers(parts.headers)
+            .body(body);
+        let (status, headers, body) = self.send(builder).await?;
+        let mut response = openidconnect::HttpResponse::new(body);
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        Ok(response)
     }
 
     // Sends one request and reads its body chunk by chunk under the cap, since reqwest has no
     // limit of its own. With redirects off a 3xx arrives as a response and is refused here.
-    async fn send(&self, request: reqwest::RequestBuilder) -> Result<(u16, Vec<u8>), IdpHttpError> {
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<(StatusCode, HeaderMap, Vec<u8>), IdpHttpError> {
         let mut response = request.send().await.map_err(classify)?;
         let status = response.status();
         if status.is_redirection() {
             return Err(IdpHttpError::Redirect);
         }
+        let headers = std::mem::take(response.headers_mut());
         let mut body = Vec::new();
         while let Some(chunk) = response.chunk().await.map_err(classify)? {
             if body.len() + chunk.len() > self.max_body {
@@ -85,7 +111,7 @@ impl IdpHttp {
             }
             body.extend_from_slice(&chunk);
         }
-        Ok((status.as_u16(), body))
+        Ok((status, headers, body))
     }
 }
 

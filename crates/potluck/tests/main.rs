@@ -55,6 +55,7 @@ mod name_checks;
 mod notices;
 mod objects;
 mod oidc_http;
+mod oidc_settings;
 mod overrides;
 mod panic_hook;
 mod password;

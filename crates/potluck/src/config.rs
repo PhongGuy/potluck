@@ -40,15 +40,21 @@ pub struct ServeArgs {
     /// an IPv4-mapped IPv6 range counts as the IPv4 range it maps.
     #[arg(long, env = "POTLUCK_TRUSTED_PROXIES", value_delimiter = ',')]
     trusted_proxies: Vec<String>,
-    /// OIDC issuer URL; parsed, but refused until OIDC sign-in exists.
+    /// OIDC issuer URL, kept exactly as given.
     #[arg(long, env = "POTLUCK_OIDC_ISSUER")]
     oidc_issuer: Option<String>,
-    /// OIDC client id; parsed, but refused until OIDC sign-in exists.
+    /// OIDC client id.
     #[arg(long, env = "POTLUCK_OIDC_CLIENT_ID")]
     oidc_client_id: Option<String>,
-    /// File holding the OIDC client secret; parsed, but refused until OIDC sign-in exists.
+    /// File holding the OIDC client secret.
     #[arg(long, env = "POTLUCK_OIDC_CLIENT_SECRET_FILE")]
     oidc_client_secret_file: Option<PathBuf>,
+    /// The provider's name on the apps' sign-in button; default the issuer's host.
+    #[arg(long, env = "POTLUCK_OIDC_NAME")]
+    oidc_name: Option<String>,
+    /// Create a Potluck account at the first OIDC sign-in of an unlinked subject.
+    #[arg(long, env = "POTLUCK_OIDC_JIT", action = clap::ArgAction::SetTrue)]
+    oidc_jit: bool,
     /// Turn off the daily check for a new signed release.
     #[arg(long = "no-update-check", env = "POTLUCK_UPDATE_CHECK", action = clap::ArgAction::SetFalse)]
     update_check: bool,
@@ -245,11 +251,46 @@ pub enum ConfigError {
         /// The parser's complaint.
         reason: String,
     },
-    /// An `--oidc-*` flag is set, and OIDC is not implemented yet.
+    /// A complete, valid set of `--oidc-*` flags, and OIDC sign-in is not implemented yet.
     #[error(
         "OIDC sign-in is not implemented in this version; unset --oidc-issuer, --oidc-client-id and --oidc-client-secret-file (POTLUCK_OIDC_*)"
     )]
     OidcUnsupported,
+    /// Some but not all of issuer, client id and secret file are set.
+    #[error(
+        "OIDC sign-in needs --oidc-issuer, --oidc-client-id and --oidc-client-secret-file together (POTLUCK_OIDC_*); missing: {missing}"
+    )]
+    OidcIncomplete {
+        /// The absent flags in the order issuer, client id, secret file, joined by ", ".
+        missing: String,
+    },
+    /// The issuer does not parse, carries credentials, a query or a fragment, or is not http(s).
+    #[error("--oidc-issuer {url:?} is not a valid issuer URL: {reason}")]
+    InvalidOidcIssuer {
+        /// The issuer as given, credentials redacted.
+        url: String,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// The issuer is plain http to a non-loopback host and `--insecure-http` is unset.
+    #[error(
+        "--oidc-issuer {url:?} is plain http to a non-loopback host; use https, or pass --insecure-http to accept that"
+    )]
+    InsecureOidcIssuer {
+        /// The issuer as given, credentials redacted.
+        url: String,
+    },
+    /// The client secret file is unreadable or empty.
+    #[error("--oidc-client-secret-file {path}: {reason}")]
+    OidcSecretFile {
+        /// The file as given.
+        path: PathBuf,
+        /// "is empty" or the io error kind; never the file's content.
+        reason: String,
+    },
+    /// `--oidc-name` is blank or longer than 64 characters once trimmed.
+    #[error("--oidc-name must be 1 to 64 characters")]
+    InvalidOidcName,
     /// `<data>/admin.sock` is too long to bind as a Unix socket.
     #[error(
         "the admin socket {path} is {len} bytes, over the {max}-byte limit for a Unix socket path; choose a shorter --data"
@@ -290,10 +331,15 @@ impl TryFrom<ServeArgs> for Config {
             reason: e.to_string(),
         })?;
         let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
-        if args.oidc_issuer.is_some()
-            || args.oidc_client_id.is_some()
-            || args.oidc_client_secret_file.is_some()
-        {
+        let oidc = crate::oidc::OidcSettings::from_flags(
+            args.oidc_issuer.as_deref(),
+            args.oidc_client_id.as_deref(),
+            args.oidc_client_secret_file.as_deref(),
+            args.oidc_name.as_deref(),
+            args.oidc_jit,
+            args.insecure_http,
+        )?;
+        if oidc.is_some() {
             return Err(ConfigError::OidcUnsupported);
         }
         Ok(Self {
@@ -365,15 +411,14 @@ fn validate_public_url(raw: &str, insecure_http: bool) -> Result<String, ConfigE
     if url.query().is_some() || url.fragment().is_some() {
         return Err(invalid("must not have a query or fragment".to_owned()));
     }
-    match url.scheme() {
-        "https" => {}
-        "http" if insecure_http || is_loopback(url.host()) => {}
-        "http" => {
+    match check_scheme(&url, insecure_http) {
+        SchemeCheck::Accepted => {}
+        SchemeCheck::Insecure => {
             return Err(ConfigError::InsecurePublicUrl {
                 url: redact_userinfo(raw),
             });
         }
-        _ => {
+        SchemeCheck::Unsupported => {
             return Err(ConfigError::UnsupportedScheme {
                 url: redact_userinfo(raw),
             });
@@ -382,9 +427,26 @@ fn validate_public_url(raw: &str, insecure_http: bool) -> Result<String, ConfigE
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
 
+/// How a URL's scheme fares: https always passes, http only to loopback or with
+/// `--insecure-http`, anything else never.
+pub(crate) enum SchemeCheck {
+    Accepted,
+    Insecure,
+    Unsupported,
+}
+
+pub(crate) fn check_scheme(url: &Url, insecure_http: bool) -> SchemeCheck {
+    match url.scheme() {
+        "https" => SchemeCheck::Accepted,
+        "http" if insecure_http || is_loopback(url.host()) => SchemeCheck::Accepted,
+        "http" => SchemeCheck::Insecure,
+        _ => SchemeCheck::Unsupported,
+    }
+}
+
 /// The input with everything from after its first `://` (or its start) up to its last
 /// `@` replaced by `***`, so error text never carries credentials, parsed or not.
-fn redact_userinfo(raw: &str) -> String {
+pub(crate) fn redact_userinfo(raw: &str) -> String {
     let Some(at) = raw.rfind('@') else {
         return raw.to_owned();
     };

@@ -2,5 +2,7 @@
 //! No openidconnect or reqwest type appears in this module's public surface.
 
 mod http;
+mod settings;
 
 pub use http::{IdpHttp, IdpHttpError};
+pub use settings::{ClientSecret, OidcSettings};

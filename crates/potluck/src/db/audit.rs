@@ -366,6 +366,16 @@ impl AuditRecord {
     }
 }
 
+/// Which retention a row falls under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuditClass {
+    /// Every action but `session.failed`.
+    Changes,
+    /// `session.failed`.
+    SignInFailures,
+}
+
 fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
     Ok(AuditRecord {
         id: r.get(0)?,
@@ -405,6 +415,27 @@ impl Db {
                 .query_map(params_from_iter(values), record_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(rows)
+        })
+        .await
+    }
+
+    /// Deletes at most `limit` rows of `class` with `at < before`; returns how many went.
+    pub async fn prune_audit(
+        &self,
+        class: AuditClass,
+        before: &str,
+        limit: u32,
+    ) -> Result<usize, DbError> {
+        let before = before.to_owned();
+        let failures = class == AuditClass::SignInFailures;
+        self.call(move |conn| {
+            // The class test keeps a flood of failed sign-ins from ever taking change rows.
+            let gone = conn.execute(
+                "DELETE FROM audit WHERE id IN (SELECT id FROM audit WHERE at < ?1 \
+                 AND (action = ?2) = ?3 ORDER BY id LIMIT ?4)",
+                rusqlite::params![before, AuditAction::SessionFailed.as_str(), failures, limit],
+            )?;
+            Ok(gone)
         })
         .await
     }
@@ -670,5 +701,99 @@ mod tests {
         let top = db.audit(AuditFilter::new().limit(1)).await.unwrap();
         assert_eq!(top[0].action(), "oidc.link");
         assert_eq!(top[0].detail(), Some("{\"k\":1}"));
+    }
+
+    async fn seed(db: &Db, rows: &[(&'static str, &'static str)]) {
+        let rows = rows.to_vec();
+        db.call(move |c| {
+            for (at, action) in rows {
+                c.execute(
+                    "INSERT INTO audit (at, action, actor_kind) VALUES (?1, ?2, 'anonymous')",
+                    [at, action],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn left(db: &Db) -> Vec<(String, String)> {
+        db.audit(AuditFilter::new().limit(1000))
+            .await
+            .unwrap()
+            .into_iter()
+            .rev()
+            .map(|r| (r.at().to_owned(), r.action().to_owned()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn each_class_prunes_only_its_own_old_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        db.migrate().await.unwrap();
+        seed(
+            &db,
+            &[
+                ("2026-01-01T00:00:00Z", "user.create"),
+                ("2026-01-01T00:00:00Z", "session.failed"),
+                ("2026-06-01T00:00:00Z", "user.create"),
+                ("2026-06-01T00:00:00Z", "session.failed"),
+            ],
+        )
+        .await;
+        let cut = "2026-03-01T00:00:00Z";
+        assert_eq!(
+            db.prune_audit(AuditClass::SignInFailures, cut, 5000)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.prune_audit(AuditClass::Changes, cut, 5000)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            left(&db).await,
+            [
+                ("2026-06-01T00:00:00Z".to_owned(), "user.create".to_owned()),
+                (
+                    "2026-06-01T00:00:00Z".to_owned(),
+                    "session.failed".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_flood_never_takes_change_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        db.migrate().await.unwrap();
+        seed(&db, &[("2026-01-01T00:00:00Z", "grant.put")]).await;
+        let flood: Vec<_> = (0..300)
+            .map(|_| ("2026-01-01T00:00:00Z", "session.failed"))
+            .collect();
+        seed(&db, &flood).await;
+        let mut gone = 0;
+        loop {
+            let n = db
+                .prune_audit(AuditClass::SignInFailures, "2026-02-01T00:00:00Z", 100)
+                .await
+                .unwrap();
+            assert!(n <= 100, "a batch is capped");
+            gone += n;
+            if n < 100 {
+                break;
+            }
+        }
+        assert_eq!(gone, 300);
+        assert_eq!(
+            left(&db).await,
+            [("2026-01-01T00:00:00Z".to_owned(), "grant.put".to_owned())]
+        );
     }
 }

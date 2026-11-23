@@ -383,3 +383,37 @@ async fn info_refs_answers_no_role_exactly_like_no_workspace() {
     assert_eq!(answers[0], answers[1], "no role and an unknown workspace");
     assert_eq!(answers[0], answers[2], "no role and an unknown team");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hook_sees_the_workspace_default_branch() {
+    let a = arena(false).await;
+    let (status, body) = call(
+        &a.server.api("/teams/core/workspaces"),
+        Method::POST,
+        Some(&a.root),
+        Some(json!({"slug": "trunked", "name": "trunked", "kind": "apinata", "default_branch": "trunk", "seed": true})),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    grant(&a, "trunked", "user", "bob", "write").await;
+    write_hook(
+        &a.server.hooks_dir(),
+        "echo \"branch=$POTLUCK_DEFAULT_BRANCH\" >&2\nexit 1",
+    );
+    let work = work_tree(&a.home, "work");
+    let out = failed(git(
+        &a.home,
+        Some(&work),
+        Some(&a.bob),
+        &[
+            "push",
+            "--porcelain",
+            &a.server.git_url("core", "trunked"),
+            "main:refs/heads/extra",
+        ],
+    ));
+    assert!(
+        out.lines().any(|l| l.trim_end() == "remote: branch=trunk"),
+        "{out}"
+    );
+}

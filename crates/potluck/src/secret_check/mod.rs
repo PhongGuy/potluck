@@ -8,7 +8,9 @@ use std::process::ExitCode;
 
 use crate::kinds::RuleSet;
 use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
-use crate::secret_check::scan::{HookEnv, ScanError, accepted_relaxations, report, scan};
+use crate::secret_check::scan::{
+    HookEnv, ScanError, accepted_relaxations, default_branch_rewrites, report, scan,
+};
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
 /// `Git::from_env()`, writes the report to stderr. Exit 0 accepts; exit 1 refuses. A ref name
@@ -58,6 +60,40 @@ pub fn log_accepted_relaxations(
                     "ref" = %ref_name,
                     rule = r.finding().rule(),
                     "safety relaxation accepted"
+                );
+            }
+        }
+        // The error text may carry git's output, so only the push is named.
+        Err(_) => tracing::warn!(
+            workspace_id,
+            pusher,
+            "could not re-check an accepted admin push"
+        ),
+    }
+}
+
+/// Logs one info line `default branch rewritten` (`workspace_id`, `pusher`, `override_id`,
+/// `ref`, `rule`) per force-push or delete of the protected branch in an accepted push; `None`
+/// protects every branch. A failed check logs one warn line naming only the push. Never panics.
+pub fn log_default_branch_rewrites(
+    workspace_id: i64,
+    pusher: &str,
+    override_id: Option<i64>,
+    default_branch: Option<&str>,
+    updates: &[RefUpdate],
+    git: &Git,
+) {
+    match default_branch_rewrites(default_branch, updates, git) {
+        Ok(found) => {
+            for r in found {
+                let ref_name = String::from_utf8_lossy(r.ref_name());
+                tracing::info!(
+                    workspace_id,
+                    pusher,
+                    override_id,
+                    "ref" = %ref_name,
+                    rule = r.finding().rule(),
+                    "default branch rewritten"
                 );
             }
         }

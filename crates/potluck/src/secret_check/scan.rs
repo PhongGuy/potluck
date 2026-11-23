@@ -21,12 +21,14 @@ pub struct HookEnv {
     import: bool,
     override_id: Option<String>,
     role: AccessRole,
+    default_branch: Option<String>,
 }
 
 impl HookEnv {
     /// Reads `POTLUCK_KIND` (non-empty), `POTLUCK_IMPORT` (`1` means import),
-    /// `POTLUCK_OVERRIDE` (non-empty) and `POTLUCK_ROLE`; an unset variable and an empty one mean
-    /// the same, and an unset or unknown role is `write`.
+    /// `POTLUCK_OVERRIDE` (non-empty), `POTLUCK_ROLE` and `POTLUCK_DEFAULT_BRANCH`; an unset
+    /// variable and an empty one mean the same, an unset or unknown role is `write`, and no
+    /// default branch protects every branch.
     pub fn from_env() -> HookEnv {
         let text = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
         let role = text("POTLUCK_ROLE")
@@ -39,10 +41,12 @@ impl HookEnv {
             text("POTLUCK_OVERRIDE").as_deref(),
         )
         .with_role(role)
+        .with_default_branch(text("POTLUCK_DEFAULT_BRANCH").as_deref().unwrap_or(""))
     }
 
-    /// Builds the environment from its parts; an empty kind or override counts as none, and the
-    /// pusher's role is `write` until `with_role` says otherwise.
+    /// Builds the environment from its parts; an empty kind or override counts as none, the
+    /// pusher's role is `write` until `with_role` says otherwise, and no default branch is named
+    /// until `with_default_branch` names one.
     pub fn new(kind: Option<&str>, import: bool, override_id: Option<&str>) -> HookEnv {
         let non_empty = |v: Option<&str>| v.filter(|s| !s.is_empty()).map(str::to_owned);
         HookEnv {
@@ -50,6 +54,7 @@ impl HookEnv {
             import,
             override_id: non_empty(override_id),
             role: AccessRole::Write,
+            default_branch: None,
         }
     }
 
@@ -57,6 +62,17 @@ impl HookEnv {
     #[must_use]
     pub fn with_role(self, role: AccessRole) -> HookEnv {
         HookEnv { role, ..self }
+    }
+
+    /// The same environment with the workspace's default branch set to `branch`; an empty name
+    /// means none, which protects every branch.
+    #[must_use]
+    pub fn with_default_branch(self, branch: &str) -> HookEnv {
+        let default_branch = Some(branch).filter(|b| !b.is_empty()).map(str::to_owned);
+        HookEnv {
+            default_branch,
+            ..self
+        }
     }
 
     /// The workspace kind, if one was given.
@@ -77,6 +93,11 @@ impl HookEnv {
     /// The pusher's role on the workspace.
     pub fn role(&self) -> AccessRole {
         self.role
+    }
+
+    /// The workspace's default branch, short name, if one was given.
+    pub fn default_branch(&self) -> Option<&str> {
+        self.default_branch.as_deref()
     }
 }
 
@@ -131,7 +152,8 @@ fn rejection(ref_name: &[u8], raw: &[u8], lossy: &str, finding: Finding) -> Reje
 }
 
 /// The check for one push. `Ok(vec![])` accepts. An override accepts without touching git.
-/// Deletions are skipped. Per ref, in stdin order, the target is peeled: a commit yields its
+/// Deletions carry nothing to scan, though a non-admin's delete of a protected branch is refused
+/// as `scan_with` describes. Per ref, in stdin order, the target is peeled: a commit yields its
 /// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
 /// kind) over every changed entry, and content rules over the entries whose blob is new to
 /// the repository or whose path the kind `reads`, each `(blob, path)` pair once per push; in
@@ -171,7 +193,8 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// earlier hit has the same ref, path and rule. When `env` names a kind and a rule set is given,
 /// every created or format-touching update to a commit gets a format pass: its `format_file` must
 /// hold a format the rule set lists, or the ref gets one `format_unsupported` finding, sorted
-/// last. A `safety_relaxation` finding is dropped for an admin pusher.
+/// last. For a non-admin, `default_branch_rewrites` over each update then adds its refusal last.
+/// A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
     rules: Option<&dyn RuleSet>,
@@ -185,8 +208,8 @@ pub fn scan_with(
     }
     let kind = GuardedRules(rules);
     let role = kind_role(env.role());
-    // Passes 0 to 4 are path rule, content, message, tip and format, so the final sort groups
-    // each ref's hits by pass in entry order, then in the order `check` returned them.
+    // Passes 0 to 5 are path rule, content, message, tip, format and branch protection, so the
+    // final sort groups each ref's hits by pass in entry order, then in `check`'s order.
     let mut hits: Vec<(HitKey, Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
     let mut seen: Vec<Sha> = Vec::new();
@@ -302,6 +325,24 @@ pub fn scan_with(
             }
         }
     }
+    // An admin may rewrite the default branch, so the ancestry check is not even run for one.
+    if role != Role::Admin {
+        for (ri, update) in updates.iter().enumerate() {
+            for r in
+                default_branch_rewrites(env.default_branch(), std::slice::from_ref(update), git)?
+            {
+                hits.push((
+                    HitKey {
+                        ref_index: ri,
+                        pass: 5,
+                        entry: 0,
+                        finding: 0,
+                    },
+                    r,
+                ));
+            }
+        }
+    }
     if role == Role::Admin {
         hits.retain(|(_, r)| r.finding.code() != Code::SafetyRelaxation);
     }
@@ -349,6 +390,42 @@ pub fn accepted_relaxations(
                 found.push(r);
             }
         }
+    }
+    Ok(found)
+}
+
+/// The `safety_relaxation` refusals for `updates` that delete or rewrite a protected branch:
+/// `refs/heads/<default_branch>` exactly, or every `refs/heads/*` when `default_branch` is
+/// `None`. A delete is `branch_delete` with no git call; a move whose old or new value does not
+/// peel to a commit, or whose new commit does not descend from the old one, is `force_push`.
+/// Each is at path `/`, in update order. A git error fails the whole check.
+pub fn default_branch_rewrites(
+    default_branch: Option<&str>,
+    updates: &[RefUpdate],
+    git: &Git,
+) -> Result<Vec<Rejection>, ScanError> {
+    let protected = |name: &[u8]| match default_branch {
+        Some(branch) => name.strip_prefix(b"refs/heads/") == Some(branch.as_bytes()),
+        None => name.starts_with(b"refs/heads/"),
+    };
+    let mut found = Vec::new();
+    for update in updates.iter().filter(|u| protected(u.name())) {
+        let rule = if update.is_delete() {
+            "branch_delete"
+        } else if update.old().is_zero() || update.old() == update.new() {
+            continue;
+        } else {
+            let (old, old_type) = git.peel(update.old())?;
+            let (new, new_type) = git.peel(update.new())?;
+            // A side that is not a commit has no history to descend from, so it is a rewrite.
+            let both_commits = old_type == ObjectType::Commit && new_type == ObjectType::Commit;
+            if both_commits && git.is_ancestor(&old, &new)? {
+                continue;
+            }
+            "force_push"
+        };
+        let finding = Finding::new(Code::SafetyRelaxation, rule, "/");
+        found.push(rejection(update.name(), b"/", "/", finding));
     }
     Ok(found)
 }

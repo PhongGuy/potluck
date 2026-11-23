@@ -135,8 +135,8 @@ fn observer(state: &AppState, ctx: PushContext, repo: PathBuf, role: Role) -> Pu
     let tasks = state.git().tasks().clone();
     Box::new(move |moves: Vec<RefMove>| {
         // The re-check needs the moves after the record has consumed them, and only an admin
-        // push without an armed override is re-checked, so only that push copies them.
-        let updates = if role == Role::Admin && ctx.armed_override().is_none() {
+        // or override push is re-checked, so only that push copies them.
+        let updates = if role == Role::Admin || ctx.armed_override().is_some() {
             crate::api::pushes::ref_updates(&moves)
         } else {
             Vec::new()

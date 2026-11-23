@@ -241,11 +241,13 @@ Each release's notes give the image's digest (`sha256:...`). Pin that digest to 
 podman pull ghcr.io/phongguy/potluck@sha256:<digest from the release notes>
 ```
 
-Build provenance attestations are available once the repository is public. From then on, check an image with the GitHub CLI (`gh`), substituting the release tag:
+Every release's image carries a build provenance attestation. Check that this repository's release workflow built it with the GitHub CLI (`gh`), substituting the release tag:
 
 ```sh
 gh attestation verify oci://ghcr.io/phongguy/potluck:<tag> --repo PhongGuy/potluck
 ```
+
+The release's signed manifest, `potluck-release.json`, is attested the same way: download it from the release and run `gh attestation verify potluck-release.json --repo PhongGuy/potluck`.
 
 ## Bind mounts
 

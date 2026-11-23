@@ -214,6 +214,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(crate::git::http::router())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state.metrics()),
+            crate::metrics::http::layer,
+        ))
         .with_state(state)
 }
 

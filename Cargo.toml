@@ -14,13 +14,14 @@ anyhow = "=1.0.104"
 apinata-rules = { git = "https://github.com/PhongGuy/apinata", tag = "apinata-rules-v0.1.0" }
 argon2 = "=0.6.0"
 async-compression = { version = "=0.4.52", features = ["tokio", "gzip"] }
-axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "matched-path", "tokio", "tracing"] }
 base64 = "=0.23.1"
 clap = { version = "=4.6.7", features = ["derive", "env"] }
 dbento-rules = { git = "https://github.com/PhongGuy/dbento", tag = "dbento-rules-v0.1.0", version = "0.1" }
 futures-util = { version = "=0.3.34", default-features = false }
 getrandom = "=0.4.3"
 globset = { version = "=0.4.21", default-features = false }
+http-body = "=1.1.0"
 ipnet = "=2.12.2"
 jiff = { version = "=0.2.45", default-features = false, features = ["std"] }
 minisign = "=0.10.0"
@@ -41,6 +42,7 @@ tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "io-util", "time", "process", "fs"] }
 tokio-util = { version = "=0.7.20", features = ["io-util", "rt"] }
+tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 url = "=2.5.8"

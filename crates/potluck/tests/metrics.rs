@@ -143,3 +143,36 @@ async fn shutdown_closes_the_metrics_port() {
         "nothing accepts after shutdown"
     );
 }
+
+#[tokio::test]
+async fn the_real_router_labels_unknown_paths_unmatched_and_known_ones_by_template() {
+    let (_dir, _db, running) = metrics_server().await;
+    let base = format!("http://{}", running.http_addr());
+    assert_eq!(
+        client()
+            .get(format!("{base}/api/v1/no-such-route"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        404
+    );
+    assert_eq!(
+        client()
+            .get(format!("{base}/api/v1/health"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
+    let text = scrape(&running).await;
+    let unmatched = "http_server_request_duration_seconds_count{http_request_method=\"GET\",http_route=\"unmatched\",http_response_status_code=\"404\"}";
+    let health = "http_server_request_duration_seconds_count{http_request_method=\"GET\",http_route=\"/api/v1/health\",http_response_status_code=\"200\"}";
+    assert_eq!(sample(&text, unmatched), Some(1.0), "{text}");
+    assert_eq!(sample(&text, health), Some(1.0), "{text}");
+    assert!(!text.contains("no-such-route"), "{text}");
+    running.shutdown().await;
+}

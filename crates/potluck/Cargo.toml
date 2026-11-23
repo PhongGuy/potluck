@@ -32,6 +32,7 @@ dbento-rules.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 globset.workspace = true
+http-body.workspace = true
 ipnet.workspace = true
 jiff.workspace = true
 minisign-verify.workspace = true
@@ -57,6 +58,7 @@ url.workspace = true
 
 [dev-dependencies]
 minisign.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

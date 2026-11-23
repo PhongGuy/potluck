@@ -21,6 +21,8 @@ use prometheus_client::registry::{Registry, Unit};
 
 use crate::api::AppState;
 
+pub(crate) mod http;
+
 /// Distinct refusal rule names kept as their own series; later ones become "other".
 pub(crate) const MAX_RULES: usize = 128;
 

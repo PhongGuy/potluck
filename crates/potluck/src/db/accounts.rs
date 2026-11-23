@@ -229,7 +229,7 @@ impl std::fmt::Debug for UserPatch {
     }
 }
 
-const USER_COLUMNS: &str =
+pub(super) const USER_COLUMNS: &str =
     "id, username, display_name, email, password_hash, server_admin, disabled, created_at";
 
 /// What `create_token` inserts; `created_at` is set by the database thread. `Debug` prints the
@@ -402,7 +402,7 @@ fn select_token(conn: &rusqlite::Connection, id: i64) -> Result<Option<TokenReco
 
 // Qualifies each name in a comma-separated column list with a table alias, so a join can reuse
 // the same constants the single-table queries select.
-fn prefixed(alias: &str, columns: &str) -> String {
+pub(super) fn prefixed(alias: &str, columns: &str) -> String {
     columns
         .split(',')
         .map(|name| format!("{alias}.{}", name.trim()))
@@ -416,7 +416,7 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
 
 // Reads the `USER_COLUMNS` that start at column `base`, so a join can carry a user after other
 // columns.
-fn user_at(row: &Row<'_>, base: usize) -> rusqlite::Result<UserRecord> {
+pub(super) fn user_at(row: &Row<'_>, base: usize) -> rusqlite::Result<UserRecord> {
     Ok(UserRecord {
         id: row.get(base)?,
         username: row.get(base + 1)?,

@@ -32,6 +32,7 @@ mod config;
 mod credential;
 mod db;
 mod db_grants;
+mod db_oidc;
 mod db_teams;
 mod db_tokens;
 mod db_users;

@@ -48,7 +48,7 @@ async fn import_server(with_override: bool) -> (GitServer, i64, i64) {
         .unwrap();
     let id = server
         .db
-        .arm_override(ws.id(), bob.id(), "import", "system")
+        .arm_override(ws.id(), bob.id(), "import", "system", &AuditCtx::system())
         .await
         .unwrap();
     server

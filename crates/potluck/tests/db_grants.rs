@@ -262,9 +262,15 @@ async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
         .await
         .unwrap();
     let id =
-        f.db.arm_override(f.api.id(), f.bob.id(), "import", "system")
-            .await
-            .unwrap();
+        f.db.arm_override(
+            f.api.id(),
+            f.bob.id(),
+            "import",
+            "system",
+            &AuditCtx::system(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         f.db.armed_override(f.api.id(), f.bob.id()).await.unwrap(),
         Some(id)
@@ -280,7 +286,7 @@ async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
         "on one workspace"
     );
     let second =
-        f.db.arm_override(f.api.id(), f.bob.id(), "again", "ann")
+        f.db.arm_override(f.api.id(), f.bob.id(), "again", "ann", &AuditCtx::system())
             .await
             .unwrap();
     assert!(second > id);

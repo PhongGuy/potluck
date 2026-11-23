@@ -587,3 +587,155 @@ async fn a_failed_insert_leaves_the_grant_unchanged() {
         json!([{"subject": {"kind": "user", "name": "bob"}, "role": "read"}])
     );
 }
+
+#[tokio::test]
+async fn arming_and_disarming_write_rows_and_consumed_or_missing_do_not() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_user(&app.db, "bob").await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", true).await;
+    let (status, body) = call(
+        &app.url("/workspaces/core/api/overrides"),
+        Method::POST,
+        Some(&root),
+        Some(json!({"for_user": "bob", "reason": "vendor key fixture"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let id = body["id"].as_i64().unwrap();
+    let armed = rows(&app.db, "override.arm").await;
+    assert_eq!(armed.len(), 1);
+    assert_eq!(
+        (
+            armed[0].target_kind(),
+            armed[0].target_id(),
+            armed[0].target_name(),
+            armed[0].workspace()
+        ),
+        (Some("override"), Some(id), Some("bob"), Some("core/api"))
+    );
+    let url = app.url(&format!("/workspaces/core/api/overrides/{id}"));
+    assert_eq!(call(&url, Method::DELETE, Some(&root), None).await.0, 204);
+    assert_eq!(call(&url, Method::DELETE, Some(&root), None).await.0, 404);
+    let disarmed = rows(&app.db, "override.disarm").await;
+    assert_eq!(disarmed.len(), 1);
+    assert_eq!(
+        (disarmed[0].actor_name(), disarmed[0].target_id()),
+        (Some("root"), Some(id))
+    );
+}
+
+#[tokio::test]
+async fn a_consuming_push_writes_override_use_once() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    let (bob, _) = api_user(&app.db, "bob").await;
+    api_team(&app.url(""), &root, "core").await;
+    let ws = api_workspace(&app.url(""), &root, "core", "api", true).await;
+    assert_eq!(ws["slug"], "api");
+    let ws_id = app
+        .db
+        .workspace_by_slugs("core", "api")
+        .await
+        .unwrap()
+        .unwrap()
+        .id();
+    let id = app
+        .db
+        .arm_override(ws_id, bob.id(), "fixture", "system", &AuditCtx::system())
+        .await
+        .unwrap();
+    let a = "a".repeat(40);
+    let moves = [
+        potluck::git::push::RefMove::new("refs/heads/main", potluck::git::push::ZERO_SHA, &a),
+        potluck::git::push::RefMove::new("refs/heads/topic", potluck::git::push::ZERO_SHA, &a),
+    ];
+    assert!(
+        app.db
+            .record_push(ws_id, Some(id), &moves, "bob")
+            .await
+            .unwrap()
+            .override_consumed()
+    );
+    assert!(
+        !app.db
+            .record_push(ws_id, Some(id), &moves, "bob")
+            .await
+            .unwrap()
+            .override_consumed()
+    );
+    app.db
+        .record_push(ws_id, None, &moves, "bob")
+        .await
+        .unwrap();
+    let used = rows(&app.db, "override.use").await;
+    assert_eq!(used.len(), 1, "only the consuming push");
+    assert_eq!(
+        (
+            used[0].actor_kind(),
+            used[0].actor_id(),
+            used[0].actor_name()
+        ),
+        ("user", Some(bob.id()), Some("bob"))
+    );
+    assert_eq!(
+        (
+            used[0].target_id(),
+            used[0].workspace(),
+            used[0].client_ip()
+        ),
+        (Some(id), Some("core/api"), None)
+    );
+    assert_eq!(detail(&used[0]), json!({"refs": 2}));
+}
+
+#[tokio::test]
+async fn a_failed_insert_keeps_the_override_armed() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    let (bob, _) = api_user(&app.db, "bob").await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", true).await;
+    let ws_id = app
+        .db
+        .workspace_by_slugs("core", "api")
+        .await
+        .unwrap()
+        .unwrap()
+        .id();
+    let id = app
+        .db
+        .arm_override(ws_id, bob.id(), "fixture", "system", &AuditCtx::system())
+        .await
+        .unwrap();
+    boom(app._dir.path());
+    let a = "a".repeat(40);
+    let moves = [potluck::git::push::RefMove::new(
+        "refs/heads/main",
+        potluck::git::push::ZERO_SHA,
+        &a,
+    )];
+    assert!(
+        app.db
+            .record_push(ws_id, Some(id), &moves, "bob")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        app.db.armed_override(ws_id, bob.id()).await.unwrap(),
+        Some(id),
+        "the consume rolled back"
+    );
+    assert!(
+        app.db
+            .disarm_override(ws_id, id, &AuditCtx::system())
+            .await
+            .is_err(),
+        "disarm rolls back too"
+    );
+    assert_eq!(
+        app.db.armed_override(ws_id, bob.id()).await.unwrap(),
+        Some(id)
+    );
+}

@@ -3,6 +3,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use super::audit::{self, AuditAction, AuditCtx, Entry, GrantChange};
+use super::overrides::override_entry;
 use super::workspaces::{WORKSPACE_COLUMNS, WorkspaceRecord, workspace_from_row};
 use super::{Db, DbError};
 use crate::clock;
@@ -336,19 +337,23 @@ impl Db {
         .await
     }
 
-    /// Arms an override: inserts with `armed_at = now` and returns its id. Its endpoints and
-    /// consumption live with push bookkeeping.
+    /// Arms an override: inserts with `armed_at = now`, writes its `override.arm` row in the same
+    /// transaction and returns its id. Its endpoints and consumption live with push bookkeeping.
     pub async fn arm_override(
         &self,
         workspace_id: i64,
         for_user_id: i64,
         reason: &str,
         armed_by: &str,
+        ctx: &AuditCtx,
     ) -> Result<i64, DbError> {
         let reason = reason.to_owned();
         let armed_by = armed_by.to_owned();
+        let ctx = ctx.clone();
+        // An error at any step drops `tx` uncommitted, so no override is armed unrecorded.
         self.call(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO overrides (workspace_id, for_user_id, reason, armed_by, armed_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
@@ -359,7 +364,11 @@ impl Db {
                     clock::now_rfc3339()
                 ],
             )?;
-            Ok(conn.last_insert_rowid())
+            let id = tx.last_insert_rowid();
+            let entry = override_entry(&tx, AuditAction::OverrideArm, id)?;
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(id)
         })
         .await
     }

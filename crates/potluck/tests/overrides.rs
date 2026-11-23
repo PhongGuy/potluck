@@ -206,6 +206,7 @@ async fn a_consumed_override_shows_its_refs_and_cannot_be_disarmed() {
             ws.id(),
             Some(id),
             &[RefMove::new("refs/heads/main", ZERO_SHA, A)],
+            "bob",
         )
         .await
         .unwrap();

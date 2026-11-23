@@ -1,6 +1,5 @@
 //! The append-only `audit` table: who did what to which target, written inside the
 //! transaction of the change it records.
-#![cfg_attr(not(test), allow(dead_code, reason = "wired by the audit wiring plan"))]
 
 use std::net::IpAddr;
 
@@ -205,6 +204,12 @@ pub(crate) struct GrantChange<'a> {
     pub(crate) old: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) new: Option<&'a str>,
+}
+
+/// The `override.use` detail: how many refs the consuming push moved.
+#[derive(serde::Serialize)]
+pub(crate) struct OverrideUsed {
+    pub(crate) refs: usize,
 }
 
 /// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.

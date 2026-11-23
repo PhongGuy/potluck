@@ -298,7 +298,7 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     let id = a
         .server
         .db()
-        .arm_override(ws.id(), bob.id(), "import", "system")
+        .arm_override(ws.id(), bob.id(), "import", "system", &AuditCtx::system())
         .await
         .unwrap();
     let out = failed(git(

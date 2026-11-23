@@ -1,8 +1,9 @@
 //! The `overrides` rows and the push record: consuming an override and clearing the import
 //! state happen in one transaction.
 
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use super::audit::{self, AuditAction, AuditCtx, Entry, OverrideUsed};
 use super::{Db, DbError};
 use crate::clock;
 use crate::git::RefMove;
@@ -122,6 +123,25 @@ fn override_from_row(row: &Row<'_>) -> rusqlite::Result<OverrideRecord> {
     })
 }
 
+/// The override's audit entry: target `override` named by its user, and the workspace as
+/// `{team}/{ws}`. It reads the row, so a disarm calls it before the delete.
+pub(super) fn override_entry(
+    conn: &Connection,
+    action: AuditAction,
+    id: i64,
+) -> rusqlite::Result<Entry> {
+    let (workspace, for_user): (String, String) = conn.query_row(
+        "SELECT t.slug || '/' || w.slug, u.username FROM overrides o \
+         JOIN workspaces w ON w.id = o.workspace_id JOIN teams t ON t.id = w.team_id \
+         JOIN users u ON u.id = o.for_user_id WHERE o.id = ?1",
+        [id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(Entry::new(action)
+        .target("override", Some(id), Some(&for_user))
+        .workspace(&workspace))
+}
+
 impl Db {
     /// The workspace's overrides, oldest first.
     pub async fn list_overrides(&self, workspace_id: i64) -> Result<Vec<OverrideRecord>, DbError> {
@@ -151,12 +171,20 @@ impl Db {
         .await
     }
 
-    /// Removes an armed override; see `Disarmed`.
-    pub async fn disarm_override(&self, workspace_id: i64, id: i64) -> Result<Disarmed, DbError> {
-        // One job on the database thread, so nothing can consume the row between the look and
-        // the delete.
+    /// Removes an armed override and writes its `override.disarm` row in one transaction; see
+    /// `Disarmed`. Only `Removed` writes a row.
+    pub async fn disarm_override(
+        &self,
+        workspace_id: i64,
+        id: i64,
+        ctx: &AuditCtx,
+    ) -> Result<Disarmed, DbError> {
+        let ctx = ctx.clone();
+        // One transaction, so nothing can consume the row between the look and the delete, and
+        // a failed audit insert keeps it armed.
         self.call(move |conn| {
-            let found: Option<Option<String>> = conn
+            let tx = conn.transaction()?;
+            let found: Option<Option<String>> = tx
                 .query_row(
                     "SELECT consumed_at FROM overrides WHERE id = ?1 AND workspace_id = ?2",
                     [id, workspace_id],
@@ -167,10 +195,13 @@ impl Db {
                 None => Ok(Disarmed::Missing),
                 Some(Some(_)) => Ok(Disarmed::Consumed),
                 Some(None) => {
-                    conn.execute(
+                    let entry = override_entry(&tx, AuditAction::OverrideDisarm, id)?;
+                    tx.execute(
                         "DELETE FROM overrides WHERE id = ?1 AND workspace_id = ?2",
                         [id, workspace_id],
                     )?;
+                    audit::insert(&tx, &ctx, &entry)?;
+                    tx.commit()?;
                     Ok(Disarmed::Removed)
                 }
             }
@@ -180,13 +211,17 @@ impl Db {
 
     /// Records an accepted push in one transaction: `override_id` (when given and still armed)
     /// gets `consumed_at = now` and `consumed_refs = moves` as JSON, and the workspace's
-    /// `import_pending` becomes 0. Both persist or neither does.
+    /// `import_pending` becomes 0. A consume also writes `override.use` with `pusher`, looked up
+    /// by username, as its actor; a missing pusher is `DbError::Sqlite`. All persist or none does.
     pub async fn record_push(
         &self,
         workspace_id: i64,
         override_id: Option<i64>,
         moves: &[RefMove],
+        pusher: &str,
     ) -> Result<Recorded, DbError> {
+        let pusher = pusher.to_owned();
+        let used = OverrideUsed { refs: moves.len() };
         let refs = serde_json::to_string(moves)
             .map_err(|err| DbError::Sqlite(format!("could not encode the moved refs: {err}")))?;
         self.call(move |conn| {
@@ -202,6 +237,16 @@ impl Db {
                 }
                 None => false,
             };
+            if let (true, Some(id)) = (override_consumed, override_id) {
+                // Users are never deleted, so no row here is a storage fault.
+                let pusher_id: i64 = tx.query_row(
+                    "SELECT id FROM users WHERE username = ?1",
+                    [&pusher],
+                    |row| row.get(0),
+                )?;
+                let entry = override_entry(&tx, AuditAction::OverrideUse, id)?.detail(&used)?;
+                audit::insert(&tx, &AuditCtx::user(pusher_id, &pusher), &entry)?;
+            }
             let import_cleared = tx.execute(
                 "UPDATE workspaces SET import_pending = 0 WHERE id = ?1 AND import_pending = 1",
                 [workspace_id],
@@ -265,7 +310,7 @@ mod tests {
             RefMove::new("refs/heads/main", ZERO_SHA, A),
             RefMove::new("refs/tags/v1", ZERO_SHA, A),
         ];
-        let done = db.record_push(ws, Some(ov), &moves).await.unwrap();
+        let done = db.record_push(ws, Some(ov), &moves, "bob").await.unwrap();
         assert!(
             done.override_consumed() && done.import_cleared(),
             "{done:?}"
@@ -277,12 +322,12 @@ mod tests {
         assert!(row.consumed_at().is_some());
         assert_eq!(row.consumed_refs(), Some(moves.as_slice()));
         assert!(!import_pending(&db).await);
-        let again = db.record_push(ws, Some(ov), &moves).await.unwrap();
+        let again = db.record_push(ws, Some(ov), &moves, "bob").await.unwrap();
         assert!(
             !again.override_consumed() && !again.import_cleared(),
             "nothing left to change: {again:?}"
         );
-        let none = db.record_push(ws, None, &moves).await.unwrap();
+        let none = db.record_push(ws, None, &moves, "bob").await.unwrap();
         assert!(!none.override_consumed(), "no override given");
         assert_eq!(
             db.override_by_id(2, ov).await.unwrap(),
@@ -306,6 +351,7 @@ mod tests {
                 ws,
                 Some(ov),
                 &[RefMove::new("refs/heads/main", ZERO_SHA, A)],
+                "bob",
             )
             .await
             .unwrap_err();
@@ -330,13 +376,30 @@ mod tests {
         assert_eq!(list[0].id(), ov);
         assert_eq!(list[0].reason(), "import");
         assert_eq!(
-            db.disarm_override(2, ov).await.unwrap(),
+            db.disarm_override(2, ov, &AuditCtx::system())
+                .await
+                .unwrap(),
             Disarmed::Missing,
             "wrong workspace"
         );
-        assert_eq!(db.disarm_override(ws, 99).await.unwrap(), Disarmed::Missing);
-        assert_eq!(db.disarm_override(ws, ov).await.unwrap(), Disarmed::Removed);
-        assert_eq!(db.disarm_override(ws, ov).await.unwrap(), Disarmed::Missing);
+        assert_eq!(
+            db.disarm_override(ws, 99, &AuditCtx::system())
+                .await
+                .unwrap(),
+            Disarmed::Missing
+        );
+        assert_eq!(
+            db.disarm_override(ws, ov, &AuditCtx::system())
+                .await
+                .unwrap(),
+            Disarmed::Removed
+        );
+        assert_eq!(
+            db.disarm_override(ws, ov, &AuditCtx::system())
+                .await
+                .unwrap(),
+            Disarmed::Missing
+        );
         assert!(db.list_overrides(ws).await.unwrap().is_empty());
         db.call(|c| {
             Ok(c.execute_batch(
@@ -345,10 +408,20 @@ mod tests {
         })
         .await
         .unwrap();
-        db.record_push(ws, Some(6), &[RefMove::new("refs/heads/main", ZERO_SHA, A)])
-            .await
-            .unwrap();
-        assert_eq!(db.disarm_override(ws, 6).await.unwrap(), Disarmed::Consumed);
+        db.record_push(
+            ws,
+            Some(6),
+            &[RefMove::new("refs/heads/main", ZERO_SHA, A)],
+            "bob",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.disarm_override(ws, 6, &AuditCtx::system())
+                .await
+                .unwrap(),
+            Disarmed::Consumed
+        );
         assert_eq!(
             db.list_overrides(ws).await.unwrap().len(),
             1,

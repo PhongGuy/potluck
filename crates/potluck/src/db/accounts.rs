@@ -650,9 +650,7 @@ impl Db {
                 return Ok(false);
             };
             let owner = owner_name(&tx, token.user_id)?;
-            if tx.execute("DELETE FROM tokens WHERE id = ?1", [id])? == 0 {
-                return Ok(false);
-            }
+            tx.execute("DELETE FROM tokens WHERE id = ?1", [id])?;
             let entry = Entry::new(AuditAction::TokenRevoke)
                 .target("token", Some(token.id), Some(&token.name))
                 .detail(&TokenOwner { user: &owner })?;

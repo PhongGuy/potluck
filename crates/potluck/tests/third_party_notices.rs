@@ -343,6 +343,11 @@ fn refuses_a_crate_with_an_unknown_or_missing_licence() {
         ("closed v1.0.0|LicenseRef-Proprietary", "closed"),
         ("bare v1.0.0|", "bare"),
         ("eula v1.0.0|MIT AND Commercial", "eula"),
+        ("either v1.0.0|BSD-2-Clause OR GPL-3.0", "either"),
+        ("both v1.0.0|(BSD-3-Clause OR MIT) AND GPL-3.0", "both"),
+        ("dangling v1.0.0|MIT OR", "dangling"),
+        ("unbalanced v1.0.0|(MIT OR Apache-2.0", "unbalanced"),
+        ("juxtaposed v1.0.0|MIT Apache-2.0", "juxtaposed"),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let out = run(
@@ -356,7 +361,46 @@ fn refuses_a_crate_with_an_unknown_or_missing_licence() {
             err.contains(name),
             "{line}: refusal does not name it: {err}"
         );
+        assert!(
+            err.contains("outside the allowlist"),
+            "{line}: refused for another reason: {err}"
+        );
         assert!(out.stdout.is_empty(), "{line}: printed a list anyway");
+    }
+}
+
+#[test]
+fn accepts_an_or_licence_when_one_alternative_is_allowed() {
+    const ZC: &[Pkg] = &[Pkg {
+        name: "zc",
+        version: "0.8.0",
+        authors: &["Zc Devs"],
+        repository: None,
+        files: &[],
+    }];
+    for licence in [
+        "BSD-2-Clause OR Apache-2.0 OR MIT",
+        "(LicenseRef-Proprietary AND MIT) OR Apache-2.0",
+        "GPL-3.0/MIT",
+        "GPL-2.0 OR Apache-2.0 WITH LLVM-exception",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run(
+            &stub_cargo(dir.path(), &format!("zc v0.8.0|{licence}\n"), ZC),
+            &[],
+            None,
+        );
+        assert!(
+            out.status.success(),
+            "{licence}: refused: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // The list keeps the whole expression, so the notice still says what the crate offers.
+        let list = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            list.contains(&format!("`zc` 0.8.0: {licence}")),
+            "{licence}: not listed in full: {list}"
+        );
     }
 }
 

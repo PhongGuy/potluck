@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use openidconnect::core::{CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey};
+use openidconnect::core::{CoreHmacKey, CoreJwsSigningAlgorithm, CoreRsaPrivateSigningKey};
 use openidconnect::{JsonWebKeyId, PrivateSigningKey};
 use potluck::oidc::OidcSettings;
 use serde_json::{Value, json};
@@ -40,6 +40,8 @@ pub enum Fault {
     Expired,
     WrongNonce,
     AlgNone,
+    /// Discovery also lists HS256, and ID tokens are HS256, MACed with the client secret.
+    Hs256,
     /// Every endpoint answers 503.
     Unavailable,
     /// Every endpoint sleeps 60 s before answering.
@@ -259,7 +261,8 @@ async fn discovery(State(shared): State<Shared>, uri: Uri) -> Response {
         "jwks_uri": format!("{issuer}/jwks"),
         "response_types_supported": ["code"],
         "subject_types_supported": ["public"],
-        "id_token_signing_alg_values_supported": ["RS256"],
+        "id_token_signing_alg_values_supported":
+            if fault == Fault::Hs256 { json!(["RS256", "HS256"]) } else { json!(["RS256"]) },
     }))
 }
 
@@ -382,10 +385,10 @@ fn id_token(inner: &Inner, nonce: &str) -> String {
         "name": id.name,
     });
     let (kid, _) = KEYS[inner.key];
-    let header = if fault == Fault::AlgNone {
-        json!({"alg": "none", "typ": "JWT"})
-    } else {
-        json!({"alg": "RS256", "typ": "JWT", "kid": kid})
+    let header = match fault {
+        Fault::AlgNone => json!({"alg": "none", "typ": "JWT"}),
+        Fault::Hs256 => json!({"alg": "HS256", "typ": "JWT"}),
+        _ => json!({"alg": "RS256", "typ": "JWT", "kid": kid}),
     };
     let input = format!(
         "{}.{}",
@@ -394,6 +397,12 @@ fn id_token(inner: &Inner, nonce: &str) -> String {
     );
     if fault == Fault::AlgNone {
         return format!("{input}.");
+    }
+    if fault == Fault::Hs256 {
+        let mac = CoreHmacKey::new(CLIENT_SECRET)
+            .sign(&CoreJwsSigningAlgorithm::HmacSha256, input.as_bytes())
+            .unwrap();
+        return format!("{input}.{}", URL_SAFE_NO_PAD.encode(mac));
     }
     let signature = signing_key(inner.key)
         .sign(

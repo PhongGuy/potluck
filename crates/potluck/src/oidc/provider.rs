@@ -4,7 +4,8 @@
 use std::time::Instant;
 
 use openidconnect::core::{
-    CoreAuthPrompt, CoreClient, CoreProviderMetadata, CoreResponseType, CoreTokenResponse,
+    CoreAuthPrompt, CoreClient, CoreJwsSigningAlgorithm, CoreProviderMetadata, CoreResponseType,
+    CoreTokenResponse,
 };
 use openidconnect::{
     AuthenticationFlow, AuthorizationCode, ClientId, CsrfToken, EndpointMaybeSet, EndpointNotSet,
@@ -175,8 +176,13 @@ impl Provider {
             .await
             .map_err(|_| refused("exchange"))?;
         let id_token = response.id_token().ok_or_else(|| refused("no_id_token"))?;
+        // RS256 only, whatever discovery advertises: an HS256 token keyed by the client secret
+        // must never pass.
+        let verifier = client
+            .id_token_verifier()
+            .set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256]);
         let claims = id_token
-            .claims(&client.id_token_verifier(), &Nonce::new(nonce.to_owned()))
+            .claims(&verifier, &Nonce::new(nonce.to_owned()))
             .map_err(|_| refused("claims"))?;
         Ok(IdClaims {
             subject: claims.subject().as_str().to_owned(),

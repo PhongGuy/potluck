@@ -133,6 +133,28 @@ async fn every_bad_id_token_is_refused() {
     }
 }
 
+// The verifier must keep to RS256 even when discovery advertises HS256, or a token MACed with
+// the client secret would pass.
+#[tokio::test]
+async fn an_hs256_token_is_refused_even_when_the_provider_advertises_it() {
+    let (_dir, idp, provider) = setup().await;
+    idp.set_fault(Fault::Hs256);
+    let err = sign_in(&idp, &provider, Instant::now()).await.unwrap_err();
+    assert_eq!(err, ProviderError::Refused);
+}
+
+#[tokio::test]
+async fn a_pkce_verifier_outside_the_rfc_length_is_refused() {
+    let (_dir, _idp, provider) = setup().await;
+    for verifier in ["short".to_owned(), "v".repeat(129)] {
+        let err = provider
+            .authorize_url_at(Instant::now(), REDIRECT, "s", "n", &verifier)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProviderError::Refused, "{} characters", verifier.len());
+    }
+}
+
 #[tokio::test]
 async fn a_failed_exchange_is_refused() {
     let (_dir, idp, provider) = setup().await;

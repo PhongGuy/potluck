@@ -8,6 +8,7 @@ use super::DbError;
 pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_grant_subjects.sql"),
+    include_str!("migrations/0003_audit.sql"),
 ];
 
 /// Applies the migrations past `PRAGMA user_version` in one transaction and sets
@@ -93,7 +94,7 @@ mod tests {
                 err,
                 DbError::SchemaTooNew {
                     found: 99,
-                    supported: 2
+                    supported: 3
                 }
             ),
             "got {err:?}"
@@ -105,8 +106,8 @@ mod tests {
         let mut c = conn();
         assert_eq!(
             migrate_with(&mut c, MIGRATIONS).unwrap(),
-            2,
-            "schema version 2 applies cleanly"
+            3,
+            "schema version 3 applies cleanly"
         );
     }
 
@@ -124,7 +125,7 @@ mod tests {
                  (1, 'user', 7, 'admin'), (1, 'team', 7, 'admin');",
         )
         .unwrap();
-        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 2);
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 3);
         let mut stmt = c
             .prepare("SELECT subject_kind, subject_id FROM grants ORDER BY 1, 2")
             .unwrap();
@@ -138,5 +139,40 @@ mod tests {
             [("team".to_owned(), 1), ("user".to_owned(), 1)],
             "only the grants of subjects that exist survive"
         );
+    }
+
+    #[test]
+    fn version_3_adds_the_audit_table_with_its_actor_check() {
+        let mut c = conn();
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 3);
+        c.execute(
+            "INSERT INTO audit (at, action, actor_kind) VALUES ('2026-01-01T00:00:00Z', 'x.y', 'system')",
+            [],
+        )
+        .unwrap();
+        let err = c
+            .execute(
+                "INSERT INTO audit (at, action, actor_kind) VALUES ('2026-01-01T00:00:00Z', 'x.y', 'robot')",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
+        let indexes: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'audit' \
+                 AND name IN ('audit_actor', 'audit_workspace', 'audit_action', 'audit_at')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 4);
+    }
+
+    #[test]
+    fn version_3_applies_over_a_version_2_database() {
+        let mut c = conn();
+        migrate_with(&mut c, &MIGRATIONS[..2]).unwrap();
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 3);
+        assert_eq!(user_version(&c).unwrap(), 3);
     }
 }

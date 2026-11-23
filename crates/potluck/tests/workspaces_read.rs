@@ -40,7 +40,10 @@ async fn the_list_and_me_show_held_workspaces_with_the_highest_role() {
         .put_grant(docs.id(), Subject::User("bob".into()), Role::Read)
         .await
         .unwrap();
-    app.db.add_member(core.id(), bob_rec.id()).await.unwrap();
+    app.db
+        .add_member(core.id(), bob_rec.id(), &AuditCtx::system())
+        .await
+        .unwrap();
     app.db
         .put_grant(api_ws.id(), Subject::Team("core".into()), Role::Write)
         .await
@@ -151,7 +154,7 @@ async fn the_admin_socket_sees_every_workspace_as_admin() {
         .unwrap();
     let core = running
         .db()
-        .create_team(&Slug::parse("core").unwrap(), "Core")
+        .create_team(&Slug::parse("core").unwrap(), "Core", &AuditCtx::system())
         .await
         .unwrap();
     running

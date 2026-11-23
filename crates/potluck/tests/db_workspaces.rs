@@ -2,6 +2,7 @@
 
 use potluck::api::error::{ApiError, ErrorCode};
 use potluck::db::DbError;
+use potluck::db::audit::AuditCtx;
 use potluck::db::workspaces::NewWorkspace;
 use potluck::slug::Slug;
 
@@ -14,8 +15,14 @@ fn slug(s: &str) -> Slug {
 #[tokio::test]
 async fn workspaces_are_created_found_listed_and_deleted() {
     let (_dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
-    let other = db.create_team(&slug("other"), "Other").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
+    let other = db
+        .create_team(&slug("other"), "Other", &AuditCtx::system())
+        .await
+        .unwrap();
     let api = db
         .create_workspace(NewWorkspace::new(
             core.id(),
@@ -90,7 +97,10 @@ async fn workspaces_are_created_found_listed_and_deleted() {
 #[tokio::test]
 async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
     let (_dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
     let err = db
         .create_workspace(NewWorkspace::new(
             core.id(),
@@ -119,7 +129,10 @@ async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
 #[tokio::test]
 async fn a_workspace_create_that_loses_the_race_is_a_conflict() {
     let (dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
     // A second writer on the same file claims (team, slug) just before our insert lands.
     rusqlite::Connection::open(dir.path().join("server.db"))
         .unwrap()

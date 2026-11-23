@@ -102,7 +102,7 @@ async fn the_test_app_serves_the_api() {
 async fn team_workspace_and_grant_json_match_the_contract() {
     let (_dir, db) = migrated_db().await;
     let core = db
-        .create_team(&Slug::parse("core").unwrap(), "Core")
+        .create_team(&Slug::parse("core").unwrap(), "Core", &AuditCtx::system())
         .await
         .unwrap();
     let ws = db

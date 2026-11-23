@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use potluck::db::audit::AuditCtx;
 use potluck::db::workspaces::NewWorkspace;
 use potluck::git::access::PushContext;
 use potluck::git::push::{RefMove, ZERO_SHA};
@@ -27,7 +28,7 @@ async fn import_server(with_override: bool) -> (GitServer, i64, i64) {
     let bob = create_user(&server.db, "bob", "pw-123456", false).await;
     let team = server
         .db
-        .create_team(&Slug::parse("core").unwrap(), "Core")
+        .create_team(&Slug::parse("core").unwrap(), "Core", &AuditCtx::system())
         .await
         .unwrap();
     let ws = server

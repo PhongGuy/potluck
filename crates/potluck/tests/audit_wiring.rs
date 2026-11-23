@@ -7,7 +7,7 @@ use potluck::db::audit::{AuditCtx, AuditFilter, AuditRecord};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::common::{TestApp, api_admin, api_user, call, test_app};
+use crate::common::{TestApp, api_admin, api_team, api_user, call, test_app};
 
 /// The rows of `action`, oldest first.
 async fn rows(db: &Db, action: &str) -> Vec<AuditRecord> {
@@ -340,4 +340,73 @@ async fn a_failing_log_still_answers_401_and_blocks_success() {
         500,
         "no token without its row"
     );
+}
+
+#[tokio::test]
+async fn team_changes_write_rows_only_when_something_changed() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_user(&app.db, "bob").await;
+    api_team(&app.url(""), &root, "core").await;
+    let created = rows(&app.db, "team.create").await;
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        (
+            created[0].actor_name(),
+            created[0].target_kind(),
+            created[0].target_name()
+        ),
+        (Some("root"), Some("team"), Some("core"))
+    );
+    for _ in 0..2 {
+        let (status, _) = call(
+            &app.url("/teams/core/members/bob"),
+            Method::PUT,
+            Some(&root),
+            None,
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let added = rows(&app.db, "team.member_add").await;
+    assert_eq!(added.len(), 1, "an existing member is not added twice");
+    assert_eq!(detail(&added[0]), json!({"user": "bob"}));
+    let (status, _) = call(
+        &app.url("/teams/core/members/bob"),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, _) = call(
+        &app.url("/teams/core/members/bob"),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    let removed = rows(&app.db, "team.member_remove").await;
+    assert_eq!(removed.len(), 1);
+    assert_eq!(
+        (removed[0].target_name(), detail(&removed[0])),
+        (Some("core"), json!({"user": "bob"}))
+    );
+}
+
+#[tokio::test]
+async fn a_failed_insert_creates_no_team() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    boom(app._dir.path());
+    let (status, _) = call(
+        &app.url("/teams"),
+        Method::POST,
+        Some(&root),
+        Some(json!({"slug": "core", "name": "Core"})),
+    )
+    .await;
+    assert_eq!(status, 500);
+    assert!(app.db.team_by_slug("core").await.unwrap().is_none());
 }

@@ -6,7 +6,9 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 
 use super::AppState;
+use super::audit;
 use super::auth::Authenticated;
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::events;
 use super::json::ApiJson;
@@ -41,6 +43,7 @@ pub(super) async fn list(
 pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     body: Result<ApiJson<CreateTeam>, ErrorResponse>,
 ) -> ApiResult<(StatusCode, Json<TeamJson>)> {
     // The body is extracted as a `Result` so a non-admin's bad body still answers 403.
@@ -48,7 +51,10 @@ pub(super) async fn create(
     let ApiJson(body) = body?;
     let slug = check_slug(&body.slug)?;
     let name = validate::name("name", &body.name)?;
-    let team = state.db().create_team(&slug, name).await?;
+    let team = state
+        .db()
+        .create_team(&slug, name, &audit::ctx(&auth, ip))
+        .await?;
     Ok((StatusCode::CREATED, Json(TeamJson::new(&team, Vec::new()))))
 }
 
@@ -57,11 +63,15 @@ pub(super) async fn create(
 pub(super) async fn add_member(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     Path((team, username)): Path<(String, String)>,
 ) -> ApiResult<Json<TeamJson>> {
     auth.require_server_admin()?;
     let (team, user) = team_and_user(&state, &team, &username).await?;
-    state.db().add_member(team.id(), user.id()).await?;
+    state
+        .db()
+        .add_member(team.id(), user.id(), &audit::ctx(&auth, ip))
+        .await?;
     Ok(Json(team_json(&state, &team).await?))
 }
 
@@ -70,11 +80,13 @@ pub(super) async fn add_member(
 pub(super) async fn remove_member(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     Path((team, username)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     auth.require_server_admin()?;
     let (team, user) = team_and_user(&state, &team, &username).await?;
-    if !state.db().remove_member(team.id(), user.id()).await? {
+    let ctx = audit::ctx(&auth, ip);
+    if !state.db().remove_member(team.id(), user.id(), &ctx).await? {
         return Err(ApiError::not_found("no such member").into());
     }
     // The membership is gone either way; a failed reap is logged rather than answered as 500.

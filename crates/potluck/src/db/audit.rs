@@ -185,6 +185,12 @@ pub(crate) struct TokenOwner<'a> {
     pub(crate) user: &'a str,
 }
 
+/// The `team.member_add` and `team.member_remove` detail: the member's username.
+#[derive(serde::Serialize)]
+pub(crate) struct MemberDetail<'a> {
+    pub(crate) user: &'a str,
+}
+
 /// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

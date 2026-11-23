@@ -34,7 +34,10 @@ struct Fx {
 
 async fn fx() -> (tempfile::TempDir, Fx) {
     let (dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
     let api = db
         .create_workspace(NewWorkspace::new(
             core.id(),
@@ -158,7 +161,9 @@ async fn the_highest_grant_wins_and_membership_alone_grants_nothing() {
         None,
         "no grant, no role"
     );
-    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
+    f.db.add_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
     assert_eq!(
         f.db.role_for(f.api.id(), f.bob.id()).await.unwrap(),
         None,
@@ -197,7 +202,9 @@ async fn the_highest_grant_wins_and_membership_alone_grants_nothing() {
         None,
         "another workspace"
     );
-    f.db.remove_member(f.core.id(), f.bob.id()).await.unwrap();
+    f.db.remove_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
     f.db.delete_grant(f.api.id(), user("bob")).await.unwrap();
     assert_eq!(
         f.db.role_for(f.api.id(), f.bob.id()).await.unwrap(),
@@ -218,7 +225,9 @@ async fn workspaces_for_user_lists_held_roles_in_order() {
     f.db.put_grant(f.docs.id(), user("bob"), Role::Read)
         .await
         .unwrap();
-    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
+    f.db.add_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
     f.db.put_grant(f.api.id(), team("core"), Role::Write)
         .await
         .unwrap();
@@ -331,7 +340,10 @@ async fn deleting_a_user_takes_their_grants_with_it() {
 #[tokio::test]
 async fn deleting_a_team_takes_only_its_own_grants_with_it() {
     let (d, f) = fx().await;
-    let ops = f.db.create_team(&slug("ops"), "Ops").await.unwrap();
+    let ops =
+        f.db.create_team(&slug("ops"), "Ops", &AuditCtx::system())
+            .await
+            .unwrap();
     assert_eq!(
         ops.id(),
         f.ann.id(),
@@ -416,7 +428,9 @@ async fn list_grants_skips_a_grant_whose_subject_is_gone() {
 #[tokio::test]
 async fn an_unknown_grant_role_is_an_error_not_read() {
     let (d, f) = fx().await;
-    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
+    f.db.add_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
     f.db.put_grant(f.api.id(), team("core"), Role::Admin)
         .await
         .unwrap();

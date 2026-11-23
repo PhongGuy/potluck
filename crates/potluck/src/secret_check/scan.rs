@@ -26,8 +26,9 @@ pub struct HookEnv {
 
 impl HookEnv {
     /// Reads `POTLUCK_KIND` (non-empty), `POTLUCK_IMPORT` (`1` means import),
-    /// `POTLUCK_OVERRIDE` (non-empty) and `POTLUCK_ROLE`; an unset variable and an empty one mean
-    /// the same, and an unset or unknown role is `write`.
+    /// `POTLUCK_OVERRIDE` (non-empty), `POTLUCK_ROLE` and `POTLUCK_DEFAULT_BRANCH`; an unset
+    /// variable and an empty one mean the same, an unset or unknown role is `write`, and no
+    /// default branch protects every branch.
     pub fn from_env() -> HookEnv {
         let text = |name: &str| std::env::var_os(name).map(|v| v.to_string_lossy().into_owned());
         let role = text("POTLUCK_ROLE")
@@ -40,6 +41,7 @@ impl HookEnv {
             text("POTLUCK_OVERRIDE").as_deref(),
         )
         .with_role(role)
+        .with_default_branch(text("POTLUCK_DEFAULT_BRANCH").as_deref().unwrap_or(""))
     }
 
     /// Builds the environment from its parts; an empty kind or override counts as none, the
@@ -150,7 +152,8 @@ fn rejection(ref_name: &[u8], raw: &[u8], lossy: &str, finding: Finding) -> Reje
 }
 
 /// The check for one push. `Ok(vec![])` accepts. An override accepts without touching git.
-/// Deletions are skipped. Per ref, in stdin order, the target is peeled: a commit yields its
+/// Deletions carry nothing to scan, though a non-admin's delete of a protected branch is refused
+/// as `scan_with` describes. Per ref, in stdin order, the target is peeled: a commit yields its
 /// new commits (`--not --all` plus every earlier ref's tip), path rules (generic, then the
 /// kind) over every changed entry, and content rules over the entries whose blob is new to
 /// the repository or whose path the kind `reads`, each `(blob, path)` pair once per push; in

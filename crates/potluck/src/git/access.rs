@@ -72,6 +72,7 @@ pub struct PushContext {
     pusher: String,
     override_id: Option<i64>,
     kind: Option<String>,
+    default_branch: Option<String>,
 }
 
 impl PushContext {
@@ -82,6 +83,7 @@ impl PushContext {
             pusher: pusher.to_owned(),
             override_id: None,
             kind: None,
+            default_branch: None,
         }
     }
 
@@ -89,6 +91,13 @@ impl PushContext {
     #[must_use]
     pub fn kind(mut self, kind: &str) -> Self {
         self.kind = Some(kind.to_owned());
+        self
+    }
+
+    /// The workspace's default branch.
+    #[must_use]
+    pub fn default_branch(mut self, name: &str) -> Self {
+        self.default_branch = Some(name.to_owned());
         self
     }
 
@@ -117,6 +126,11 @@ impl PushContext {
     /// The workspace's kind, when the resolver gave one.
     pub fn workspace_kind(&self) -> Option<&str> {
         self.kind.as_deref()
+    }
+
+    /// The workspace's default branch, when the resolver gave one.
+    pub fn workspace_default_branch(&self) -> Option<&str> {
+        self.default_branch.as_deref()
     }
 }
 
@@ -153,9 +167,10 @@ impl GitAccess for DenyAll {
 /// unknown, expired or revoked token or a disabled owner), the workspace by slugs (404), the
 /// role through `workspace_role` (server admins are `Admin` everywhere, else the highest grant;
 /// none is the same 404), and the hook environment, in this order: `POTLUCK_KIND` (the workspace's
-/// kind), `POTLUCK_ROLE` (that role), `POTLUCK_PUSHER` (username), `POTLUCK_PUSHER_TOKEN` (the
-/// token's row id), `POTLUCK_IMPORT=1` only while the import state is set,
-/// `POTLUCK_OVERRIDE=<id>` only when an override is armed for the pusher.
+/// kind), `POTLUCK_DEFAULT_BRANCH` (its default branch), `POTLUCK_ROLE` (that role),
+/// `POTLUCK_PUSHER` (username), `POTLUCK_PUSHER_TOKEN` (the token's row id), `POTLUCK_IMPORT=1`
+/// only while the import state is set, `POTLUCK_OVERRIDE=<id>` only when an override is armed
+/// for the pusher.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct DbAccess {
@@ -195,6 +210,7 @@ impl GitAccess for DbAccess {
             // The token travels by row id only; the secret itself never reaches the hook.
             let mut access = Access::new(role)
                 .with_hook_env("POTLUCK_KIND", record.kind())
+                .with_hook_env("POTLUCK_DEFAULT_BRANCH", record.default_branch())
                 .with_hook_env("POTLUCK_ROLE", role.as_str())
                 .with_hook_env("POTLUCK_PUSHER", user.user().username())
                 .with_hook_env("POTLUCK_PUSHER_TOKEN", &user.token_id().to_string());
@@ -211,7 +227,8 @@ impl GitAccess for DbAccess {
             // The same values the hook was given, so bookkeeping consumes exactly that override.
             let push = PushContext::new(record.id(), user.user().username())
                 .override_id(armed)
-                .kind(record.kind());
+                .kind(record.kind())
+                .default_branch(record.default_branch());
             Ok(access.with_push(push))
         })
     }

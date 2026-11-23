@@ -2,7 +2,7 @@
 //! them and carries its hook variables.
 
 use potluck::api::credential::Credential;
-use potluck::git::access::{Access, DenyAll, GitAccess};
+use potluck::git::access::{Access, DenyAll, GitAccess, PushContext};
 use potluck::role::Role;
 use potluck::slug::Slug;
 
@@ -94,4 +94,15 @@ async fn deny_all_answers_unauthenticated() {
         .await
         .unwrap_err();
     assert_eq!(err.status(), 401);
+}
+
+#[test]
+fn a_push_context_carries_the_default_branch_only_when_given() {
+    assert_eq!(PushContext::new(1, "bob").workspace_default_branch(), None);
+    assert_eq!(
+        PushContext::new(1, "bob")
+            .default_branch("trunk")
+            .workspace_default_branch(),
+        Some("trunk")
+    );
 }

@@ -279,3 +279,37 @@ fn an_unlisted_format_prints_the_format_code() {
         "potluck-reject format_unsupported refs/heads/main opencollection.yml format_unsupported\n"
     );
 }
+
+#[test]
+fn the_hook_protects_the_branch_potluck_default_branch_names() {
+    let s = Scratch::new();
+    s.write("a.txt", b"one\n");
+    let tip = s.commit("one");
+    s.publish("main");
+    let delete = |name: &str| format!("{tip} {ZERO} {name}\n");
+    let main = [
+        ("POTLUCK_DEFAULT_BRANCH", "main"),
+        ("POTLUCK_ROLE", "write"),
+    ];
+    let out = run_hook(&s, &main, &delete("refs/heads/feat"));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = run_hook(&s, &main, &delete("refs/heads/main"));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        "potluck-reject safety_relaxation refs/heads/main / branch_delete\n"
+    );
+    let unset = [("POTLUCK_ROLE", "write")];
+    let out = run_hook(&s, &unset, &delete("refs/heads/feat"));
+    assert_eq!(
+        stderr(&out),
+        "potluck-reject safety_relaxation refs/heads/feat / branch_delete\n",
+        "an unset default branch protects every branch"
+    );
+    let admin = [
+        ("POTLUCK_DEFAULT_BRANCH", "main"),
+        ("POTLUCK_ROLE", "admin"),
+    ];
+    let out = run_hook(&s, &admin, &delete("refs/heads/main"));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+}

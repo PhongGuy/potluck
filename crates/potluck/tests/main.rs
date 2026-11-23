@@ -22,6 +22,7 @@ mod admin_teams;
 mod admin_update;
 mod admin_users;
 mod api_system;
+mod audit_api;
 mod authenticate;
 mod cli_version;
 mod config;

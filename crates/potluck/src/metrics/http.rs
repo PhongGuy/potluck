@@ -22,7 +22,7 @@ const SIGN_IN_ROUTES: [&str; 2] = ["/api/v1/session", "/api/v1/oidc/redeem"];
 
 /// Records each response under its method, route template and status once its body is
 /// finished or abandoned, and counts a 401 to a request that carried credentials by scheme.
-/// The events stream passes through unrecorded.
+/// The events stream is left out of the histogram but still counts its 401s.
 pub(crate) async fn layer(
     State(metrics): State<Arc<Metrics>>,
     req: Request,
@@ -35,9 +35,6 @@ pub(crate) async fn layer(
         .get::<MatchedPath>()
         .map_or("unmatched", MatchedPath::as_str)
         .to_owned();
-    if route == EVENTS_ROUTE {
-        return next.run(req).await;
-    }
     let scheme = req.headers().get(header::AUTHORIZATION).map(scheme_of);
     let start = Instant::now();
     let response = next.run(req).await;
@@ -48,6 +45,9 @@ pub(crate) async fn layer(
         && !SIGN_IN_ROUTES.contains(&route.as_str())
     {
         metrics.auth_failure(scheme);
+    }
+    if route == EVENTS_ROUTE {
+        return response;
     }
     let code = status.as_u16();
     response.map(|inner| {
@@ -111,6 +111,7 @@ impl Drop for Timed {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -241,6 +242,36 @@ mod tests {
         let _ = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
         let text = m.render(&Snapshot::default());
         assert!(!text.contains("events"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_401_on_the_events_route_counts_its_scheme_but_no_duration() {
+        let m = Metrics::new("0.1.0");
+        let app = app(
+            &m,
+            Router::new().route(
+                "/api/v1/workspaces/{team}/{ws}/events",
+                get(|| async { StatusCode::UNAUTHORIZED }),
+            ),
+        );
+        let res = send(
+            &app,
+            "GET",
+            "/api/v1/workspaces/core/api/events",
+            Some("Bearer plk_nope"),
+        )
+        .await;
+        let _ = axum::body::to_bytes(res.into_body(), 64).await.unwrap();
+        let text = m.render(&Snapshot::default());
+        assert_eq!(
+            sample(&text, "potluck_auth_failures_total{scheme=\"bearer\"}"),
+            Some(1.0),
+            "{text}"
+        );
+        assert!(
+            !text.contains("http_server_request_duration_seconds_count{"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

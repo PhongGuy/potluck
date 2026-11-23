@@ -39,23 +39,17 @@ async fn fx() -> (tempfile::TempDir, Fx) {
         .await
         .unwrap();
     let api = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "API", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let docs = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("docs"),
-            "Docs",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("docs"), "Docs", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let bob = db
@@ -283,7 +277,11 @@ async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
         Some(id),
         "the earliest armed override is the one a push consumes"
     );
-    assert!(f.db.delete_workspace(f.api.id()).await.unwrap());
+    assert!(
+        f.db.delete_workspace(f.api.id(), &AuditCtx::system())
+            .await
+            .unwrap()
+    );
     assert!(f.db.list_grants(f.api.id()).await.unwrap().is_empty());
     assert_eq!(
         f.db.armed_override(f.api.id(), f.bob.id()).await.unwrap(),

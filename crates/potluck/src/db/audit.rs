@@ -191,6 +191,13 @@ pub(crate) struct MemberDetail<'a> {
     pub(crate) user: &'a str,
 }
 
+/// The `workspace.create` detail: the kind and whether the repository was seeded.
+#[derive(serde::Serialize)]
+pub(crate) struct WorkspaceCreated<'a> {
+    pub(crate) kind: &'a str,
+    pub(crate) seed: bool,
+}
+
 /// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]

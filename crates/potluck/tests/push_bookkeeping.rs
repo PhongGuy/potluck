@@ -42,6 +42,7 @@ async fn import_server(with_override: bool) -> (GitServer, i64, i64) {
                 "main",
             )
             .import_pending(true),
+            &AuditCtx::system(),
         )
         .await
         .unwrap();

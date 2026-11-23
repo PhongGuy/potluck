@@ -159,13 +159,16 @@ async fn the_admin_socket_sees_every_workspace_as_admin() {
         .unwrap();
     running
         .db()
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &Slug::parse("api").unwrap(),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(
+                core.id(),
+                &Slug::parse("api").unwrap(),
+                "API",
+                "apinata",
+                "main",
+            ),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let (status, body) = unix_get(running.admin_socket(), "/api/v1/workspaces").await;

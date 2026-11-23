@@ -7,7 +7,7 @@ use potluck::db::audit::{AuditCtx, AuditFilter, AuditRecord};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::common::{TestApp, api_admin, api_team, api_user, call, test_app};
+use crate::common::{TestApp, api_admin, api_team, api_user, api_workspace, call, test_app};
 
 /// The rows of `action`, oldest first.
 async fn rows(db: &Db, action: &str) -> Vec<AuditRecord> {
@@ -409,4 +409,68 @@ async fn a_failed_insert_creates_no_team() {
     .await;
     assert_eq!(status, 500);
     assert!(app.db.team_by_slug("core").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn creating_and_deleting_a_workspace_snapshot_its_name() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", false).await;
+    let created = rows(&app.db, "workspace.create").await;
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        (
+            created[0].target_kind(),
+            created[0].target_name(),
+            created[0].workspace()
+        ),
+        (Some("workspace"), Some("core/api"), Some("core/api"))
+    );
+    assert_eq!(
+        detail(&created[0]),
+        json!({"kind": "apinata", "seed": false})
+    );
+    let (status, _) = call(
+        &app.url("/workspaces/core/api"),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    let deleted = rows(&app.db, "workspace.delete").await;
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(
+        (deleted[0].workspace(), deleted[0].target_id()),
+        (Some("core/api"), created[0].target_id())
+    );
+}
+
+#[tokio::test]
+async fn a_failed_insert_leaves_no_workspace_and_no_directory() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_team(&app.url(""), &root, "core").await;
+    boom(app._dir.path());
+    let body = json!({"slug": "api", "name": "api", "kind": "apinata", "default_branch": "main"});
+    let (status, _) = call(
+        &app.url("/teams/core/workspaces"),
+        Method::POST,
+        Some(&root),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, 500);
+    assert!(
+        app.db
+            .workspace_by_slugs("core", "api")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !crate::common::repo_path(app._dir.path(), "core", "api").exists(),
+        "the claimed directory is removed"
+    );
 }

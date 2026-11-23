@@ -106,13 +106,16 @@ async fn team_workspace_and_grant_json_match_the_contract() {
         .await
         .unwrap();
     let ws = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &Slug::parse("api").unwrap(),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(
+                core.id(),
+                &Slug::parse("api").unwrap(),
+                "API",
+                "apinata",
+                "main",
+            ),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     assert_eq!(

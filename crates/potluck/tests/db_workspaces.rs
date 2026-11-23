@@ -24,13 +24,10 @@ async fn workspaces_are_created_found_listed_and_deleted() {
         .await
         .unwrap();
     let api = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "API", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -50,6 +47,7 @@ async fn workspaces_are_created_found_listed_and_deleted() {
         .create_workspace(
             NewWorkspace::new(other.id(), &slug("api"), "API", "apinata", "trunk")
                 .import_pending(true),
+            &AuditCtx::system(),
         )
         .await
         .unwrap();
@@ -75,19 +73,22 @@ async fn workspaces_are_created_found_listed_and_deleted() {
         .collect();
     assert_eq!(names, ["core/api", "other/api"]);
     let err = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "Again",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "Again", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::Conflict { .. }), "got {err:?}");
-    assert!(db.delete_workspace(api.id()).await.unwrap());
     assert!(
-        !db.delete_workspace(api.id()).await.unwrap(),
+        db.delete_workspace(api.id(), &AuditCtx::system())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !db.delete_workspace(api.id(), &AuditCtx::system())
+            .await
+            .unwrap(),
         "already gone"
     );
     assert_eq!(db.workspace_by_slugs("core", "api").await.unwrap(), None);
@@ -102,13 +103,10 @@ async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
         .await
         .unwrap();
     let err = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("x"),
-            "X",
-            "unknown",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("x"), "X", "unknown", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -116,7 +114,10 @@ async fn the_schema_refuses_an_unknown_kind_and_an_unknown_team() {
         "the CHECK constraint holds: {err:?}"
     );
     let err = db
-        .create_workspace(NewWorkspace::new(999, &slug("x"), "X", "apinata", "main"))
+        .create_workspace(
+            NewWorkspace::new(999, &slug("x"), "X", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -145,13 +146,10 @@ async fn a_workspace_create_that_loses_the_race_is_a_conflict() {
         )
         .unwrap();
     let err = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "API", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap_err();
     match &err {

@@ -1,9 +1,6 @@
 //! A mock OpenID provider on 127.0.0.1: discovery, JWKS, authorize and token endpoints. It signs
 //! ID tokens with RS256 fixture keys and can be switched into each failure Potluck must refuse.
 
-// Shared test support: each test file uses a different subset of the faults and accessors.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;

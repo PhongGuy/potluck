@@ -1,16 +1,16 @@
 //! One OpenID provider through openidconnect: discovery and its keys, the authorization URL for
 //! a sign-in, and the code exchange with ID token verification. Only Potluck types cross out.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use openidconnect::core::{
     CoreAuthPrompt, CoreClient, CoreJwsSigningAlgorithm, CoreProviderMetadata, CoreResponseType,
     CoreTokenResponse,
 };
 use openidconnect::{
-    AuthenticationFlow, AuthorizationCode, ClientId, CsrfToken, EndpointMaybeSet, EndpointNotSet,
-    EndpointSet, HttpRequest, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl,
-    Scope, TokenResponse,
+    AuthenticationFlow, AuthorizationCode, ClaimsVerificationError, ClientId, CsrfToken,
+    EndpointMaybeSet, EndpointNotSet, EndpointSet, HttpRequest, IssuerUrl, Nonce,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenResponse,
 };
 
 use super::http::{IdpHttp, IdpHttpError};
@@ -75,18 +75,35 @@ type IdpFuture = std::pin::Pin<
     Box<dyn Future<Output = Result<openidconnect::HttpResponse, IdpHttpError>> + Send>,
 >;
 
-// The discovery document with its keys, and when it was fetched.
+// A cached copy older than this is refetched; a failed refetch keeps serving it.
+const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+// No fetch starts this soon after a failed one, so a hanging IdP costs one timeout.
+const FAILURE_PAUSE: Duration = Duration::from_secs(10);
+// Server-wide spacing of refreshes forced by an ID token signed with an unknown key.
+const FORCED_SPACING: Duration = Duration::from_secs(60);
+
+// The discovery document with its keys, when it was fetched, and a counter that tells a
+// sign-in whether the copy it verified against has since been replaced.
 struct Cached {
     metadata: CoreProviderMetadata,
     fetched: Instant,
+    generation: u64,
 }
 
-/// One configured OpenID provider. Discovery and its keys are fetched once and cached; the
-/// cache lock is held across a fetch so concurrent sign-ins wait for one fetch.
+// Everything behind the cache lock: the copy plus the instants that space out fetches.
+#[derive(Default)]
+struct Cache {
+    cached: Option<Cached>,
+    failed: Option<Instant>,
+    forced: Option<Instant>,
+}
+
+/// One configured OpenID provider. Discovery and its keys are cached for a day; the cache lock
+/// is held across a fetch so concurrent sign-ins wait for one fetch.
 pub struct Provider {
     settings: OidcSettings,
     http: IdpHttp,
-    cache: tokio::sync::Mutex<Option<Cached>>,
+    cache: tokio::sync::Mutex<Cache>,
 }
 
 impl std::fmt::Debug for Provider {
@@ -95,7 +112,7 @@ impl std::fmt::Debug for Provider {
             .cache
             .try_lock()
             .ok()
-            .and_then(|c| c.as_ref().map(|c| c.fetched));
+            .and_then(|c| c.cached.as_ref().map(|c| c.fetched));
         f.debug_struct("Provider")
             .field("settings", &self.settings)
             .field("fetched", &fetched)
@@ -109,8 +126,14 @@ impl Provider {
         Provider {
             settings,
             http,
-            cache: tokio::sync::Mutex::new(None),
+            cache: tokio::sync::Mutex::new(Cache::default()),
         }
+    }
+
+    /// Fetches discovery and keys once now; the startup probe. `Unavailable` when that fails.
+    pub async fn warm(&self) -> Result<(), ProviderError> {
+        let mut cache = self.cache.lock().await;
+        self.fetch(&mut cache, Instant::now()).await
     }
 
     /// The settings this provider was built from.
@@ -129,7 +152,8 @@ impl Provider {
         nonce: &str,
         pkce_verifier: &str,
     ) -> Result<String, ProviderError> {
-        let client = self.client(now, redirect_uri).await?;
+        let (metadata, _) = self.metadata(now).await?;
+        let client = self.client(metadata, redirect_uri)?;
         // openidconnect asserts the RFC 7636 length; refuse here rather than panic there.
         if !(43..=128).contains(&pkce_verifier.len()) {
             return Err(refused("pkce_verifier"));
@@ -156,8 +180,10 @@ impl Provider {
     }
 
     /// Exchanges `code` with the client secret and `pkce_verifier`, then verifies the ID token
-    /// (RS256 signature, iss, aud, exp, nonce). `Unavailable` when discovery fails, `Refused`
-    /// when the exchange fails or the token does not verify.
+    /// (RS256 signature, iss, aud, exp, nonce). A signature failure refetches discovery and
+    /// keys once and verifies the same token again, unless such a forced refresh started less
+    /// than 60 s before `now`. `Unavailable` when discovery fails, `Refused` when the exchange
+    /// fails or the token does not verify.
     pub async fn sign_in_at(
         &self,
         now: Instant,
@@ -166,7 +192,8 @@ impl Provider {
         pkce_verifier: &str,
         nonce: &str,
     ) -> Result<IdClaims, ProviderError> {
-        let client = self.client(now, redirect_uri).await?;
+        let (metadata, generation) = self.metadata(now).await?;
+        let client = self.client(metadata, redirect_uri)?;
         let http = self.http_client();
         let response: CoreTokenResponse = client
             .exchange_code(AuthorizationCode::new(code.to_owned()))
@@ -178,12 +205,23 @@ impl Provider {
         let id_token = response.id_token().ok_or_else(|| refused("no_id_token"))?;
         // RS256 only, whatever discovery advertises: an HS256 token keyed by the client secret
         // must never pass.
-        let verifier = client
-            .id_token_verifier()
-            .set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256]);
-        let claims = id_token
-            .claims(&verifier, &Nonce::new(nonce.to_owned()))
-            .map_err(|_| refused("claims"))?;
+        let nonce = Nonce::new(nonce.to_owned());
+        let verify = |client: &Client| {
+            let verifier = client
+                .id_token_verifier()
+                .set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256]);
+            id_token.claims(&verifier, &nonce).cloned()
+        };
+        // A signature failure may mean the IdP rotated its keys: verify once more against
+        // fresh keys, never repeating the code exchange.
+        let claims = match verify(&client) {
+            Err(ClaimsVerificationError::SignatureVerification(_)) => {
+                let metadata = self.forced_refresh(now, generation).await?;
+                verify(&self.client(metadata, redirect_uri)?)
+            }
+            other => other,
+        }
+        .map_err(|_| refused("claims"))?;
         Ok(IdClaims {
             subject: claims.subject().as_str().to_owned(),
             email: claims.email().map(|e| e.as_str().to_owned()),
@@ -195,9 +233,12 @@ impl Provider {
         })
     }
 
-    // A client built from the cached discovery document, fetching it first if nothing is cached.
-    async fn client(&self, now: Instant, redirect_uri: &str) -> Result<Client, ProviderError> {
-        let metadata = self.metadata(now).await?;
+    // A client built from one discovery document, redirecting to `redirect_uri`.
+    fn client(
+        &self,
+        metadata: CoreProviderMetadata,
+        redirect_uri: &str,
+    ) -> Result<Client, ProviderError> {
         let redirect =
             RedirectUrl::new(redirect_uri.to_owned()).map_err(|_| refused("redirect_uri"))?;
         let secret =
@@ -210,22 +251,70 @@ impl Provider {
         .set_redirect_uri(redirect))
     }
 
-    // The cached discovery document, or a fresh one. The lock is held across the fetch.
-    async fn metadata(&self, now: Instant) -> Result<CoreProviderMetadata, ProviderError> {
+    // The cached discovery document and its generation, refetched when it is a day old. A
+    // failed refetch keeps the old copy; within the pause after a failure nothing is fetched.
+    async fn metadata(&self, now: Instant) -> Result<(CoreProviderMetadata, u64), ProviderError> {
         let mut cache = self.cache.lock().await;
-        if let Some(cached) = cache.as_ref() {
+        let fresh = |c: &&Cached| now.saturating_duration_since(c.fetched) <= MAX_AGE;
+        if let Some(cached) = cache.cached.as_ref().filter(fresh) {
+            return Ok((cached.metadata.clone(), cached.generation));
+        }
+        if !paused(cache.failed, now, FAILURE_PAUSE) {
+            match self.fetch(&mut cache, now).await {
+                Ok(()) => {}
+                Err(_) if cache.cached.is_some() => {
+                    tracing::warn!("identity provider refresh failed; keeping the cached copy");
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let cached = cache.cached.as_ref().ok_or(ProviderError::Unavailable)?;
+        Ok((cached.metadata.clone(), cached.generation))
+    }
+
+    // Fresh keys after a signature failure. If the copy the sign-in used has since been
+    // replaced, that newer copy is used without a fetch; otherwise at most one forced fetch
+    // starts per minute server-wide, and none within the pause after a failure.
+    async fn forced_refresh(
+        &self,
+        now: Instant,
+        seen: u64,
+    ) -> Result<CoreProviderMetadata, ProviderError> {
+        let mut cache = self.cache.lock().await;
+        if let Some(cached) = cache.cached.as_ref().filter(|c| c.generation != seen) {
             return Ok(cached.metadata.clone());
         }
+        if paused(cache.forced, now, FORCED_SPACING) || paused(cache.failed, now, FAILURE_PAUSE) {
+            return Err(refused("refresh_spacing"));
+        }
+        cache.forced = Some(now);
+        self.fetch(&mut cache, now)
+            .await
+            .map_err(|_| refused("refresh_failed"))?;
+        let cached = cache.cached.as_ref().ok_or(ProviderError::Refused)?;
+        Ok(cached.metadata.clone())
+    }
+
+    // Fetches discovery and its keys into `cache`, recording the instant of a failure.
+    async fn fetch(&self, cache: &mut Cache, now: Instant) -> Result<(), ProviderError> {
         let issuer = IssuerUrl::new(self.settings.issuer().to_owned())
             .map_err(|_| unavailable("discovery"))?;
-        let metadata = CoreProviderMetadata::discover_async(issuer, &self.http_client())
-            .await
-            .map_err(|_| unavailable("discovery"))?;
-        *cache = Some(Cached {
-            metadata: metadata.clone(),
-            fetched: now,
-        });
-        Ok(metadata)
+        match CoreProviderMetadata::discover_async(issuer, &self.http_client()).await {
+            Ok(metadata) => {
+                let generation = cache.cached.as_ref().map_or(0, |c| c.generation + 1);
+                cache.failed = None;
+                cache.cached = Some(Cached {
+                    metadata,
+                    fetched: now,
+                    generation,
+                });
+                Ok(())
+            }
+            Err(_) => {
+                cache.failed = Some(now);
+                Err(unavailable("discovery"))
+            }
+        }
     }
 
     // The HTTP client handed to openidconnect: every request goes through `IdpHttp`.
@@ -247,4 +336,9 @@ fn refused(reason: &'static str) -> ProviderError {
 fn unavailable(reason: &'static str) -> ProviderError {
     tracing::warn!(reason, "identity provider unavailable");
     ProviderError::Unavailable
+}
+
+// Whether `since` lies less than `pause` before `now`.
+fn paused(since: Option<Instant>, now: Instant, pause: Duration) -> bool {
+    since.is_some_and(|since| now.saturating_duration_since(since) < pause)
 }

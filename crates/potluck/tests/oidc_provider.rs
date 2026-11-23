@@ -253,3 +253,142 @@ async fn an_issuer_differing_by_a_trailing_slash_is_unavailable() {
         ProviderError::Unavailable
     );
 }
+
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+#[tokio::test]
+async fn discovery_is_refreshed_after_a_day_and_kept_when_that_fails() {
+    let (_dir, idp, provider) = setup().await;
+    let t0 = Instant::now();
+    provider
+        .authorize_url_at(t0, REDIRECT, "s", "n", VERIFIER)
+        .await
+        .unwrap();
+    provider
+        .authorize_url_at(
+            t0 + DAY - Duration::from_secs(1),
+            REDIRECT,
+            "s",
+            "n",
+            VERIFIER,
+        )
+        .await
+        .unwrap();
+    assert_eq!(idp.discovery_calls(), 1);
+    provider
+        .authorize_url_at(
+            t0 + DAY + Duration::from_secs(1),
+            REDIRECT,
+            "s",
+            "n",
+            VERIFIER,
+        )
+        .await
+        .unwrap();
+    assert_eq!(idp.discovery_calls(), 2);
+    idp.set_fault(Fault::Unavailable);
+    let late = t0 + 3 * DAY;
+    assert!(
+        provider
+            .authorize_url_at(late, REDIRECT, "s", "n", VERIFIER)
+            .await
+            .is_ok(),
+        "stale cache serves"
+    );
+    assert_eq!(idp.discovery_calls(), 3);
+    provider
+        .authorize_url_at(late + Duration::from_secs(5), REDIRECT, "s", "n", VERIFIER)
+        .await
+        .unwrap();
+    assert_eq!(
+        idp.discovery_calls(),
+        3,
+        "no retry within 10 s of a failure"
+    );
+    idp.set_fault(Fault::None);
+    provider
+        .authorize_url_at(late + Duration::from_secs(11), REDIRECT, "s", "n", VERIFIER)
+        .await
+        .unwrap();
+    assert_eq!(
+        idp.discovery_calls(),
+        4,
+        "the stale copy is refreshed once the pause is over"
+    );
+}
+
+#[tokio::test]
+async fn a_rotated_key_is_fetched_once_and_the_token_verified_again() {
+    let (_dir, idp, provider) = setup().await;
+    let t0 = Instant::now();
+    sign_in(&idp, &provider, t0).await.unwrap();
+    let jwks_before = idp.jwks_calls();
+    let discovery_before = idp.discovery_calls();
+    let tokens_before = idp.token_calls();
+    idp.rotate_key();
+    sign_in(&idp, &provider, t0 + Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(idp.jwks_calls(), jwks_before + 1, "one refresh");
+    assert_eq!(
+        idp.discovery_calls(),
+        discovery_before + 1,
+        "a refresh is a rediscovery"
+    );
+    assert_eq!(
+        idp.token_calls(),
+        tokens_before + 1,
+        "the code is exchanged once"
+    );
+}
+
+#[tokio::test]
+async fn forced_refreshes_are_spaced_a_minute_apart() {
+    let (_dir, idp, provider) = setup().await;
+    let t0 = Instant::now();
+    sign_in(&idp, &provider, t0).await.unwrap();
+    idp.rotate_key();
+    sign_in(&idp, &provider, t0 + Duration::from_secs(1))
+        .await
+        .unwrap();
+    idp.rotate_key();
+    assert_eq!(
+        sign_in(&idp, &provider, t0 + Duration::from_secs(30))
+            .await
+            .unwrap_err(),
+        ProviderError::Refused,
+        "a second forced refresh within 60 s is not made"
+    );
+    sign_in(&idp, &provider, t0 + Duration::from_secs(62))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn warm_reports_an_unreachable_provider_and_a_later_call_recovers() {
+    let (_dir, idp, provider) = setup().await;
+    idp.set_fault(Fault::Unavailable);
+    assert_eq!(
+        provider.warm().await.unwrap_err(),
+        ProviderError::Unavailable
+    );
+    idp.set_fault(Fault::None);
+    assert_eq!(
+        provider
+            .authorize_url_at(Instant::now(), REDIRECT, "s", "n", VERIFIER)
+            .await
+            .unwrap_err(),
+        ProviderError::Unavailable,
+        "within 10 s of the failed probe nothing is fetched"
+    );
+    provider
+        .authorize_url_at(
+            Instant::now() + Duration::from_secs(11),
+            REDIRECT,
+            "s",
+            "n",
+            VERIFIER,
+        )
+        .await
+        .unwrap();
+}

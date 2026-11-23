@@ -23,6 +23,7 @@ mod admin_update;
 mod admin_users;
 mod api_system;
 mod authenticate;
+mod branch_protection;
 mod cli_version;
 mod config;
 mod credential;

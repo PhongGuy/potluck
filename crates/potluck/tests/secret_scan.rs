@@ -279,7 +279,11 @@ fn deletions_and_overrides_touch_no_git_and_an_oversized_blob_skips_content_rule
     let tip = s.stage_commit("secret");
     let broken = Git::new(PathBuf::from("/nonexistent/git"), None);
     let delete = RefUpdate::parse_line(format!("{tip} {ZERO} refs/heads/main").as_bytes()).unwrap();
-    assert!(scan(&env(None), &[delete], &broken).unwrap().is_empty());
+    assert!(
+        scan(&env(None).with_default_branch("trunk"), &[delete], &broken)
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         scan(
             &HookEnv::new(Some("apinata"), false, Some("17")),
@@ -750,9 +754,13 @@ fn an_unknown_kind_is_refused_unless_every_update_is_a_delete() {
     assert!(matches!(res, Err(ScanError::UnsupportedKind)));
     let delete = RefUpdate::parse_line(format!("{tip} {ZERO} refs/heads/gone").as_bytes()).unwrap();
     assert!(
-        scan(&env(Some("no-such-kind")), &[delete], &git_for(&s))
-            .unwrap()
-            .is_empty()
+        scan(
+            &env(Some("no-such-kind")).with_default_branch("main"),
+            &[delete],
+            &git_for(&s)
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -909,7 +917,10 @@ fn moved(old: &str, new: &str, name: &str) -> RefUpdate {
 }
 
 fn relax_rows(s: &Scratch, role: Role, u: RefUpdate) -> Vec<String> {
-    let e = HookEnv::new(None, false, None).with_role(role);
+    // A default branch these updates never touch keeps branch protection out of the rows.
+    let e = HookEnv::new(None, false, None)
+        .with_default_branch("trunk")
+        .with_role(role);
     rows(&scan_with(&e, Some(&rules(Act::Relax)), &[u], &git_for(s)).unwrap())
 }
 

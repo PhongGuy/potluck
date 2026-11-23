@@ -4,6 +4,11 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
+use axum::extract::State;
+use axum::http::{StatusCode, header};
+use axum::response::IntoResponse;
+use axum::routing::get;
 use prometheus_client::collector::Collector;
 use prometheus_client::encoding::{DescriptorEncoder, EncodeLabelSet, EncodeMetric, text};
 use prometheus_client::metrics::MetricType;
@@ -13,6 +18,8 @@ use prometheus_client::metrics::gauge::ConstGauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::metrics::info::Info;
 use prometheus_client::registry::{Registry, Unit};
+
+use crate::api::AppState;
 
 /// Distinct refusal rule names kept as their own series; later ones become "other".
 pub(crate) const MAX_RULES: usize = 128;
@@ -333,6 +340,28 @@ impl Metrics {
         }
         out
     }
+}
+
+/// The OpenMetrics text exposition's media type.
+const OPENMETRICS: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
+
+/// The metrics listener's routes: `GET /metrics` renders the exposition; any other path or
+/// method is an empty 404, so the port reveals nothing else.
+pub(crate) fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/metrics", get(scrape))
+        .fallback(not_found)
+        .method_not_allowed_fallback(not_found)
+        .with_state(state)
+}
+
+async fn scrape(State(state): State<AppState>) -> impl IntoResponse {
+    let body = state.metrics().render(&Snapshot::default());
+    ([(header::CONTENT_TYPE, OPENMETRICS)], body)
+}
+
+async fn not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 /// Maps a request method to its label: the nine standard methods, else `_OTHER`.

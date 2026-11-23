@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
+use crate::metrics::Metrics;
 use crate::notices::Notices;
 use crate::update::UpdateChecker;
 
@@ -41,8 +42,8 @@ pub use actor::{Actor, AuthUser};
 use error::{ApiError, ErrorResponse};
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver, the git engine, the password hasher, the sign-in rate limiters and, when a release
-/// source is wired, the update checker.
+/// resolver, the git engine, the password hasher, the sign-in rate limiters, the metrics
+/// registry and, when a release source is wired, the update checker.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -54,6 +55,7 @@ pub struct AppState {
     session_limits: Arc<SessionLimits>,
     notices: Notices,
     updates: Option<UpdateChecker>,
+    metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -75,6 +77,7 @@ impl AppState {
             session_limits: Arc::new(SessionLimits::default()),
             notices: Notices::new(),
             updates: None,
+            metrics: Metrics::new(env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -124,6 +127,11 @@ impl AppState {
     /// The resolver.
     pub(crate) fn git_access(&self) -> &dyn GitAccess {
         &*self.git_access
+    }
+
+    /// The metrics registry, shared by every clone of the state.
+    pub(crate) fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
     /// The engine.

@@ -513,3 +513,47 @@ fn the_daily_update_check_is_on_unless_turned_off() {
         parse_config(&["--public-url", "http://127.0.0.1:8080", "--no-update-check"]).unwrap();
     assert!(!off.update_check());
 }
+
+#[test]
+fn metrics_listen_is_off_by_default_and_parses() {
+    let off = parse_config(&["--public-url", "http://127.0.0.1:8080"]).unwrap();
+    assert_eq!(off.metrics_listen(), None);
+    let on = parse_config(&[
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--metrics-listen",
+        "127.0.0.1:9464",
+    ])
+    .unwrap();
+    assert_eq!(
+        on.metrics_listen(),
+        Some("127.0.0.1:9464".parse::<SocketAddr>().unwrap())
+    );
+}
+
+#[test]
+fn metrics_listen_equal_to_listen_is_refused_unless_both_are_port_zero() {
+    let err = parse_config(&[
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--listen",
+        "127.0.0.1:8080",
+        "--metrics-listen",
+        "127.0.0.1:8080",
+    ])
+    .unwrap_err();
+    assert!(
+        matches!(err, ConfigError::MetricsListenClash { .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("--metrics-listen"), "{err}");
+    parse_config(&[
+        "--public-url",
+        "http://127.0.0.1:8080",
+        "--listen",
+        "127.0.0.1:0",
+        "--metrics-listen",
+        "127.0.0.1:0",
+    ])
+    .expect("two ephemeral ports never clash");
+}

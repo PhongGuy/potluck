@@ -121,7 +121,11 @@ async fn refuse(
     reason: SignInFailure,
 ) -> ErrorResponse {
     tracing::debug!(username = %username, "sign-in refused");
-    if let Err(e) = state.db().record_failed_sign_in(user, reason, ip.addr()).await {
+    if let Err(e) = state
+        .db()
+        .record_failed_sign_in(user, reason, ip.addr())
+        .await
+    {
         tracing::error!(error = %e, "could not record a refused sign-in");
     }
     ApiError::unauthenticated("invalid username or password").into()

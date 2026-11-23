@@ -3,6 +3,7 @@
 use potluck::api::error::{ApiError, ErrorCode};
 use potluck::db::DbError;
 use potluck::db::accounts::NewUser;
+use potluck::db::audit::AuditCtx;
 use potluck::db::teams::TeamRecord;
 use potluck::slug::Slug;
 
@@ -40,8 +41,14 @@ async fn teams_are_created_listed_and_found_by_slug() {
 async fn membership_is_idempotent_and_sorted() {
     let (_dir, db) = migrated_db().await;
     let team = db.create_team(&slug("core"), "Core").await.unwrap();
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
-    let ann = db.create_user(NewUser::new("ann", "Ann")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
+    let ann = db
+        .create_user(NewUser::new("ann", "Ann"), &AuditCtx::system())
+        .await
+        .unwrap();
     assert!(db.add_member(team.id(), bob.id()).await.unwrap());
     assert!(db.add_member(team.id(), ann.id()).await.unwrap());
     assert!(

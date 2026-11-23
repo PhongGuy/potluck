@@ -10,6 +10,7 @@ use crate::auth::token::MintedToken;
 use crate::config::{Config, ServeArgs};
 use crate::db::Db;
 use crate::db::accounts::{NewToken, NewUser, UserRecord};
+use crate::db::audit::AuditCtx;
 
 /// A `Config` for a server on an ephemeral loopback port with `dir` as its data directory.
 pub(crate) fn config_for(dir: &Path) -> Config {
@@ -58,6 +59,7 @@ pub(crate) async fn create_user(
         NewUser::new(username, username)
             .password_hash(&hash)
             .server_admin(server_admin),
+        &AuditCtx::system(),
     )
     .await
     .expect("create user")

@@ -5,6 +5,7 @@ use potluck::api::credential::Credential;
 use potluck::api::error::ErrorCode;
 use potluck::clock::{now_rfc3339, shift_secs};
 use potluck::db::accounts::{NewToken, UserPatch};
+use potluck::db::audit::AuditCtx;
 
 use crate::common::{create_user, mint_token, test_state};
 use crate::logs::captured_logs;
@@ -90,9 +91,13 @@ async fn unknown_expired_revoked_malformed_and_disabled_are_401() {
         authenticate(&state, &cred(&good)).await.is_ok(),
         "the good token still works"
     );
-    db.update_user("bob", UserPatch::default().disabled(true))
-        .await
-        .unwrap();
+    db.update_user(
+        "bob",
+        UserPatch::default().disabled(true),
+        &AuditCtx::system(),
+    )
+    .await
+    .unwrap();
     let err = authenticate(&state, &cred(&good)).await.unwrap_err();
     assert_eq!(err.status(), 401, "a disabled user's tokens stop");
 }
@@ -109,9 +114,13 @@ async fn a_disabled_server_admin_is_refused_before_becoming_a_user() {
             .user()
             .server_admin()
     );
-    db.update_user("root", UserPatch::default().disabled(true))
-        .await
-        .unwrap();
+    db.update_user(
+        "root",
+        UserPatch::default().disabled(true),
+        &AuditCtx::system(),
+    )
+    .await
+    .unwrap();
     let err = authenticate(&state, &cred(&secret)).await.unwrap_err();
     assert_eq!(
         err.status(),

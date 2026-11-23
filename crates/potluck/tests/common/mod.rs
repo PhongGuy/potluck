@@ -19,6 +19,7 @@ use potluck::cli::{Cli, Command as CliCommand};
 use potluck::config::{Config, ConfigError, ServeArgs};
 use potluck::db::Db;
 use potluck::db::accounts::{NewToken, NewUser, UserRecord};
+use potluck::db::audit::AuditCtx;
 use potluck::git::access::{Access, BoxFuture, GitAccess, PushContext};
 use potluck::git::{GitLimits, Repos};
 use potluck::notices::Notices;
@@ -108,6 +109,7 @@ pub async fn create_user(
         NewUser::new(username, username)
             .password_hash(&hash)
             .server_admin(server_admin),
+        &AuditCtx::system(),
     )
     .await
     .expect("create user")

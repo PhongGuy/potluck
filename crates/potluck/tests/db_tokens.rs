@@ -2,6 +2,7 @@
 
 use potluck::db::Db;
 use potluck::db::accounts::{NewToken, NewUser};
+use potluck::db::audit::AuditCtx;
 
 use crate::common::migrated_db;
 
@@ -21,7 +22,10 @@ async fn last_used(db: &Db, id: i64) -> Option<String> {
 #[tokio::test]
 async fn tokens_round_trip_by_prefix_user_and_id() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let t1 = db
         .create_token(NewToken::new(
             bob.id(),
@@ -73,7 +77,10 @@ async fn tokens_round_trip_by_prefix_user_and_id() {
 #[tokio::test]
 async fn delete_token_reports_whether_a_row_went() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let t = db
         .create_token(NewToken::new(bob.id(), "x", "plk_aaaa", digest(3), None))
         .await
@@ -89,7 +96,10 @@ async fn delete_token_reports_whether_a_row_went() {
 #[tokio::test]
 async fn touch_token_writes_only_when_stale() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let t = db
         .create_token(NewToken::new(bob.id(), "x", "plk_aaaa", digest(4), None))
         .await
@@ -125,7 +135,10 @@ async fn touch_token_writes_only_when_stale() {
 async fn debug_redacts_digests() {
     let (_dir, db) = migrated_db().await;
     let bob = db
-        .create_user(NewUser::new("bob", "Bob").password_hash("$argon2id$hashhash"))
+        .create_user(
+            NewUser::new("bob", "Bob").password_hash("$argon2id$hashhash"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let new_token = NewToken::new(bob.id(), "x", "plk_aaaa", [0xAB; 32], None);

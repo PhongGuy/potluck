@@ -162,6 +162,23 @@ impl Entry {
     }
 }
 
+/// The `user.create` detail.
+#[derive(serde::Serialize)]
+pub(crate) struct UserCreated {
+    pub(crate) server_admin: bool,
+}
+
+/// The `user.update` detail: the set fields in assignment order, the hash named `password`, and
+/// the new value of each flag that changed.
+#[derive(serde::Serialize)]
+pub(crate) struct UserUpdated {
+    pub(crate) fields: Vec<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) server_admin: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disabled: Option<bool>,
+}
+
 /// Inserts one row stamped now; call it on the open transaction of the change it records.
 pub(crate) fn insert(
     conn: &rusqlite::Connection,

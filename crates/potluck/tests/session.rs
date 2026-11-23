@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use potluck::db::accounts::{NewUser, UserPatch};
+use potluck::db::audit::AuditCtx;
 use reqwest::header::HeaderMap;
 use serde_json::{Value, json};
 
@@ -61,7 +62,11 @@ async fn wrong_password_unknown_user_and_disabled_user_are_401_alike() {
     let bob = create_user(&app.db, "bob", "pw-123456", false).await;
     create_user(&app.db, "dan", "pw-123456", false).await;
     app.db
-        .update_user("dan", UserPatch::default().disabled(true))
+        .update_user(
+            "dan",
+            UserPatch::default().disabled(true),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let mut messages = HashSet::new();
@@ -89,7 +94,7 @@ async fn wrong_password_unknown_user_and_disabled_user_are_401_alike() {
 async fn a_user_without_a_password_cannot_sign_in() {
     let app = test_app().await;
     app.db
-        .create_user(NewUser::new("sso", "SSO Only"))
+        .create_user(NewUser::new("sso", "SSO Only"), &AuditCtx::system())
         .await
         .unwrap();
     let (status, _, body) = post_session(&app, creds("sso", "")).await;

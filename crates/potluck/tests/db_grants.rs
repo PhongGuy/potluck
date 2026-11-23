@@ -1,6 +1,7 @@
 //! Grants, the highest-grant rule, and the armed-override lookup.
 
 use potluck::db::accounts::{NewUser, UserRecord};
+use potluck::db::audit::AuditCtx;
 use potluck::db::grants::{GrantRecord, Subject};
 use potluck::db::teams::TeamRecord;
 use potluck::db::workspaces::{NewWorkspace, WorkspaceRecord};
@@ -54,8 +55,14 @@ async fn fx() -> (tempfile::TempDir, Fx) {
         ))
         .await
         .unwrap();
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
-    let ann = db.create_user(NewUser::new("ann", "Ann")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
+    let ann = db
+        .create_user(NewUser::new("ann", "Ann"), &AuditCtx::system())
+        .await
+        .unwrap();
     (
         dir,
         Fx {
@@ -313,7 +320,10 @@ async fn deleting_a_user_takes_their_grants_with_it() {
         [GrantRecord::new(user("bob"), Role::Write)]
     );
     // SQLite gives the freed highest id to the next user, who must not inherit ann's role.
-    let cat = f.db.create_user(NewUser::new("cat", "Cat")).await.unwrap();
+    let cat =
+        f.db.create_user(NewUser::new("cat", "Cat"), &AuditCtx::system())
+            .await
+            .unwrap();
     assert_eq!(cat.id(), f.ann.id(), "precondition: the id is reused");
     assert_eq!(f.db.role_for(f.api.id(), cat.id()).await.unwrap(), None);
 }

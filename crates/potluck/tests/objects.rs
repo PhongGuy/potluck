@@ -5,6 +5,7 @@ use potluck::api::objects::{
     noreply_host,
 };
 use potluck::db::accounts::{NewToken, NewUser, UserPatch};
+use potluck::db::audit::AuditCtx;
 use potluck::db::grants::{GrantRecord, Subject};
 use potluck::db::workspaces::NewWorkspace;
 use potluck::role::Role;
@@ -17,7 +18,10 @@ use crate::common::{client, migrated_db, test_app};
 async fn user_json_has_the_six_fields_and_no_hash() {
     let (_dir, db) = migrated_db().await;
     let bob = db
-        .create_user(NewUser::new("bob", "Bob").password_hash("$argon2id$secret"))
+        .create_user(
+            NewUser::new("bob", "Bob").password_hash("$argon2id$secret"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -29,7 +33,10 @@ async fn user_json_has_the_six_fields_and_no_hash() {
 #[tokio::test]
 async fn token_json_has_the_six_fields_and_no_digest() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let t = db
         .create_token(NewToken::new(
             bob.id(),
@@ -49,7 +56,10 @@ async fn token_json_has_the_six_fields_and_no_digest() {
 #[tokio::test]
 async fn identity_falls_back_to_username_and_a_noreply_address() {
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(NewUser::new("bob", "")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", ""), &AuditCtx::system())
+        .await
+        .unwrap();
     let id: IdentityJson = identity(&bob, "https://team.example.com/potluck");
     assert_eq!(
         serde_json::to_value(&id).unwrap(),
@@ -61,6 +71,7 @@ async fn identity_falls_back_to_username_and_a_noreply_address() {
             UserPatch::default()
                 .display_name("Bob B")
                 .email(Some("bob@example.com")),
+            &AuditCtx::system(),
         )
         .await
         .unwrap()

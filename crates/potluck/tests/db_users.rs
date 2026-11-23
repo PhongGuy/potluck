@@ -4,6 +4,7 @@ use potluck::api::error::{ApiError, ErrorCode};
 use potluck::api::{Actor, AuthUser};
 use potluck::db::DbError;
 use potluck::db::accounts::{NewUser, UserPatch, UserRecord};
+use potluck::db::audit::AuditCtx;
 
 use crate::common::migrated_db;
 
@@ -11,7 +12,10 @@ use crate::common::migrated_db;
 async fn create_user_stores_every_column_and_lists_sorted() {
     let (_dir, db) = migrated_db().await;
     let bob = db
-        .create_user(NewUser::new("bob", "Bob").password_hash("$argon2id$bob"))
+        .create_user(
+            NewUser::new("bob", "Bob").password_hash("$argon2id$bob"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let alice = db
@@ -19,6 +23,7 @@ async fn create_user_stores_every_column_and_lists_sorted() {
             NewUser::new("alice", "Alice")
                 .email("alice@example.com")
                 .server_admin(true),
+            &AuditCtx::system(),
         )
         .await
         .unwrap();
@@ -45,9 +50,11 @@ async fn create_user_stores_every_column_and_lists_sorted() {
 #[tokio::test]
 async fn a_taken_username_is_a_conflict_that_maps_to_409() {
     let (_dir, db) = migrated_db().await;
-    db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    db.create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     let err = db
-        .create_user(NewUser::new("bob", "Robert"))
+        .create_user(NewUser::new("bob", "Robert"), &AuditCtx::system())
         .await
         .unwrap_err();
     assert!(matches!(err, DbError::Conflict { .. }), "got {err:?}");
@@ -61,7 +68,9 @@ async fn a_taken_username_is_a_conflict_that_maps_to_409() {
 #[tokio::test]
 async fn user_by_username_is_exact() {
     let (_dir, db) = migrated_db().await;
-    db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
+    db.create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     assert_eq!(
         db.user_by_username("bob")
             .await
@@ -82,6 +91,7 @@ async fn update_user_applies_only_the_set_fields() {
             NewUser::new("bob", "Bob")
                 .email("b@example.com")
                 .password_hash("h1"),
+            &AuditCtx::system(),
         )
         .await
         .unwrap();
@@ -89,6 +99,7 @@ async fn update_user_applies_only_the_set_fields() {
         .update_user(
             "bob",
             UserPatch::default().display_name("Robert").disabled(true),
+            &AuditCtx::system(),
         )
         .await
         .unwrap()
@@ -105,6 +116,7 @@ async fn update_user_applies_only_the_set_fields() {
                 .email(None)
                 .server_admin(true)
                 .password_hash("h2"),
+            &AuditCtx::system(),
         )
         .await
         .unwrap()
@@ -113,7 +125,7 @@ async fn update_user_applies_only_the_set_fields() {
     assert!(cleared.server_admin());
     assert_eq!(cleared.password_hash(), Some("h2"));
     let unchanged = db
-        .update_user("bob", UserPatch::default())
+        .update_user("bob", UserPatch::default(), &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
@@ -123,10 +135,14 @@ async fn update_user_applies_only_the_set_fields() {
         "an empty patch is a no-op"
     );
     assert!(
-        db.update_user("nobody", UserPatch::default().disabled(true))
-            .await
-            .unwrap()
-            .is_none()
+        db.update_user(
+            "nobody",
+            UserPatch::default().disabled(true),
+            &AuditCtx::system()
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -153,7 +169,7 @@ async fn debug_redacts_the_password_hash_everywhere() {
     );
     assert!(!shown.contains("hashhash"), "UserPatch leaked: {shown}");
     let (_dir, db) = migrated_db().await;
-    let bob = db.create_user(new_user).await.unwrap();
+    let bob = db.create_user(new_user, &AuditCtx::system()).await.unwrap();
     let shown = format!("{bob:?}");
     assert!(shown.contains("bob"), "{shown}");
     assert!(
@@ -175,7 +191,7 @@ async fn a_user_create_that_loses_the_race_is_a_conflict() {
         )
         .unwrap();
     let err = db
-        .create_user(NewUser::new("bob", "Bob"))
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
         .await
         .unwrap_err();
     match &err {

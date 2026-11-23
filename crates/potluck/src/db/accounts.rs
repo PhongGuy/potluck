@@ -4,6 +4,7 @@
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 
+use super::audit::{self, AuditAction, AuditCtx, Entry, UserCreated, UserUpdated};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 
@@ -415,12 +416,15 @@ fn select_user(conn: &rusqlite::Connection, username: &str) -> Result<Option<Use
 }
 
 impl Db {
-    /// Inserts with `created_at = clock::now_rfc3339()`; `Conflict` when the username exists.
-    pub async fn create_user(&self, user: NewUser) -> Result<UserRecord, DbError> {
+    /// Inserts with `created_at = clock::now_rfc3339()` and its `user.create` row in one
+    /// transaction; `Conflict` when the username exists.
+    pub async fn create_user(&self, user: NewUser, ctx: &AuditCtx) -> Result<UserRecord, DbError> {
+        let ctx = ctx.clone();
         // The UNIQUE constraint is the duplicate check, so a writer on another connection is
-        // caught too.
+        // caught too. An error at any step drops `tx` uncommitted.
         self.call(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO users \
                  (username, display_name, email, password_hash, server_admin, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -437,7 +441,15 @@ impl Db {
                 conflict_on_unique(e, || format!("username {} is taken", user.username))
             })?;
             let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
-            Ok(conn.query_row(&sql, [conn.last_insert_rowid()], user_from_row)?)
+            let created = tx.query_row(&sql, [tx.last_insert_rowid()], user_from_row)?;
+            let entry = Entry::new(AuditAction::UserCreate)
+                .target("user", Some(created.id), Some(&created.username))
+                .detail(&UserCreated {
+                    server_admin: created.server_admin,
+                })?;
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(created)
         })
         .await
     }
@@ -461,17 +473,30 @@ impl Db {
         .await
     }
 
-    /// Applies the set fields; `Ok(None)` for an unknown username.
+    /// Applies the set fields and writes their `user.update` row in one transaction;
+    /// `Ok(None)` for an unknown username. No row when nothing is set or the user is unknown.
     pub async fn update_user(
         &self,
         username: &str,
         patch: UserPatch,
+        ctx: &AuditCtx,
     ) -> Result<Option<UserRecord>, DbError> {
         let username = username.to_owned();
+        let ctx = ctx.clone();
         self.call(move |conn| {
+            let (server_admin, disabled) = (patch.server_admin, patch.disabled);
             // Column names come from the fixed list in `assignments`, never from the caller;
             // every value is a bound parameter, with the username last.
             let set = patch.assignments();
+            let fields: Vec<&'static str> = set
+                .iter()
+                .map(|(column, _)| match *column {
+                    "password_hash" => "password",
+                    column => column,
+                })
+                .collect();
+            let tx = conn.transaction()?;
+            let mut changed = false;
             if !set.is_empty() {
                 let columns: Vec<String> = set
                     .iter()
@@ -487,12 +512,25 @@ impl Db {
                     .into_iter()
                     .map(|(_, value)| value)
                     .chain(std::iter::once(Value::Text(username.clone())));
-                conn.execute(&sql, params_from_iter(values))?;
+                changed = tx.execute(&sql, params_from_iter(values))? > 0;
             }
-            select_user(conn, &username)
+            let user = select_user(&tx, &username)?;
+            if changed && let Some(user) = &user {
+                let entry = Entry::new(AuditAction::UserUpdate)
+                    .target("user", Some(user.id), Some(&user.username))
+                    .detail(&UserUpdated {
+                        fields,
+                        server_admin,
+                        disabled,
+                    })?;
+                audit::insert(&tx, &ctx, &entry)?;
+            }
+            tx.commit()?;
+            Ok(user)
         })
         .await
     }
+
     /// Inserts with `created_at = clock::now_rfc3339()`.
     pub async fn create_token(&self, token: NewToken) -> Result<TokenRecord, DbError> {
         self.call(move |conn| {

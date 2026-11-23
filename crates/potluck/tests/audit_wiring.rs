@@ -739,3 +739,120 @@ async fn a_failed_insert_keeps_the_override_armed() {
         Some(id)
     );
 }
+
+#[tokio::test]
+async fn no_audit_column_carries_a_secret() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    let password = "canary-pw-7f3a91";
+    let new_password = "canary-pw-2c84e0";
+    let (status, _) = call(
+        &app.url("/users"),
+        Method::POST,
+        Some(&root),
+        Some(json!({"username": "bob", "display_name": "Bob", "password": password})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let (status, signed_in) = call(
+        &app.url("/session"),
+        Method::POST,
+        None,
+        Some(json!({"username": "bob", "password": password, "token_name": "desk"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let session_secret = signed_in["token"].as_str().unwrap().to_owned();
+    let (status, minted) = call(
+        &app.url("/tokens"),
+        Method::POST,
+        Some(&session_secret),
+        Some(json!({"name": "ci"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let api_secret = minted["token"].as_str().unwrap().to_owned();
+    let id = minted["token_meta"]["id"].as_i64().unwrap();
+    assert_eq!(
+        call(
+            &app.url(&format!("/tokens/{id}")),
+            Method::DELETE,
+            Some(&session_secret),
+            None
+        )
+        .await
+        .0,
+        204
+    );
+    let (status, _) = call(
+        &app.url("/users/bob"),
+        Method::PATCH,
+        Some(&session_secret),
+        Some(json!({"password": new_password, "current_password": password})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        call(
+            &app.url("/session"),
+            Method::POST,
+            None,
+            Some(json!({"username": "bob", "password": password, "token_name": "x"}))
+        )
+        .await
+        .0,
+        401
+    );
+    let phc = app
+        .db
+        .user_by_username("bob")
+        .await
+        .unwrap()
+        .unwrap()
+        .password_hash()
+        .unwrap()
+        .to_owned();
+
+    let mut needles = vec![password.to_owned(), new_password.to_owned(), phc];
+    for secret in [&session_secret, &api_secret] {
+        needles.push(secret.clone());
+        needles.push(secret[..8].to_owned());
+        let digest = potluck::auth::token::digest(secret);
+        needles.push(digest.iter().map(|b| format!("{b:02x}")).collect());
+    }
+    let c = rusqlite::Connection::open(app._dir.path().join("server.db")).unwrap();
+    let mut stmt = c.prepare("SELECT * FROM audit").unwrap();
+    let width = stmt.column_count();
+    let cells: Vec<String> = stmt
+        .query_map([], |r| {
+            // Render each cell as text: a ValueRef's Debug would print text as a byte list and
+            // hide every needle.
+            (0..width)
+                .map(|i| {
+                    Ok(match r.get_ref(i)? {
+                        rusqlite::types::ValueRef::Text(t) => {
+                            String::from_utf8_lossy(t).into_owned()
+                        }
+                        rusqlite::types::ValueRef::Integer(n) => n.to_string(),
+                        rusqlite::types::ValueRef::Null => String::new(),
+                        other => panic!("audit holds only text, integers and nulls: {other:?}"),
+                    })
+                })
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap()
+        .flat_map(Result::unwrap)
+        .collect();
+    assert!(
+        cells.len() > width * 5,
+        "the scenario wrote rows: {}",
+        cells.len() / width
+    );
+    assert!(cells.iter().any(|c| c == "bob"), "the scan sees text cells");
+    for needle in &needles {
+        assert!(
+            !cells.iter().any(|c| c.contains(needle.as_str())),
+            "a secret reached the audit log: {needle}"
+        );
+    }
+}

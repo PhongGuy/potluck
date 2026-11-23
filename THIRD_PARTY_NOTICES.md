@@ -95,6 +95,11 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2019–2025 axum Contributors
 - `axum` 0.8.9: MIT
   - Copyright (c) 2019 axum Contributors
+- `base16ct` 1.0.0: Apache-2.0 OR MIT
+  - Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
+  - Copyright (c) 2022-2025 The RustCrypto Project Developers
+- `base64` 0.22.1: MIT OR Apache-2.0
+  - Copyright (c) 2015 Alice Maz
 - `base64` 0.23.1: MIT OR Apache-2.0
   - Copyright (c) 2025 Alice Maz, Marshall Pierce
 - `base64ct` 1.8.3: Apache-2.0 OR MIT
@@ -106,6 +111,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2015-2016 The blake2-rfc Developers, Cesar Barros
   - Copyright (c) 2017 Artyom Pavlov
   - Copyright (c) 2017-2026 The RustCrypto Project Developers
+- `block-buffer` 0.10.4: MIT OR Apache-2.0
+  - Copyright (c) 2018-2019 The RustCrypto Project Developers
 - `block-buffer` 0.12.1: MIT OR Apache-2.0
   - Copyright (c) 2018-2025 The RustCrypto Project Developers
 - `bstr` 1.13.1: MIT OR Apache-2.0
@@ -114,6 +121,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2018 Carl Lerche
 - `cfg-if` 1.0.5: MIT OR Apache-2.0
   - Copyright (c) 2014 Alex Crichton
+- `chrono` 0.4.45: MIT OR Apache-2.0
+  - Copyright (c) 2014, Kang Seonghoon.
 - `clap_builder` 4.6.7: MIT OR Apache-2.0
   - Copyright (c) Individual contributors
   - Copyright Individual contributors
@@ -133,21 +142,54 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2018 the rustasync developers
 - `const-oid` 0.10.3: Apache-2.0 OR MIT
   - Copyright (c) 2020-2026 The RustCrypto Project Developers
+- `const-oid` 0.9.6: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2022 The RustCrypto Project Developers
+- `cpubits` 0.1.1: MIT OR Apache-2.0
+  - Copyright (c) 2023-2026 The RustCrypto Project Developers
+- `cpufeatures` 0.2.17: MIT OR Apache-2.0
+  - Copyright (c) 2020-2025 The RustCrypto Project Developers
 - `cpufeatures` 0.3.1: MIT OR Apache-2.0
   - Copyright (c) 2020-2026 The RustCrypto Project Developers
 - `crc32fast` 1.5.5: MIT OR Apache-2.0
   - Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
+- `crypto-bigint` 0.7.11: Apache-2.0 OR MIT
+  - Copyright (c) 2021-2026 The RustCrypto Project Developers
+- `crypto-common` 0.1.7: MIT OR Apache-2.0
+  - Copyright (c) 2021 RustCrypto Developers
 - `crypto-common` 0.2.2: MIT OR Apache-2.0
   - Copyright (c) 2021-2026 RustCrypto Developers
 - `ctutils` 0.4.8: Apache-2.0 OR MIT
   - Copyright (c) 2025-2026 The RustCrypto Project Developers
+- `curve25519-dalek` 5.0.0: BSD-3-Clause
+  - Copyright (c) 2016-2021 Henry de Valence. All rights reserved.
+  - Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved.
 - `dbento-rules` 0.1.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#fb3a851d): MIT OR Apache-2.0
   - No copyright line, authors or repository published
 - `dbento-workspace` 0.2.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#fb3a851d): MIT OR Apache-2.0
   - No copyright line, authors or repository published
+- `der` 0.7.10: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2023 The RustCrypto Project Developers
+- `der` 0.8.3: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2026 The RustCrypto Project Developers
+- `digest` 0.10.7: MIT OR Apache-2.0
+  - Copyright (c) 2017 Artyom Pavlov
 - `digest` 0.11.3: MIT OR Apache-2.0
   - Copyright (c) 2017 Artyom Pavlov
   - Copyright (c) 2017-2025 RustCrypto Developers
+- `dyn-clone` 1.0.20: MIT OR Apache-2.0
+  - Authors: David Tolnay <dtolnay@gmail.com>
+- `ecdsa` 0.17.0: Apache-2.0 OR MIT
+  - Copyright (c) 2018-2026 RustCrypto Developers
+  - Copyright 2018-2022 RustCrypto Developers
+- `ed25519-dalek` 3.0.0: BSD-3-Clause
+  - Copyright (c) 2017-2019 isis agora lovecruft. All rights reserved.
+- `ed25519` 3.0.0: Apache-2.0 OR MIT
+  - Copyright (c) 2018-2026 RustCrypto Developers
+  - Copyright 2018-2022 RustCrypto Developers
+- `either` 1.19.0: MIT OR Apache-2.0
+  - Copyright (c) 2015
+- `elliptic-curve` 0.14.3: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2026 RustCrypto Developers
 - `equivalent` 1.0.3: Apache-2.0 OR MIT
   - Copyright (c) 2016--2023
 - `errno` 0.3.15: MIT OR Apache-2.0
@@ -158,6 +200,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2016 The fallible-streaming-iterator Developers
 - `fastrand` 2.5.0: Apache-2.0 OR MIT
   - Authors: Stjepan Glavina <stjepang@gmail.com>
+- `ff` 0.14.0: MIT/Apache-2.0
+  - Copyright (c) 2017 Sean Bowe
 - `flate2` 1.1.11: MIT OR Apache-2.0
   - Copyright (c) 2014-2026 Alex Crichton
 - `foldhash` 0.2.0: Zlib
@@ -179,15 +223,26 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
 - `futures-util` 0.3.34: MIT OR Apache-2.0
   - Copyright (c) 2016 Alex Crichton
   - Copyright (c) 2017 The Tokio Authors
+- `generic-array` 0.14.7: MIT
+  - Copyright (c) 2015 Bartłomiej Kamiński
+- `getrandom` 0.2.17: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+  - Copyright (c) 2018-2024 The rust-random Project Developers
 - `getrandom` 0.4.3: MIT OR Apache-2.0
   - Copyright (c) 2014 The Rust Project Developers
   - Copyright (c) 2018-2026 The rust-random Project Developers
 - `globset` 0.4.21: Unlicense OR MIT
   - Copyright (c) 2015 Andrew Gallant
+- `group` 0.14.0: MIT/Apache-2.0
+  - Copyrights in the "group" library are retained by their contributors. No
 - `hashbrown` 0.17.1: MIT OR Apache-2.0
   - Copyright (c) 2016 Amanieu d'Antras
 - `hashlink` 0.12.2: MIT OR Apache-2.0
   - This work is derived in part from the `linked-hash-map` crate, Copyright (c) 2015 The Rust Project Developers
+- `hmac` 0.12.1: MIT OR Apache-2.0
+  - Copyright (c) 2017 Artyom Pavlov
+- `hmac` 0.13.0: MIT OR Apache-2.0
+  - Copyright (c) 2017 Artyom Pavlov
 - `http-body-util` 0.1.5: MIT
   - Copyright (c) 2019-2026 Sean McArthur & Hyper Contributors
 - `http-body` 1.1.0: MIT
@@ -212,6 +267,9 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2023-2025 Sean McArthur
 - `hyper` 1.12.0: MIT
   - Copyright (c) 2014-2026 Sean McArthur
+- `iana-time-zone` 0.1.65: MIT OR Apache-2.0
+  - Copyright (c) 2020 Andrew D. Straw
+  - Copyright 2020 Andrew Straw
 - `icu_collections` 2.4.0: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
 - `icu_locale_core` 2.4.0: Unicode-3.0
@@ -236,6 +294,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright 2017 Juniper Networks, Inc.
 - `is_terminal_polyfill` 1.70.2: MIT OR Apache-2.0
   - Copyright (c) Individual contributors
+- `itertools` 0.14.0: MIT OR Apache-2.0
+  - Copyright (c) 2015
 - `itoa` 1.0.19: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
 - `jiff-core` 0.1.7: Unlicense OR MIT
@@ -246,6 +306,16 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Authors: Marvin Löbel <loebel.marvin@gmail.com>
 - `libc` 0.2.191: MIT OR Apache-2.0
   - Copyright (c) The Rust Project Developers
+- `libm` 0.2.16: MIT
+  - Copyright (c) 2018 Jorge Aparicio
+  - Copyright notices are retained in src/* files where relevant.
+  - Copyright © 1993,2004 Sun Microsystems or
+  - Copyright © 2003-2009 Bruce D. Evans or
+  - Copyright © 2003-2009 Steven G. Kargl or
+  - Copyright © 2003-2011 David Schultz or
+  - Copyright © 2005-2020 Rich Felker, et al.
+  - Copyright © 2008 Stephen L. Moshier or
+  - Copyright © 2017-2018 Arm Limited
 - `libsqlite3-sys` 0.40.0: MIT
   - Copyright (c) 2014 The rusqlite developers
 - `libyaml-rs` 0.3.0: MIT
@@ -280,20 +350,70 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
 - `nu-ansi-term` 0.50.3: MIT
   - Copyright (c) 2014 Benjamin Sago
   - Copyright (c) 2021-2022 The Nushell Project Developers
+- `num-bigint-dig` 0.8.6: MIT/Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+- `num-integer` 0.1.47: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+- `num-iter` 0.1.46: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+- `num-traits` 0.2.19: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+- `oauth2` 5.0.0: MIT OR Apache-2.0
+  - Copyright (c) 2014 Alex Crichton
 - `once_cell` 1.21.4: MIT OR Apache-2.0
   - Authors: Aleksey Kladov <aleksey.kladov@gmail.com>
+- `openidconnect` 4.1.0: MIT
+  - Copyright (c) 2018 David Ramos
 - `openssl-probe` 0.2.2: MIT OR Apache-2.0
   - Copyright (c) 2014 Alex Crichton
+- `ordered-float` 2.10.1: MIT
+  - Copyright (c) 2015 Jonathan Reem
+- `p256` 0.14.0: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2026 RustCrypto Developers
+- `p384` 0.14.0: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2021 RustCrypto Developers
 - `password-hash` 0.6.1: MIT OR Apache-2.0
   - Copyright (c) 2020-2026 RustCrypto Developers
+- `pem-rfc7468` 0.7.0: Apache-2.0 OR MIT
+  - Copyright (c) 2021 The RustCrypto Project Developers
+- `pem-rfc7468` 1.0.0: Apache-2.0 OR MIT
+  - Copyright (c) 2021-2025 The RustCrypto Project Developers
 - `percent-encoding` 2.3.2: MIT OR Apache-2.0
   - Copyright (c) 2013-2025 The rust-url developers
 - `phc` 0.6.1: Apache-2.0 OR MIT
   - Copyright (c) 2021-2026 The RustCrypto Project Developers
 - `pin-project-lite` 0.2.17: Apache-2.0 OR MIT
   - No copyright line or authors published; see https://github.com/taiki-e/pin-project-lite
+- `pkcs1` 0.7.5: Apache-2.0 OR MIT
+  - Copyright (c) 2021-2023 The RustCrypto Project Developers
+- `pkcs8` 0.10.2: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2023 The RustCrypto Project Developers
+- `pkcs8` 0.11.0: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2026 The RustCrypto Project Developers
 - `potential_utf` 0.1.6: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
+- `ppv-lite86` 0.2.21: MIT OR Apache-2.0
+  - Copyright (c) 2019 The CryptoCorrosion Contributors
+  - Copyright 2019 The CryptoCorrosion Contributors
+- `primefield` 0.14.0: Apache-2.0 OR MIT
+  - Copyright (c) 2024-2026 RustCrypto Developers
+- `primeorder` 0.14.0: Apache-2.0 OR MIT
+  - Copyright (c) 2020-2023 RustCrypto Developers
+- `rand_chacha` 0.3.1: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+  - Copyright 2018 Developers of the Rand project
+  - Copyrights in the Rand project are retained by their contributors. No
+- `rand_core` 0.10.1: MIT OR Apache-2.0
+  - Copyright (c) 2018-2026 The Rand Project Developers
+  - Copyrights in the Rand project are retained by their contributors. No
+- `rand_core` 0.6.4: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+  - Copyright 2018 Developers of the Rand project
+  - Copyrights in the Rand project are retained by their contributors. No
+- `rand` 0.8.8: MIT OR Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
+  - Copyright 2018 Developers of the Rand project
+  - Copyrights in the Rand project are retained by their contributors. No
 - `regex-automata` 0.4.18: MIT OR Apache-2.0
   - Copyright (c) 2014 The Rust Project Developers
 - `regex-syntax` 0.8.11: MIT OR Apache-2.0
@@ -303,6 +423,11 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
 - `reqwest` 0.13.5: MIT OR Apache-2.0
   - Copyright (c) 2016-2026 Sean McArthur
   - Copyright 2016 Sean McArthur
+- `rfc6979` 0.6.0: Apache-2.0 OR MIT
+  - Copyright (c) 2018-2026 RustCrypto Developers
+  - Copyright 2018-2022 RustCrypto Developers
+- `rsa` 0.9.10: MIT OR Apache-2.0
+  - Authors: RustCrypto Developers, dignifiedquire <dignifiedquire@gmail.com>
 - `rusqlite` 0.42.0: MIT
   - Copyright (c) 2014 The rusqlite developers
 - `rustix` 1.1.6: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT
@@ -324,19 +449,31 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Authors: David Tolnay <dtolnay@gmail.com>
 - `saphyr-parser` 0.3.3: MIT OR Apache-2.0
   - Authors: Ethiraric <ethiraric@gmail.com>, David Aguilar <davvid@gmail.com>, Yuheng Chen <yuhengchen@sensetime.com>
+- `sec1` 0.8.1: Apache-2.0 OR MIT
+  - Copyright (c) 2021-2026 The RustCrypto Project Developers
 - `semver` 1.0.28: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
+- `serde-value` 0.7.0: MIT
+  - Copyright (c) 2016 arcnmx
 - `serde_core` 1.0.229: MIT OR Apache-2.0
   - Authors: Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
 - `serde_json` 1.0.154: MIT OR Apache-2.0
   - No copyright line or authors published; see https://github.com/serde-rs/json
 - `serde_path_to_error` 0.1.20: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
+- `serde_plain` 1.0.2: MIT/Apache-2.0
+  - Copyright (c) 2014 The Rust Project Developers
 - `serde_spanned` 1.1.3: MIT OR Apache-2.0
   - Copyright (c) Individual contributors
   - Copyright Individual contributors
+- `serde_with` 3.25.0: MIT OR Apache-2.0
+  - Copyright (c) 2015
 - `serde` 1.0.229: MIT OR Apache-2.0
   - Authors: Erick Tryzelaar <erick.tryzelaar@gmail.com>, David Tolnay <dtolnay@gmail.com>
+- `sha2` 0.10.9: MIT OR Apache-2.0
+  - Copyright (c) 2006-2009 Graydon Hoare
+  - Copyright (c) 2009-2013 Mozilla Foundation
+  - Copyright (c) 2016 Artyom Pavlov
 - `sha2` 0.11.1: MIT OR Apache-2.0
   - Copyright (c) 2006-2009 Graydon Hoare
   - Copyright (c) 2009-2013 Mozilla Foundation
@@ -346,6 +483,10 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2019 Eliza Weisman
 - `signal-hook-registry` 1.4.8: MIT OR Apache-2.0
   - Copyright (c) 2017 tokio-jsonrpc developers
+- `signature` 2.2.0: Apache-2.0 OR MIT
+  - Copyright (c) 2018-2023 RustCrypto Developers
+- `signature` 3.0.0: Apache-2.0 OR MIT
+  - Copyright (c) 2018-2026 RustCrypto Developers
 - `simd-adler32` 0.3.10: MIT
   - Copyright (c) [2021] [Marvin Countryman]
 - `slab` 0.4.12: MIT
@@ -354,6 +495,12 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2018 The Servo Project Developers
 - `socket2` 0.6.5: MIT OR Apache-2.0
   - Copyright (c) 2014 Alex Crichton
+- `spin` 0.9.9: MIT
+  - Copyright (c) 2014 Mathijs van de Nes
+- `spki` 0.7.3: Apache-2.0 OR MIT
+  - Copyright (c) 2021-2023 The RustCrypto Project Developers
+- `spki` 0.8.1: Apache-2.0 OR MIT
+  - Copyright (c) 2021-2026 The RustCrypto Project Developers
 - `stable_deref_trait` 1.2.1: MIT OR Apache-2.0
   - Copyright (c) 2017 Robert Grosse
 - `strsim` 0.11.1: MIT
@@ -367,6 +514,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Authors: Actyx AG <developer@actyx.io>
 - `tempfile` 3.27.0: MIT OR Apache-2.0
   - Copyright (c) 2015 Steven Allen
+- `thiserror` 1.0.69: MIT OR Apache-2.0
+  - Authors: David Tolnay <dtolnay@gmail.com>
 - `thiserror` 2.0.21: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
 - `thread_local` 1.1.10: MIT OR Apache-2.0
@@ -428,12 +577,18 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2018-2019 Sean McArthur
 - `winnow` 1.0.5: MIT
   - No copyright line or authors published; see https://github.com/winnow-rs/winnow
+- `wnaf` 0.14.1: Apache-2.0 OR MIT
+  - Copyright (c) 2018-2025 `group` crate developers
+  - Copyright (c) 2026 RustCrypto Developers
 - `writeable` 0.6.4: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
 - `yaml_serde` 0.10.7: MIT OR Apache-2.0
   - Authors: YAML Organization <noreply@yaml.org>
 - `yoke` 0.8.4: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
+- `zerocopy` 0.8.64: BSD-2-Clause OR Apache-2.0 OR MIT
+  - Copyright 2019 The Fuchsia Authors.
+  - Copyright 2023 The Fuchsia Authors
 - `zerofrom` 0.1.8: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
 - `zeroize` 1.9.1: Apache-2.0 OR MIT

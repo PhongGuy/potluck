@@ -14,6 +14,7 @@ mod common;
 mod access;
 mod actor;
 mod admin_accounts;
+mod admin_audit;
 mod admin_cli;
 mod admin_client;
 mod admin_decode;

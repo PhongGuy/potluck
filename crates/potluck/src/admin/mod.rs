@@ -1,6 +1,7 @@
 //! The potluck admin command line over the admin socket.
 
 pub mod access;
+pub mod audit;
 pub mod client;
 pub mod output;
 pub mod teams;
@@ -56,6 +57,8 @@ pub enum Noun {
     /// Whether a newer signed release exists.
     #[command(subcommand)]
     Update(update::UpdateCmd),
+    /// The server's audit log, newest first.
+    Audit(audit::AuditArgs),
 }
 
 /// Why a command failed; `main` prints it after `error: `.
@@ -148,6 +151,7 @@ pub async fn run(
         Noun::Grant(cmd) => access::run_grant(cmd, &mut cx).await,
         Noun::Override(cmd) => access::run_override(cmd, &mut cx).await,
         Noun::Update(cmd) => update::run(cmd, &mut cx).await,
+        Noun::Audit(args) => audit::run(args, &mut cx).await,
     }
 }
 

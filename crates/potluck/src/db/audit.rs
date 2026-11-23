@@ -4,7 +4,10 @@
 
 use std::net::IpAddr;
 
-use super::DbError;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value;
+
+use super::{Db, DbError};
 use crate::clock;
 
 /// Who acts and from where; built by the API from `Authenticated` and `ClientIp`.
@@ -191,6 +194,222 @@ pub(crate) fn insert(
     Ok(())
 }
 
+/// Which rows `Db::audit` returns: each set field narrows the result, newest first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuditFilter {
+    actor: Option<String>,
+    workspace: Option<String>,
+    action: Option<String>,
+    since: Option<String>,
+    until: Option<String>,
+    before: Option<i64>,
+    limit: u32,
+}
+
+impl AuditFilter {
+    /// No filters and a limit of 100.
+    pub fn new() -> Self {
+        Self {
+            actor: None,
+            workspace: None,
+            action: None,
+            since: None,
+            until: None,
+            before: None,
+            limit: 100,
+        }
+    }
+
+    /// Rows whose `actor_name` is `name`.
+    pub fn actor(self, name: &str) -> Self {
+        Self {
+            actor: Some(name.to_owned()),
+            ..self
+        }
+    }
+
+    /// Rows about the workspace `{team}/{ws}`.
+    pub fn workspace(self, team_ws: &str) -> Self {
+        Self {
+            workspace: Some(team_ws.to_owned()),
+            ..self
+        }
+    }
+
+    /// Rows with this dotted action name.
+    pub fn action(self, action: &str) -> Self {
+        Self {
+            action: Some(action.to_owned()),
+            ..self
+        }
+    }
+
+    /// Rows stamped at or after `stamp`, which the caller has normalised to the stored UTC form.
+    pub fn since(self, stamp: &str) -> Self {
+        Self {
+            since: Some(stamp.to_owned()),
+            ..self
+        }
+    }
+
+    /// Rows stamped before `stamp`, in the stored UTC form.
+    pub fn until(self, stamp: &str) -> Self {
+        Self {
+            until: Some(stamp.to_owned()),
+            ..self
+        }
+    }
+
+    /// Rows with an id below `id`: the keyset cursor for the next page.
+    pub fn before(self, id: i64) -> Self {
+        Self {
+            before: Some(id),
+            ..self
+        }
+    }
+
+    /// At most `n` rows; the caller keeps it in `1..=1000`.
+    pub fn limit(self, n: u32) -> Self {
+        Self { limit: n, ..self }
+    }
+
+    /// The `WHERE` terms and their values. Column names are fixed text here, never caller input.
+    fn conditions(self) -> Vec<(&'static str, Value)> {
+        let text = |column, v: Option<String>| v.map(|v| (column, Value::Text(v)));
+        [
+            text("actor_name = ?", self.actor),
+            text("workspace = ?", self.workspace),
+            text("action = ?", self.action),
+            text("at >= ?", self.since),
+            text("at < ?", self.until),
+            self.before.map(|id| ("id < ?", Value::Integer(id))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+impl Default for AuditFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One audit row as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AuditRecord {
+    id: i64,
+    at: String,
+    action: String,
+    actor_kind: String,
+    actor_id: Option<i64>,
+    actor_name: Option<String>,
+    target_kind: Option<String>,
+    target_id: Option<i64>,
+    target_name: Option<String>,
+    workspace: Option<String>,
+    client_ip: Option<String>,
+    detail: Option<String>,
+}
+
+impl AuditRecord {
+    /// The row id, increasing with insertion order.
+    pub fn id(&self) -> i64 {
+        self.id
+    }
+    /// The UTC stamp, `YYYY-MM-DDTHH:MM:SSZ`.
+    pub fn at(&self) -> &str {
+        &self.at
+    }
+    /// The dotted action name, possibly one this build does not know.
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+    /// `user`, `system` or `anonymous`.
+    pub fn actor_kind(&self) -> &str {
+        &self.actor_kind
+    }
+    /// The acting user's id.
+    pub fn actor_id(&self) -> Option<i64> {
+        self.actor_id
+    }
+    /// The acting user's name at the time, or `system`.
+    pub fn actor_name(&self) -> Option<&str> {
+        self.actor_name.as_deref()
+    }
+    /// The kind of thing acted on.
+    pub fn target_kind(&self) -> Option<&str> {
+        self.target_kind.as_deref()
+    }
+    /// The target's id.
+    pub fn target_id(&self) -> Option<i64> {
+        self.target_id
+    }
+    /// The target's name at the time.
+    pub fn target_name(&self) -> Option<&str> {
+        self.target_name.as_deref()
+    }
+    /// The workspace as `{team}/{ws}`.
+    pub fn workspace(&self) -> Option<&str> {
+        self.workspace.as_deref()
+    }
+    /// The client address the request came from.
+    pub fn client_ip(&self) -> Option<&str> {
+        self.client_ip.as_deref()
+    }
+    /// The detail as stored JSON text.
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
+fn record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AuditRecord> {
+    Ok(AuditRecord {
+        id: r.get(0)?,
+        at: r.get(1)?,
+        action: r.get(2)?,
+        actor_kind: r.get(3)?,
+        actor_id: r.get(4)?,
+        actor_name: r.get(5)?,
+        target_kind: r.get(6)?,
+        target_id: r.get(7)?,
+        target_name: r.get(8)?,
+        workspace: r.get(9)?,
+        client_ip: r.get(10)?,
+        detail: r.get(11)?,
+    })
+}
+
+impl Db {
+    /// The rows matching `filter`, newest first, at most `filter.limit` of them.
+    pub async fn audit(&self, filter: AuditFilter) -> Result<Vec<AuditRecord>, DbError> {
+        self.call(move |conn| {
+            // Each set filter adds one bound term; the limit is bound last.
+            let limit = filter.limit;
+            let (terms, mut values): (Vec<_>, Vec<_>) = filter.conditions().into_iter().unzip();
+            let clause = if terms.is_empty() {
+                String::new()
+            } else {
+                format!(" WHERE {}", terms.join(" AND "))
+            };
+            values.push(Value::Integer(i64::from(limit)));
+            let sql = format!(
+                "SELECT id, at, action, actor_kind, actor_id, actor_name, target_kind, target_id, \
+                 target_name, workspace, client_ip, detail FROM audit{clause} ORDER BY id DESC LIMIT ?"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params_from_iter(values), record_from_row)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
@@ -339,5 +558,117 @@ mod tests {
             .unwrap();
         assert_eq!(at.len(), 20, "{at}");
         assert!(at.ends_with('Z'), "{at}");
+    }
+
+    async fn db_with_250() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        db.migrate().await.unwrap();
+        db.call(|c| {
+            // Row n: minute n of 2026-03-01, actor bob for even n, ann for odd; workspace core/api
+            // for n % 3 == 0; action team.create for n % 5 == 0, else grant.put.
+            let tx = c.transaction()?;
+            for n in 0..250i64 {
+                let at = format!("2026-03-01T{:02}:{:02}:00Z", n / 60, n % 60);
+                let actor = if n % 2 == 0 { "bob" } else { "ann" };
+                let ws = (n % 3 == 0).then_some("core/api");
+                let action = if n % 5 == 0 {
+                    "team.create"
+                } else {
+                    "grant.put"
+                };
+                tx.execute(
+                    "INSERT INTO audit (at, action, actor_kind, actor_name, workspace) \
+                     VALUES (?1, ?2, 'user', ?3, ?4)",
+                    rusqlite::params![at, action, actor, ws],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        (dir, db)
+    }
+
+    #[tokio::test]
+    async fn pages_are_newest_first_disjoint_and_complete() {
+        let (_dir, db) = db_with_250().await;
+        let mut seen = Vec::new();
+        let mut filter = AuditFilter::new().limit(100);
+        loop {
+            let page = db.audit(filter.clone()).await.unwrap();
+            assert!(
+                page.windows(2).all(|w| w[0].id() > w[1].id()),
+                "newest first"
+            );
+            let Some(last) = page.last() else { break };
+            seen.extend(page.iter().map(AuditRecord::id));
+            filter = filter.before(last.id());
+        }
+        assert_eq!(seen.len(), 250);
+        assert!(
+            seen.windows(2).all(|w| w[0] > w[1]),
+            "strictly descending across pages, so no row twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_default_limit_is_100() {
+        let (_dir, db) = db_with_250().await;
+        assert_eq!(db.audit(AuditFilter::new()).await.unwrap().len(), 100);
+    }
+
+    #[tokio::test]
+    async fn filters_combine() {
+        let (_dir, db) = db_with_250().await;
+        let all = AuditFilter::new().limit(1000);
+        let bob = db.audit(all.clone().actor("bob")).await.unwrap();
+        assert_eq!(bob.len(), 125);
+        assert!(bob.iter().all(|r| r.actor_name() == Some("bob")));
+        let ws = db.audit(all.clone().workspace("core/api")).await.unwrap();
+        assert_eq!(ws.len(), 84);
+        let created = db.audit(all.clone().action("team.create")).await.unwrap();
+        assert_eq!(created.len(), 50);
+        // Minutes 60..=119 are hour 01.
+        let hour = db
+            .audit(
+                all.clone()
+                    .since("2026-03-01T01:00:00Z")
+                    .until("2026-03-01T02:00:00Z"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hour.len(), 60);
+        assert!(hour.iter().all(|r| r.at().starts_with("2026-03-01T01:")));
+        let both = db
+            .audit(all.actor("bob").action("team.create"))
+            .await
+            .unwrap();
+        assert_eq!(both.len(), 25, "even and a multiple of five");
+        assert!(
+            db.audit(AuditFilter::new().actor("nobody"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_action_reads_back_unchanged() {
+        let (_dir, db) = db_with_250().await;
+        db.call(|c| {
+            c.execute(
+                "INSERT INTO audit (at, action, actor_kind, detail) \
+                 VALUES ('2026-04-01T00:00:00Z', 'oidc.link', 'system', '{\"k\":1}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let top = db.audit(AuditFilter::new().limit(1)).await.unwrap();
+        assert_eq!(top[0].action(), "oidc.link");
+        assert_eq!(top[0].detail(), Some("{\"k\":1}"));
     }
 }

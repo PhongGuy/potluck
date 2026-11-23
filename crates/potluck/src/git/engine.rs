@@ -2176,7 +2176,7 @@ mod tests {
             let logs = Arc::new(Mutex::new(Vec::new()));
             let sink = Arc::clone(&logs);
             let subscriber = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::WARN)
+                .with_max_level(tracing::Level::INFO)
                 .with_ansi(false)
                 .with_writer(move || SharedSink(Arc::clone(&sink)))
                 .finish();
@@ -2228,7 +2228,14 @@ mod tests {
             let engine = Arc::clone(&engine);
             let repo = dir.path().join("repo");
             tokio::spawn(async move {
-                crate::api::pushes::recheck(&engine, 1, "admin", rules, repo, moved_update()).await;
+                crate::api::pushes::recheck(
+                    &engine,
+                    &crate::git::access::PushContext::new(1, "admin"),
+                    Some(rules),
+                    repo,
+                    moved_update(),
+                )
+                .await;
             })
         };
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2253,7 +2260,13 @@ mod tests {
         let repo = dir.path().join("repo");
         let done = tokio::time::timeout(
             Duration::from_secs(20),
-            crate::api::pushes::recheck(&engine, WORKSPACE, "admin", rules, repo, moved_update()),
+            crate::api::pushes::recheck(
+                &engine,
+                &crate::git::access::PushContext::new(WORKSPACE, "admin"),
+                Some(rules),
+                repo,
+                moved_update(),
+            ),
         )
         .await;
         assert!(done.is_ok(), "the re-check returned");
@@ -2269,5 +2282,32 @@ mod tests {
                     && l.contains(&format!("workspace_id={WORKSPACE}"))),
             "{text}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_override_recheck_without_a_rule_set_logs_a_default_branch_delete() {
+        const WORKSPACE: i64 = 919_199;
+        let logs = global_logs();
+        let dir = tempfile::tempdir().unwrap();
+        // A delete needs no git call, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let line = format!("{} {} refs/heads/main", "b".repeat(40), "0".repeat(40));
+        let delete =
+            vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
+            .override_id(Some(5))
+            .default_branch("main");
+        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), delete).await;
+        let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .find(|l| {
+                l.contains("default branch rewritten")
+                    && l.contains(&format!("workspace_id={WORKSPACE}"))
+            })
+            .unwrap_or_else(|| panic!("{text}"));
+        for needle in ["override_id=5", "bob", "branch_delete"] {
+            assert!(line.contains(needle), "{needle} in {line}");
+        }
     }
 }

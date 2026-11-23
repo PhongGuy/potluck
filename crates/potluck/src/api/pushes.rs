@@ -80,9 +80,9 @@ pub(crate) fn ref_updates(moves: &[RefMove]) -> Vec<RefUpdate> {
         .collect()
 }
 
-/// Logs the safety relaxations an admin's accepted push carried, through
-/// `secret_check::log_accepted_relaxations` on a blocking thread. Only an `Admin` push without an
-/// armed override, in a kind with a rule set, is re-checked; anything else returns at once.
+/// Re-checks an accepted admin or override push on a blocking thread: the safety relaxations
+/// of an admin push without an armed override, in a kind with a rule set, and for both any
+/// rewrite of the default branch. Any other push, or one with no updates, returns at once.
 pub(crate) async fn recheck_admin_push(
     state: &AppState,
     push: &PushContext,
@@ -90,47 +90,54 @@ pub(crate) async fn recheck_admin_push(
     role: Role,
     updates: Vec<RefUpdate>,
 ) {
-    let rules = match push.workspace_kind().and_then(kinds::by_name) {
-        Some(rules) if role == Role::Admin && push.armed_override().is_none() => rules,
-        _ => return,
-    };
-    if updates.is_empty() {
+    let armed = push.armed_override().is_some();
+    if (role != Role::Admin && !armed) || updates.is_empty() {
         return;
     }
-    recheck(
-        state.git(),
-        push.workspace_id(),
-        push.pusher(),
-        rules,
-        repo,
-        updates,
-    )
-    .await;
+    let rules = push
+        .workspace_kind()
+        .and_then(kinds::by_name)
+        .filter(|_| role == Role::Admin && !armed);
+    recheck(state.git(), push, rules, repo, updates).await;
 }
 
-/// The re-check itself: `log_accepted_relaxations` over `repo` on a blocking thread, holding
-/// one of the engine's process slots throughout and with each git child under the engine's run
-/// limit. It waits for a slot without a timeout: the push is accepted, so its audit line should
-/// not drop under load. A re-check that cannot finish logs the warn line.
+/// The re-check itself over `repo` on a blocking thread: `log_accepted_relaxations` when `rules`
+/// is given, then `log_default_branch_rewrites`, holding one of the engine's process slots
+/// throughout and with each git child under the engine's run limit. It waits for a slot without
+/// a timeout: the push is accepted, so its audit line should not drop under load. A re-check
+/// that cannot finish logs the warn line.
 pub(crate) async fn recheck(
     engine: &GitEngine,
-    workspace_id: i64,
-    pusher: &str,
-    rules: &'static dyn RuleSet,
+    push: &PushContext,
+    rules: Option<&'static dyn RuleSet>,
     repo: PathBuf,
     updates: Vec<RefUpdate>,
 ) {
+    let workspace_id = push.workspace_id();
+    let pusher = push.pusher();
     let slot = engine.slot().await;
     let git = Git::new(engine.repos().git().to_path_buf(), Some(repo))
         .with_max_runtime(engine.max_runtime());
     let owned = pusher.to_owned();
+    let override_id = push.armed_override();
+    let default_branch = push.workspace_default_branch().map(str::to_owned);
     let done = match slot {
         Some(slot) => tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            crate::secret_check::log_accepted_relaxations(
+            if let Some(rules) = rules {
+                crate::secret_check::log_accepted_relaxations(
+                    workspace_id,
+                    &owned,
+                    rules,
+                    &updates,
+                    &git,
+                );
+            }
+            crate::secret_check::log_default_branch_rewrites(
                 workspace_id,
                 &owned,
-                rules,
+                override_id,
+                default_branch.as_deref(),
                 &updates,
                 &git,
             );

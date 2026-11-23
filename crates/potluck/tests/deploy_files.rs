@@ -250,6 +250,7 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
         "0.x releases",
         "<public URL>/git/{team}/{ws}",
         "files named exactly `.env`",
+        "can force-push or delete the workspace's default branch",
         "potluck serve --help",
         "https://github.com/PhongGuy/apinata",
         "https://github.com/PhongGuy/dbento",

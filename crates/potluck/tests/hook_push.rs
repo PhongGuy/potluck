@@ -502,3 +502,59 @@ async fn a_missing_hook_is_refused_before_waiting_for_a_git_slot() {
     assert_eq!(posted.status().as_u16(), 500, "the receive-pack POST");
     ok(holder.join().unwrap());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_cannot_force_push_or_delete_the_default_branch_over_http() {
+    let (server, home, url) = apinata_server(&[("POTLUCK_DEFAULT_BRANCH", "main")]).await;
+    let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main"],
+    ));
+    let landed = work_head(&home, &work);
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["commit", "-q", "--amend", "-m", "rewritten"],
+    ));
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", "--force", &url, "main"],
+    ));
+    assert!(
+        output.contains("remote: potluck-reject safety_relaxation refs/heads/main / force_push"),
+        "{output}"
+    );
+    assert_eq!(server_main(&server, &home), Some(landed.clone()));
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", "--delete", &url, "main"],
+    ));
+    assert!(
+        output.contains("remote: potluck-reject safety_relaxation refs/heads/main / branch_delete"),
+        "{output}"
+    );
+    assert_eq!(server_main(&server, &home), Some(landed));
+    // Any other branch stays the writer's to create and delete.
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main:refs/heads/topic"],
+    ));
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", "--delete", &url, "topic"],
+    ));
+}

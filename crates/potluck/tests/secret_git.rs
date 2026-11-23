@@ -501,3 +501,96 @@ fn a_run_limit_leaves_a_quick_git_alone() {
     assert_eq!(plain.len(), 1);
     assert_eq!(limited, plain, "a generous limit never kills early");
 }
+
+#[test]
+fn is_ancestor_answers_for_descendants_and_siblings() {
+    let s = Scratch::new();
+    s.write("a.txt", b"one\n");
+    let base = s.commit("base");
+    s.write("a.txt", b"two\n");
+    let child = s.commit("child");
+    s.publish("main");
+    s.git(Some(&s.work), &["reset", "-q", "--hard", &base]);
+    s.write("a.txt", b"three\n");
+    s.commit("sibling");
+    let sibling = s.stage("main");
+    let git = git_for(&s);
+    assert!(git.is_ancestor(&sha(&base), &sha(&child)).unwrap());
+    assert!(
+        git.is_ancestor(&sha(&child), &sha(&child)).unwrap(),
+        "a commit is its own ancestor"
+    );
+    assert!(!git.is_ancestor(&sha(&child), &sha(&sibling)).unwrap());
+    assert!(!git.is_ancestor(&sha(&child), &sha(&base)).unwrap());
+}
+
+#[test]
+fn is_ancestor_fails_on_a_missing_object_a_missing_binary_and_the_run_limit() {
+    let s = Scratch::new();
+    s.write("a.txt", b"one\n");
+    let base = s.commit("base");
+    s.publish("main");
+    let missing = sha(&"1".repeat(40));
+    assert!(matches!(
+        git_for(&s).is_ancestor(&missing, &sha(&base)),
+        Err(GitCmdError::Failed {
+            subcommand: "merge-base",
+            ..
+        })
+    ));
+    let broken = Git::new(PathBuf::from("/nonexistent/git"), Some(s.bare.clone()));
+    assert!(matches!(
+        broken.is_ancestor(&sha(&base), &sha(&base)),
+        Err(GitCmdError::Spawn { .. })
+    ));
+    // Exit 2 is neither answer.
+    let two = s.script("exit-two-git", "exit 2\n");
+    assert!(matches!(
+        Git::new(two, Some(s.bare.clone())).is_ancestor(&sha(&base), &sha(&base)),
+        Err(GitCmdError::Failed { .. })
+    ));
+    let slow = s.script("slow-git", "exec sleep 30\n");
+    let started = std::time::Instant::now();
+    let limited =
+        Git::new(slow, Some(s.bare.clone())).with_max_runtime(std::time::Duration::from_secs(1));
+    assert!(matches!(
+        limited.is_ancestor(&sha(&base), &sha(&base)),
+        Err(GitCmdError::Failed { .. })
+    ));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn is_ancestor_works_in_a_sha256_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let bare = dir.path().join("bare.git");
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let s = Scratch { dir, bare, work };
+    let bare_path = s.bare.to_str().unwrap().to_owned();
+    s.git(
+        None,
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "--object-format=sha256",
+            "-b",
+            "main",
+            &bare_path,
+        ],
+    );
+    s.git(
+        Some(&s.work),
+        &["init", "-q", "--object-format=sha256", "-b", "main"],
+    );
+    s.write("a.txt", b"one\n");
+    let base = s.commit("base");
+    s.write("a.txt", b"two\n");
+    let child = s.commit("child");
+    s.publish("main");
+    assert_eq!(child.len(), 64);
+    let git = git_for(&s);
+    assert!(git.is_ancestor(&sha(&base), &sha(&child)).unwrap());
+    assert!(!git.is_ancestor(&sha(&child), &sha(&base)).unwrap());
+}

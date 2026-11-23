@@ -18,10 +18,10 @@ const A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// A server on `core/api` with `TOKEN` as a writer; named so no test's local shadows it.
 async fn start_server(ctx: Option<PushContext>) -> GitServer {
-    let mut access =
-        TestAccess::new()
-            .workspace("core", "api")
-            .grant(TOKEN, "core", "api", Role::Write);
+    let mut access = TestAccess::new()
+        .workspace("core", "api")
+        .grant(TOKEN, "core", "api", Role::Write)
+        .hook_env("POTLUCK_DEFAULT_BRANCH", "main");
     if let Some(ctx) = ctx {
         access = access.push_context(ctx);
     }

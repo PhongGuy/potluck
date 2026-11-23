@@ -6,7 +6,7 @@ use std::fmt;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -269,6 +269,36 @@ impl Git {
         };
         let peeled = Sha::parse(name).map_err(|_| unexpected())?;
         Ok((peeled, kind))
+    }
+
+    /// `merge-base --is-ancestor <old> <new>`: whether `old` is reachable from `new`. git
+    /// answers by exit code, 0 yes and 1 no; any other exit, a signal or the run limit is
+    /// `GitCmdError::Failed`, so a broken check never reads as "not an ancestor".
+    pub fn is_ancestor(&self, old: &Sha, new: &Sha) -> Result<bool, GitCmdError> {
+        const SUB: &str = "merge-base";
+        let args = [
+            OsStr::new("--is-ancestor"),
+            OsStr::new(old.as_str()),
+            OsStr::new(new.as_str()),
+        ];
+        let mut running = self.spawn(SUB, &args, None)?;
+        let read = match running.child.stdout.take() {
+            Some(mut stdout) => std::io::copy(&mut stdout, &mut std::io::sink()).map(|_| ()),
+            None => Ok(()),
+        };
+        if let Err(source) = read {
+            running.abort();
+            return Err(GitCmdError::Spawn {
+                subcommand: SUB,
+                source,
+            });
+        }
+        let (status, stderr) = running.exit()?;
+        match status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(failed(SUB, &stderr)),
+        }
     }
 
     /// `rev-list <tip> --not --all <exclude..>`: commits new to the repository.
@@ -801,20 +831,24 @@ impl Running {
     /// Waits for git, joins the threads, and turns a non-zero exit into `Failed` with the
     /// first kept stderr line; a child the watchdog killed exits on a signal and so fails too.
     /// On an earlier parse failure call `abort` instead.
-    fn finish(mut self) -> Result<(), GitCmdError> {
+    fn finish(self) -> Result<(), GitCmdError> {
+        let subcommand = self.subcommand;
+        let (status, stderr) = self.exit()?;
+        if status.success() {
+            return Ok(());
+        }
+        Err(failed(subcommand, &stderr))
+    }
+
+    /// Waits for git and joins the threads, handing back the raw exit status and kept stderr
+    /// for a caller that reads meaning into a non-zero exit.
+    fn exit(mut self) -> Result<(ExitStatus, Vec<u8>), GitCmdError> {
         let subcommand = self.subcommand;
         self.stop_watchdog();
         let status = self.child.wait();
         let stderr = self.join();
         let status = status.map_err(|source| GitCmdError::Spawn { subcommand, source })?;
-        if status.success() {
-            return Ok(());
-        }
-        let text = String::from_utf8_lossy(&stderr);
-        Err(GitCmdError::Failed {
-            subcommand,
-            stderr: text.lines().next().unwrap_or_default().trim().to_owned(),
-        })
+        Ok((status, stderr))
     }
 
     /// Kills git first (its whole group under a run limit), so a writer blocked on a full stdin
@@ -854,6 +888,15 @@ impl Running {
             let _ = writer.join();
         }
         self.drain.join().unwrap_or_default()
+    }
+}
+
+/// `Failed` carrying the first kept stderr line.
+fn failed(subcommand: &'static str, stderr: &[u8]) -> GitCmdError {
+    let text = String::from_utf8_lossy(stderr);
+    GitCmdError::Failed {
+        subcommand,
+        stderr: text.lines().next().unwrap_or_default().trim().to_owned(),
     }
 }
 

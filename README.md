@@ -15,7 +15,7 @@ A team shares its work in workspaces. Each workspace is a bare git repository on
 - **Accounts and roles.** People sign in with a local password account and use personal access tokens for git, the JSON API and automation. Each workspace grants a user or a team one of three roles: read (clone and fetch), write (also push) or admin (also manage grants and overrides).
 - **Change notices.** `GET /api/v1/workspaces/{team}/{ws}/events` is a server-sent events stream that carries only which ref now points at which commit; apps then fetch the commits over git. An app that cannot keep the stream open can poll instead.
 - **Git access.** Apps clone, fetch and push a workspace at `<public URL>/git/{team}/{ws}`, signing in with a personal access token.
-- **Administration.** `potluck admin` on the host manages users, tokens, teams, workspaces, grants, overrides and update checks (see [First admin](#first-admin)). The same operations are in the JSON API under `/api/v1`. There is no web UI.
+- **Administration.** `potluck admin` on the host manages users, tokens, teams, workspaces, grants, overrides and update checks, and reads the audit log (see [First admin](#first-admin)). The same operations are in the JSON API under `/api/v1`. There is no web UI.
 
 ## Status
 
@@ -107,7 +107,7 @@ With docker: `docker exec potluck potluck admin user create alice --server-admin
 podman exec -i potluck potluck admin user create alice --server-admin --password-stdin < alice-password.txt
 ```
 
-The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants, overrides and update checks; `--json` prints the answer as JSON instead of a table.
+The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants, overrides, update checks and audit; `--json` prints the answer as JSON instead of a table. Audit rows of changes are kept 365 days and rows of failed sign-ins 30 days; `--audit-retention-days` and `--audit-failed-retention-days` (or `POTLUCK_AUDIT_RETENTION_DAYS` and `POTLUCK_AUDIT_FAILED_RETENTION_DAYS`) change that, and 0 keeps rows forever.
 
 ## Reverse proxy and TLS
 

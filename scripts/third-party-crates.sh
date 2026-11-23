@@ -10,6 +10,27 @@ notices=${NOTICES:-$root/THIRD_PARTY_NOTICES.md}
 readonly begin='<!-- crates:begin -->' end='<!-- crates:end -->'
 readonly allowed=' MIT Apache-2.0 ISC BSD-3-Clause Unicode-3.0 Zlib Unlicense BSL-1.0 0BSD MIT-0 LLVM-exception '
 
+# An SPDX expression passes when it holds with each allowed identifier true and every other
+# false: OR needs one alternative, AND and WITH need both sides, and `/` is the old spelling of
+# OR. An empty or malformed expression fails, since the arithmetic below cannot parse it.
+licence_allowed() {
+  local expr=${1//\// OR } out='' token
+  expr=${expr//(/ ( }
+  expr=${expr//)/ ) }
+  local -a tokens
+  read -ra tokens <<< "$expr"
+  (( ${#tokens[@]} )) || return 1
+  for token in "${tokens[@]}"; do
+    case $token in
+      OR) out+=' || ' ;;
+      AND | WITH) out+=' && ' ;;
+      '(' | ')') out+=" $token " ;;
+      *) if [[ $allowed == *" $token "* ]]; then out+=" 1 "; else out+=" 0 "; fi ;;
+    esac
+  done
+  ( (( $out )) ) 2> /dev/null
+}
+
 write=0
 case ${1:-} in
   '') ;;
@@ -31,15 +52,7 @@ while IFS= read -r line; do
   # This repo's own crates are first-party; any other path crate is checked and listed.
   [[ $name == potluck && $version == *' ('* ]] && continue
   [[ $version == *" ($root/crates/"* ]] && continue
-  # Every identifier in the expression must be allowed; operators and grouping carry no terms.
-  ok=1
-  [[ -z $licence ]] && ok=0
-  read -ra tokens <<< "${licence//[()\/]/ }"
-  for token in "${tokens[@]}"; do
-    case $token in AND | OR | WITH) continue ;; esac
-    [[ $allowed == *" $token "* ]] || ok=0
-  done
-  if (( ! ok )); then
+  if ! licence_allowed "$licence"; then
     echo "third-party-crates.sh: $name $version has licence '$licence' outside the allowlist" >&2
     bad=1
   fi

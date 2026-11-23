@@ -52,6 +52,16 @@ pub struct ServeArgs {
     /// Turn off the daily check for a new signed release.
     #[arg(long = "no-update-check", env = "POTLUCK_UPDATE_CHECK", action = clap::ArgAction::SetFalse)]
     update_check: bool,
+    /// Days an audit row of a change is kept; 0 keeps them forever.
+    #[arg(long, env = "POTLUCK_AUDIT_RETENTION_DAYS", default_value_t = 365)]
+    audit_retention_days: u32,
+    /// Days an audit row of a failed sign-in is kept; 0 keeps them forever.
+    #[arg(
+        long,
+        env = "POTLUCK_AUDIT_FAILED_RETENTION_DAYS",
+        default_value_t = 30
+    )]
+    audit_failed_retention_days: u32,
 }
 
 /// Validated server configuration. Built with `Config::try_from(ServeArgs)`.
@@ -67,6 +77,8 @@ pub struct Config {
     log: String,
     trusted_proxies: Vec<ipnet::IpNet>,
     update_check: bool,
+    audit_retention_days: u32,
+    audit_failed_retention_days: u32,
 }
 
 impl Config {
@@ -108,6 +120,16 @@ impl Config {
     /// Whether the daily release check runs; off with `--no-update-check`.
     pub fn update_check(&self) -> bool {
         self.update_check
+    }
+
+    /// Days an audit row of a change is kept; 0 keeps change rows forever.
+    pub fn audit_retention_days(&self) -> u32 {
+        self.audit_retention_days
+    }
+
+    /// Days a `session.failed` audit row is kept; 0 keeps those rows forever.
+    pub fn audit_failed_retention_days(&self) -> u32 {
+        self.audit_failed_retention_days
     }
 
     /// Whether `ip` is inside one of `--trusted-proxies`; an IPv4-mapped IPv6 address is tested
@@ -284,6 +306,8 @@ impl TryFrom<ServeArgs> for Config {
             log: args.log,
             trusted_proxies,
             update_check: args.update_check,
+            audit_retention_days: args.audit_retention_days,
+            audit_failed_retention_days: args.audit_failed_retention_days,
         })
     }
 }

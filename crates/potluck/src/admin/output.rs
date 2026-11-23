@@ -184,3 +184,55 @@ pub(crate) fn overrides(items: &[Value]) -> String {
         &rows,
     )
 }
+
+/// `ID  TIME  ACTOR  ACTION  TARGET  WORKSPACE  IP` rows from Audit objects, every cell escaped.
+/// ACTOR is the actor's name, else its kind; TARGET is `kind:name`, else `kind:#id`, else the
+/// kind alone, else `-`.
+pub(crate) fn audit(items: &[Value]) -> String {
+    let rows: Vec<Vec<String>> = items
+        .iter()
+        .map(|a| {
+            let actor = if a["actor_name"].is_null() {
+                text(&a["actor_kind"])
+            } else {
+                text(&a["actor_name"])
+            };
+            let target = match (&a["target_kind"], &a["target_name"], &a["target_id"]) {
+                (Value::Null, _, _) => "-".to_owned(),
+                (kind, Value::Null, Value::Null) => text(kind),
+                (kind, Value::Null, id) => format!("{}:#{}", text(kind), text(id)),
+                (kind, name, _) => format!("{}:{}", text(kind), text(name)),
+            };
+            [
+                text(&a["id"]),
+                text(&a["at"]),
+                actor,
+                text(&a["action"]),
+                target,
+                text(&a["workspace"]),
+                text(&a["client_ip"]),
+            ]
+            .into_iter()
+            .map(|cell| escape(&cell))
+            .collect()
+        })
+        .collect();
+    table(
+        &["ID", "TIME", "ACTOR", "ACTION", "TARGET", "WORKSPACE", "IP"],
+        &rows,
+    )
+}
+
+// Audit cells carry names other people chose, so a control character is shown in its escaped
+// form rather than reaching the terminal as a command.
+fn escape(cell: &str) -> String {
+    cell.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}

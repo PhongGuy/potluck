@@ -15,6 +15,7 @@ use crate::notices::Notices;
 use crate::update::UpdateChecker;
 
 mod actor;
+mod audit;
 pub mod auth;
 pub(crate) mod client_ip;
 pub mod credential;
@@ -161,6 +162,7 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
 /// wrong methods answer `not_found`.
 pub(crate) fn router(state: AppState) -> Router {
     let v1 = Router::new()
+        .route("/audit", get(audit::list))
         .route("/health", get(system::health))
         .route("/server", get(system::server))
         .route("/session", post(session::create))

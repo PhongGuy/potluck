@@ -12,6 +12,7 @@ pub mod health_check;
 pub mod hooks;
 pub mod kinds;
 pub mod notices;
+pub(crate) mod retention;
 pub mod role;
 pub mod secret_check;
 pub mod server;

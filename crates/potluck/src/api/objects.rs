@@ -1,9 +1,10 @@
 //! The contract's JSON objects: `User`, `Token`, `Identity`, `Team`, `Workspace`, `Grant`,
-//! `Override`.
+//! `Override`, `Audit`.
 
 use serde::Serialize;
 
 use crate::db::accounts::{TokenRecord, UserRecord};
+use crate::db::audit::AuditRecord;
 use crate::db::grants::{GrantRecord, Subject};
 use crate::db::overrides::OverrideRecord;
 use crate::db::teams::TeamRecord;
@@ -218,6 +219,50 @@ impl From<&OverrideRecord> for OverrideJson {
             armed_at: record.armed_at().to_owned(),
             consumed_at: record.consumed_at().map(str::to_owned),
             consumed_refs: record.consumed_refs().map(<[RefMove]>::to_vec),
+        }
+    }
+}
+
+/// The `Audit` object: `{id, at, action, actor_kind, actor_id|null, actor_name|null,
+/// target_kind|null, target_id|null, target_name|null, workspace|null, client_ip|null,
+/// detail|null}`. A stored `detail` that is not JSON is served as `null` and logged at warn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
+pub struct AuditJson {
+    id: i64,
+    at: String,
+    action: String,
+    actor_kind: String,
+    actor_id: Option<i64>,
+    actor_name: Option<String>,
+    target_kind: Option<String>,
+    target_id: Option<i64>,
+    target_name: Option<String>,
+    workspace: Option<String>,
+    client_ip: Option<String>,
+    detail: Option<serde_json::Value>,
+}
+
+impl From<&AuditRecord> for AuditJson {
+    fn from(record: &AuditRecord) -> Self {
+        let detail = record.detail().and_then(|text| {
+            serde_json::from_str(text)
+                .inspect_err(|_| tracing::warn!(id = record.id(), "audit detail is not JSON"))
+                .ok()
+        });
+        AuditJson {
+            id: record.id(),
+            at: record.at().to_owned(),
+            action: record.action().to_owned(),
+            actor_kind: record.actor_kind().to_owned(),
+            actor_id: record.actor_id(),
+            actor_name: record.actor_name().map(str::to_owned),
+            target_kind: record.target_kind().map(str::to_owned),
+            target_id: record.target_id(),
+            target_name: record.target_name().map(str::to_owned),
+            workspace: record.workspace().map(str::to_owned),
+            client_ip: record.client_ip().map(str::to_owned),
+            detail,
         }
     }
 }

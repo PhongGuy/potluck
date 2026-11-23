@@ -10,23 +10,24 @@ A team shares its work in workspaces. Each workspace is a bare git repository on
 
 - **Kinds.** Each workspace has a kind that names the app whose files it holds: `apinata` or `dbento`. Each app owns the push rules and the starting files for its kind, in a small rules crate in the app's own repository. Potluck builds against each rules crate at a pinned git tag and knows no app file format itself.
 - **Formats.** `GET /api/v1/server` lists each kind with the workspace formats this server accepts. A push in a format the server does not list is refused.
-- **Push check.** Secrets stay on each person's machine. Before git accepts a push, a pre-receive check scans the objects the push adds. It refuses `.env` files, private keys, and AWS, GitHub, Slack and Potluck tokens, plus whatever the workspace's kind rules refuse.
+- **Push check.** Secrets stay on each person's machine. Before git accepts a push, a pre-receive check scans the objects the push adds. It refuses files named exactly `.env` (`.env.example` and other variants pass), private keys, and AWS, GitHub, Slack and Potluck tokens, plus whatever the workspace's kind rules refuse.
 - **Overrides.** A workspace admin can arm an override that lets one person's next push through the check. Arming, disarming and using an override are logged, and a used override stays in the workspace's history.
 - **Accounts and roles.** People sign in with a local password account and use personal access tokens for git, the JSON API and automation. Each workspace grants a user or a team one of three roles: read (clone and fetch), write (also push) or admin (also manage grants and overrides).
 - **Change notices.** `GET /api/v1/workspaces/{team}/{ws}/events` is a server-sent events stream that carries only which ref now points at which commit; apps then fetch the commits over git. An app that cannot keep the stream open can poll instead.
-- **Administration.** `potluck admin` on the host manages users, tokens, teams, workspaces, grants and overrides (see [First admin](#first-admin)). The same operations are in the JSON API under `/api/v1`. There is no web UI.
+- **Git access.** Apps clone, fetch and push a workspace at `<public URL>/git/{team}/{ws}`, signing in with a personal access token.
+- **Administration.** `potluck admin` on the host manages users, tokens, teams, workspaces, grants, overrides and update checks (see [First admin](#first-admin)). The same operations are in the JSON API under `/api/v1`. There is no web UI.
 
 ## Status
 
-Potluck is not ready for use yet, and may still change in ways that break existing setups. Watch the repository's releases to hear when it is ready.
+Potluck is in its 0.x releases and may still change in ways that break existing setups. Read each release's notes before you update.
 
 ## Run it
 
-The image will be `ghcr.io/phongguy/potluck:latest`, built for amd64 and arm64. It runs as a non-root user (uid 65532) and keeps everything it stores in one volume mounted at `/data`.
+The image is `ghcr.io/phongguy/potluck:latest`, built for amd64 and arm64, with each release also tagged by its version, such as `v0.1.0`. It runs as a non-root user (uid 65532) and keeps everything it stores in one volume mounted at `/data`.
 
 The image starts potluck under tini, a minimal init that reaps stray processes and passes stop signals on, so it needs no `--init` flag or `init: true`.
 
-Until the first release, build the image yourself from a checkout of this repository, under the same name so the one-command and Compose examples below find it locally:
+To build the image yourself instead, from a checkout of this repository, use the same name so the examples below find it locally:
 
 ```sh
 podman build -t ghcr.io/phongguy/potluck:latest .
@@ -47,6 +48,8 @@ docker run -d --name potluck -p 127.0.0.1:8080:8080 -v potluck-data:/data -e POT
 ```
 
 The server now answers on `http://127.0.0.1:8080`, on this machine only. `POTLUCK_PUBLIC_URL` is the address your team's apps use to reach the server. Once other people connect, set it to your reverse proxy's `https://` address (see [Reverse proxy and TLS](#reverse-proxy-and-tls)). The server refuses a plain `http://` address on anything but this machine, because access tokens would then cross the network in clear; `POTLUCK_INSECURE_HTTP=1` overrides that, for a trusted network only.
+
+Every setting is a `potluck serve` flag with a `POTLUCK_*` environment variable, among them the push size limit (`POTLUCK_MAX_PUSH_BYTES`, 100 MiB by default) and the log filter (`POTLUCK_LOG`). `podman exec potluck potluck serve --help` lists them all.
 
 ### Compose
 
@@ -104,7 +107,7 @@ With docker: `docker exec potluck potluck admin user create alice --server-admin
 podman exec -i potluck potluck admin user create alice --server-admin --password-stdin < alice-password.txt
 ```
 
-The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants and overrides; `--json` prints the answer as JSON instead of a table.
+The admin then signs in from the app, or with any HTTP client: `POST /api/v1/session` with `{"username", "password", "token_name"}` answers a token. `potluck admin --help` lists the rest: users, tokens, teams, workspaces, grants, overrides and update checks; `--json` prints the answer as JSON instead of a table.
 
 ## Reverse proxy and TLS
 
@@ -136,7 +139,7 @@ location / {
 }
 ```
 
-The server trusts `X-Forwarded-For` only from the addresses listed in `POTLUCK_TRUSTED_PROXIES` (default: none; the setting lands with the server's accounts features), so once it exists, put your proxy's address there.
+The server trusts `X-Forwarded-For` only from the addresses listed in `POTLUCK_TRUSTED_PROXIES` (comma-separated addresses or CIDRs; default: none), so put your proxy's address there. Sign-in attempts are rate limited by client address, and behind a proxy that is not listed every attempt looks like it comes from the proxy.
 
 ## Updating
 

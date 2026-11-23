@@ -6,7 +6,7 @@ use potluck::api::AppState;
 use potluck::db::Db;
 use potluck::server::{Running, ServerError, start, start_with};
 
-use crate::common::{client, config_for, fast_passwords, parse_config};
+use crate::common::{client, config_for, create_user, fast_passwords, parse_config};
 
 /// The value of the first sample whose series is exactly `series`.
 pub fn sample(text: &str, series: &str) -> Option<f64> {
@@ -174,5 +174,90 @@ async fn the_real_router_labels_unknown_paths_unmatched_and_known_ones_by_templa
     assert_eq!(sample(&text, unmatched), Some(1.0), "{text}");
     assert_eq!(sample(&text, health), Some(1.0), "{text}");
     assert!(!text.contains("no-such-route"), "{text}");
+    running.shutdown().await;
+}
+
+async fn post_session(running: &Running, username: &str, password: &str) -> u16 {
+    client()
+        .post(format!("http://{}/api/v1/session", running.http_addr()))
+        .json(&serde_json::json!({"username": username, "password": password, "token_name": "t"}))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn sign_ins_count_success_failure_and_the_username_limit() {
+    let (_dir, db, running) = metrics_server().await;
+    create_user(&db, "alice", "right-password-1", false).await;
+    assert_eq!(
+        post_session(&running, "alice", "right-password-1").await,
+        201
+    );
+    for _ in 0..4 {
+        assert_eq!(
+            post_session(&running, "alice", "wrong-password-9").await,
+            401
+        );
+    }
+    // The username window holds 5 attempts; the sixth is limited by name, not by address.
+    assert_eq!(
+        post_session(&running, "alice", "wrong-password-9").await,
+        429
+    );
+    let text = scrape(&running).await;
+    let series = |o: &str| format!("potluck_sign_ins_total{{method=\"password\",outcome=\"{o}\"}}");
+    assert_eq!(sample(&text, &series("success")), Some(1.0), "{text}");
+    assert_eq!(sample(&text, &series("failure")), Some(4.0), "{text}");
+    assert_eq!(
+        sample(&text, &series("rate_limited_username")),
+        Some(1.0),
+        "{text}"
+    );
+    for secret in ["alice", "right-password-1", "wrong-password-9"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_address_limit_is_counted_apart_from_the_username_limit() {
+    let (_dir, _db, running) = metrics_server().await;
+    // 10 attempts per address per window, each under a different name, then one more.
+    for i in 0..10 {
+        assert_eq!(
+            post_session(&running, &format!("nobody{i}"), "x-password-1").await,
+            401
+        );
+    }
+    assert_eq!(
+        post_session(&running, "nobody10", "x-password-1").await,
+        429
+    );
+    let text = scrape(&running).await;
+    let limited = "potluck_sign_ins_total{method=\"password\",outcome=\"rate_limited_ip\"}";
+    assert_eq!(sample(&text, limited), Some(1.0), "{text}");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_bad_bearer_token_on_the_api_counts_one_auth_failure() {
+    let (_dir, _db, running) = metrics_server().await;
+    let r = client()
+        .get(format!("http://{}/api/v1/me", running.http_addr()))
+        .bearer_auth("plk_definitely_not_a_token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status().as_u16(), 401);
+    let text = scrape(&running).await;
+    assert_eq!(
+        sample(&text, "potluck_auth_failures_total{scheme=\"bearer\"}"),
+        Some(1.0),
+        "{text}"
+    );
+    assert!(!text.contains("plk_definitely"), "{text}");
     running.shutdown().await;
 }

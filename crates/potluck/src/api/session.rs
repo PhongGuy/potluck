@@ -11,6 +11,7 @@ use super::error::{ApiError, ApiResult};
 use super::json::ApiJson;
 use super::objects::{TokenJson, UserJson};
 use super::{tokens, validate};
+use crate::metrics::{SignInMethod, SignInOutcome};
 
 /// The sign-in body. No `Debug`, so the password cannot reach a log by formatting.
 #[derive(Deserialize)]
@@ -40,18 +41,21 @@ pub(super) async fn create(
     let token_name = validate::token_name("token_name", &body.token_name)?;
     // Only attempts that reach the credential check count, the address before the username.
     let limits = state.session_limits();
-    limits
-        .per_ip()
-        .check(&ip.key())
-        .map_err(ApiError::rate_limited)?;
-    limits
-        .per_username()
-        .check(&body.username)
-        .map_err(ApiError::rate_limited)?;
+    // Each outcome is counted where it is decided; the 422 and an unusable hash count nothing.
+    let count = |outcome| state.metrics().sign_in(SignInMethod::Password, outcome);
+    limits.per_ip().check(&ip.key()).map_err(|e| {
+        count(SignInOutcome::RateLimitedIp);
+        ApiError::rate_limited(e)
+    })?;
+    limits.per_username().check(&body.username).map_err(|e| {
+        count(SignInOutcome::RateLimitedUsername);
+        ApiError::rate_limited(e)
+    })?;
 
     // Every credential failure gets the same refusal; only the username reaches the log.
     let refused = || {
         tracing::debug!(username = %body.username, "sign-in refused");
+        count(SignInOutcome::Failure);
         ApiError::unauthenticated("invalid username or password")
     };
     let Some(user) = state.db().user_by_username(&body.username).await? else {
@@ -76,6 +80,7 @@ pub(super) async fn create(
     }
 
     let (token, record) = tokens::mint_and_create(&state, user.id(), token_name, None).await?;
+    count(SignInOutcome::Success);
     Ok((
         StatusCode::CREATED,
         Json(SessionResponse {

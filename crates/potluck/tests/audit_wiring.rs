@@ -688,6 +688,16 @@ async fn a_consuming_push_writes_override_use_once() {
         (Some(id), Some("core/api"), None)
     );
     assert_eq!(detail(&used[0]), json!({"refs": 2}));
+    let url = app.url(&format!("/workspaces/core/api/overrides/{id}"));
+    assert_eq!(
+        call(&url, Method::DELETE, Some(&root), None).await.0,
+        409,
+        "a consumed override stays in the history"
+    );
+    assert!(
+        rows(&app.db, "override.disarm").await.is_empty(),
+        "a refused disarm writes no row"
+    );
 }
 
 #[tokio::test]

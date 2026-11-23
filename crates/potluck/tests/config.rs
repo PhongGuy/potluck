@@ -26,6 +26,8 @@ fn defaults_match_the_spec() {
     assert_eq!(config.max_push_bytes(), 100 * 1024 * 1024);
     assert_eq!(config.log(), "info");
     assert_eq!(config.public_url(), "http://127.0.0.1:8080");
+    assert_eq!(config.audit_retention_days(), 365);
+    assert_eq!(config.audit_failed_retention_days(), 30);
 }
 
 #[test]
@@ -59,6 +61,10 @@ fn every_flag_is_read() {
         "1024",
         "--log",
         "debug",
+        "--audit-retention-days",
+        "0",
+        "--audit-failed-retention-days",
+        "7",
     ])
     .unwrap();
     assert_eq!(
@@ -68,6 +74,8 @@ fn every_flag_is_read() {
     assert_eq!(config.git(), Path::new("/usr/bin/git"));
     assert_eq!(config.max_push_bytes(), 1024);
     assert_eq!(config.log(), "debug");
+    assert_eq!(config.audit_retention_days(), 0);
+    assert_eq!(config.audit_failed_retention_days(), 7);
 }
 
 #[test]

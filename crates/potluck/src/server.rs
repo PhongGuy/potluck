@@ -194,7 +194,9 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
     state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
     let git_tasks = state.git().tasks().clone();
-    // The daily loop rides the git tracker and the stop flag, so shutdown ends it before its wait.
+    // The pruner and the daily loop ride the git tracker and the stop flag, so shutdown ends them
+    // before their wait.
+    crate::retention::spawn_pruner(db.clone(), config, &git_tasks, rx.clone());
     match source.map(|source| UpdateChecker::new(source, env!("CARGO_PKG_VERSION"))) {
         None => {}
         Some(Ok(checker)) => {
@@ -513,11 +515,12 @@ mod tests {
         Config::try_from(wrap.serve).expect("test config")
     }
 
-    // The daily loop is the only task on the tracker right after start, so the count shows
-    // whether the flag spawned it. The GitHub source is safe: its first check waits minutes.
+    // The audit pruner is the one task always on the tracker right after start, so a count one
+    // above it shows the flag spawned the daily loop. The GitHub source is safe: its first check
+    // waits minutes.
     #[tokio::test]
     async fn the_daily_loop_is_spawned_only_when_the_check_is_on() {
-        for (flags, loops) in [(&[][..], 1), (&["--no-update-check"][..], 0)] {
+        for (flags, loops) in [(&[][..], 2), (&["--no-update-check"][..], 1)] {
             let dir = tempfile::tempdir().unwrap();
             let source = UpdateSource::github().unwrap();
             let running = start_with_updates(&config_with(dir.path(), flags), source)
@@ -539,8 +542,8 @@ mod tests {
         let running = start_with(&config, state).await.unwrap();
         assert_eq!(
             running.git_tasks.len(),
-            0,
-            "a given state gets no daily loop"
+            1,
+            "a given state gets the pruner and no daily loop"
         );
         running.shutdown().await;
     }

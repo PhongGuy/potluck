@@ -168,7 +168,7 @@ pub(crate) struct UserCreated {
 }
 
 /// The `user.update` detail: the set fields in assignment order, the hash named `password`, and
-/// the new value of each flag that changed.
+/// the new value of each flag the patch set.
 #[derive(serde::Serialize)]
 pub(crate) struct UserUpdated {
     pub(crate) fields: Vec<&'static str>,

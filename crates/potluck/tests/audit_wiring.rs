@@ -475,6 +475,72 @@ async fn a_failed_insert_leaves_no_workspace_and_no_directory() {
     );
 }
 
+#[tokio::test]
+async fn a_failed_insert_leaves_the_membership_unchanged() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_user(&app.db, "bob").await;
+    api_user(&app.db, "carol").await;
+    api_team(&app.url(""), &root, "core").await;
+    let (status, _) = call(
+        &app.url("/teams/core/members/bob"),
+        Method::PUT,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let team = app.db.team_by_slug("core").await.unwrap().unwrap().id();
+    let before = app.db.team_members(team).await.unwrap();
+    assert_eq!(before, ["bob"]);
+    boom(app._dir.path());
+    let (status, _) = call(
+        &app.url("/teams/core/members/carol"),
+        Method::PUT,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 500, "no member without its row");
+    let (status, _) = call(
+        &app.url("/teams/core/members/bob"),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 500, "no removal without its row");
+    assert_eq!(app.db.team_members(team).await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn a_failed_insert_keeps_the_workspace_and_its_directory() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    api_team(&app.url(""), &root, "core").await;
+    api_workspace(&app.url(""), &root, "core", "api", false).await;
+    boom(app._dir.path());
+    let (status, _) = call(
+        &app.url("/workspaces/core/api"),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 500);
+    assert!(
+        app.db
+            .workspace_by_slugs("core", "api")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        crate::common::repo_path(app._dir.path(), "core", "api").exists(),
+        "the repository stays with its row"
+    );
+}
+
 /// A grant row's target kind, target name, workspace and detail.
 type GrantRow<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>, Value);
 

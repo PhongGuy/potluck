@@ -35,6 +35,7 @@ globset.workspace = true
 ipnet.workspace = true
 jiff.workspace = true
 minisign-verify.workspace = true
+openidconnect.workspace = true
 potluck-kind.workspace = true
 regex.workspace = true
 reqwest.workspace = true

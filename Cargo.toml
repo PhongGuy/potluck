@@ -25,6 +25,7 @@ ipnet = "=2.12.2"
 jiff = { version = "=0.2.45", default-features = false, features = ["std"] }
 minisign = "=0.10.0"
 minisign-verify = "=0.3.0"
+openidconnect = { version = "=4.1.0", default-features = false }
 potluck-kind = { path = "crates/potluck-kind" }
 regex = "=1.13.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }

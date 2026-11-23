@@ -106,3 +106,13 @@ fn a_push_context_carries_the_default_branch_only_when_given() {
         Some("trunk")
     );
 }
+
+#[test]
+fn an_empty_default_branch_on_a_push_context_means_none() {
+    assert_eq!(
+        PushContext::new(1, "bob")
+            .default_branch("")
+            .workspace_default_branch(),
+        None
+    );
+}

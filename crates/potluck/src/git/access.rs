@@ -94,10 +94,10 @@ impl PushContext {
         self
     }
 
-    /// The workspace's default branch.
+    /// The workspace's default branch; an empty name means none, as in the hook.
     #[must_use]
     pub fn default_branch(mut self, name: &str) -> Self {
-        self.default_branch = Some(name.to_owned());
+        self.default_branch = Some(name).filter(|n| !n.is_empty()).map(str::to_owned);
         self
     }
 

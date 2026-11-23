@@ -273,3 +273,56 @@ fn a_sha256_default_branch_is_protected_the_same_way() {
     let ahead = s.stage_commit("ahead");
     assert!(scan_rows(&writer(), moved(&new, &ahead, "refs/heads/main"), &git).is_empty());
 }
+
+#[test]
+fn an_accepted_rewrite_is_logged_with_workspace_pusher_override_and_rule() {
+    let s = Scratch::new();
+    let (old, new) = rewritten(&s);
+    s.publish("main");
+    let git = git_for(&s);
+    let log = |u: RefUpdate, git: &Git| {
+        crate::logs::captured_logs(|| {
+            potluck::secret_check::log_default_branch_rewrites(
+                7,
+                "alice",
+                Some(3),
+                Some("main"),
+                &[u],
+                git,
+            );
+        })
+    };
+    for (update, rule) in [
+        (moved(&old, &new, "refs/heads/main"), "force_push"),
+        (moved(&new, ZERO, "refs/heads/main"), "branch_delete"),
+    ] {
+        let text = log(update, &git);
+        let line = text
+            .lines()
+            .find(|l| l.contains("default branch rewritten"))
+            .unwrap_or_else(|| panic!("{text}"));
+        for needle in [
+            " INFO ",
+            "workspace_id=7",
+            "alice",
+            "override_id=3",
+            "refs/heads/main",
+            rule,
+        ] {
+            assert!(line.contains(needle), "{needle} in {line}");
+        }
+    }
+    s.write("a.txt", b"four\n");
+    let ahead = s.stage_commit("ahead");
+    let text = log(moved(&new, &ahead, "refs/heads/main"), &git);
+    assert!(
+        !text.contains("default branch rewritten"),
+        "a fast-forward is not logged: {text}"
+    );
+    let broken = Git::new(PathBuf::from("/nonexistent/git"), Some(s.bare.clone()));
+    let text = log(moved(&new, &ahead, "refs/heads/main"), &broken);
+    assert!(
+        text.contains(" WARN ") && text.contains("could not re-check an accepted admin push"),
+        "{text}"
+    );
+}

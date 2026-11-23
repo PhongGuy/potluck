@@ -37,6 +37,7 @@ jiff.workspace = true
 minisign-verify.workspace = true
 openidconnect.workspace = true
 potluck-kind.workspace = true
+prometheus-client.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rusqlite.workspace = true

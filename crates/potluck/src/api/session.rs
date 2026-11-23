@@ -88,9 +88,9 @@ pub(super) async fn create(
 
     // The sign-in is the new token owner's act, not the anonymous request's.
     let ctx = AuditCtx::user(user.id(), user.username());
-    let ctx = match ip {
-        ClientIp::Peer(addr) => ctx.with_client_ip(addr),
-        ClientIp::Local => ctx,
+    let ctx = match ip.addr() {
+        Some(addr) => ctx.with_client_ip(addr),
+        None => ctx,
     };
     let (token, record) = tokens::mint_and_create(
         &state,
@@ -121,11 +121,7 @@ async fn refuse(
     reason: SignInFailure,
 ) -> ErrorResponse {
     tracing::debug!(username = %username, "sign-in refused");
-    let addr = match ip {
-        ClientIp::Peer(addr) => Some(addr),
-        ClientIp::Local => None,
-    };
-    if let Err(e) = state.db().record_failed_sign_in(user, reason, addr).await {
+    if let Err(e) = state.db().record_failed_sign_in(user, reason, ip.addr()).await {
         tracing::error!(error = %e, "could not record a refused sign-in");
     }
     ApiError::unauthenticated("invalid username or password").into()

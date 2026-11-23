@@ -32,9 +32,9 @@ pub(super) fn ctx(auth: &Authenticated, ip: ClientIp) -> AuditCtx {
         Actor::User(user) => AuditCtx::user(user.user().id(), user.user().username()),
         Actor::Anonymous => AuditCtx::anonymous(),
     };
-    match ip {
-        ClientIp::Peer(addr) => ctx.with_client_ip(addr),
-        ClientIp::Local => ctx,
+    match ip.addr() {
+        Some(addr) => ctx.with_client_ip(addr),
+        None => ctx,
     }
 }
 

@@ -179,6 +179,12 @@ pub(crate) struct UserUpdated {
     pub(crate) disabled: Option<bool>,
 }
 
+/// The `token.create` and `token.revoke` detail: the token owner's username.
+#[derive(serde::Serialize)]
+pub(crate) struct TokenOwner<'a> {
+    pub(crate) user: &'a str,
+}
+
 /// Inserts one row stamped now; call it on the open transaction of the change it records.
 pub(crate) fn insert(
     conn: &rusqlite::Connection,

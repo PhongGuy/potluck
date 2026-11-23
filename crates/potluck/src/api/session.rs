@@ -11,6 +11,8 @@ use super::error::{ApiError, ApiResult};
 use super::json::ApiJson;
 use super::objects::{TokenJson, UserJson};
 use super::{tokens, validate};
+use crate::db::accounts::TokenOrigin;
+use crate::db::audit::AuditCtx;
 
 /// The sign-in body. No `Debug`, so the password cannot reach a log by formatting.
 #[derive(Deserialize)]
@@ -75,7 +77,21 @@ pub(super) async fn create(
         }
     }
 
-    let (token, record) = tokens::mint_and_create(&state, user.id(), token_name, None).await?;
+    // The sign-in is the new token owner's act, not the anonymous request's.
+    let ctx = AuditCtx::user(user.id(), user.username());
+    let ctx = match ip {
+        ClientIp::Peer(addr) => ctx.with_client_ip(addr),
+        ClientIp::Local => ctx,
+    };
+    let (token, record) = tokens::mint_and_create(
+        &state,
+        user.id(),
+        token_name,
+        None,
+        TokenOrigin::Session,
+        &ctx,
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(SessionResponse {

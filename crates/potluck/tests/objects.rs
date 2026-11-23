@@ -4,7 +4,7 @@ use potluck::api::objects::{
     GrantJson, IdentityJson, SubjectJson, TeamJson, TokenJson, UserJson, WorkspaceJson, identity,
     noreply_host,
 };
-use potluck::db::accounts::{NewToken, NewUser, UserPatch};
+use potluck::db::accounts::{NewToken, NewUser, TokenOrigin, UserPatch};
 use potluck::db::audit::AuditCtx;
 use potluck::db::grants::{GrantRecord, Subject};
 use potluck::db::workspaces::NewWorkspace;
@@ -38,13 +38,17 @@ async fn token_json_has_the_six_fields_and_no_digest() {
         .await
         .unwrap();
     let t = db
-        .create_token(NewToken::new(
-            bob.id(),
-            "ci",
-            "plk_aaaa",
-            [7; 32],
-            Some("2030-01-01T00:00:00Z"),
-        ))
+        .create_token(
+            NewToken::new(
+                bob.id(),
+                "ci",
+                "plk_aaaa",
+                [7; 32],
+                Some("2030-01-01T00:00:00Z"),
+            ),
+            TokenOrigin::Api,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     assert_eq!(

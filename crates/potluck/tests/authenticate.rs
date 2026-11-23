@@ -4,7 +4,7 @@ use potluck::api::auth::authenticate;
 use potluck::api::credential::Credential;
 use potluck::api::error::ErrorCode;
 use potluck::clock::{now_rfc3339, shift_secs};
-use potluck::db::accounts::{NewToken, UserPatch};
+use potluck::db::accounts::{NewToken, TokenOrigin, UserPatch};
 use potluck::db::audit::AuditCtx;
 
 use crate::common::{create_user, mint_token, test_state};
@@ -34,13 +34,11 @@ async fn candidates_sharing_a_prefix_resolve_to_the_right_one() {
     let secret = mint_token(&db, &bob, "real", None).await;
     // Three decoys with bob's prefix but other digests, owned by alice.
     for i in 1u8..=3 {
-        db.create_token(NewToken::new(
-            alice.id(),
-            "decoy",
-            &secret[..8],
-            [i; 32],
-            None,
-        ))
+        db.create_token(
+            NewToken::new(alice.id(), "decoy", &secret[..8], [i; 32], None),
+            TokenOrigin::Api,
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     }
@@ -57,7 +55,11 @@ async fn unknown_expired_revoked_malformed_and_disabled_are_401() {
     let expired = mint_token(&db, &bob, "old", Some("2020-01-01T00:00:00Z")).await;
     let revoked = mint_token(&db, &bob, "gone", None).await;
     let revoked_id = db.tokens_for_user(bob.id()).await.unwrap()[2].id();
-    assert!(db.delete_token(revoked_id).await.unwrap());
+    assert!(
+        db.delete_token(revoked_id, &AuditCtx::system())
+            .await
+            .unwrap()
+    );
     let mut unknown = good.clone();
     unknown.replace_range(40.., "zzzzzzz");
     let mut messages = std::collections::HashSet::new();

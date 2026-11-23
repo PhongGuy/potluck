@@ -7,7 +7,7 @@ use potluck::db::audit::{AuditCtx, AuditFilter, AuditRecord};
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use crate::common::{api_admin, call, test_app};
+use crate::common::{api_admin, api_user, call, test_app};
 
 /// The rows of `action`, oldest first.
 async fn rows(db: &Db, action: &str) -> Vec<AuditRecord> {
@@ -144,4 +144,102 @@ async fn a_failed_insert_rolls_the_user_change_back() {
     assert!(err.is_err());
     let root_row = app.db.user_by_username("root").await.unwrap().unwrap();
     assert_eq!(root_row.display_name(), "root", "the patch rolled back");
+}
+
+#[tokio::test]
+async fn signing_in_writes_session_create_and_no_token_create() {
+    let app = test_app().await;
+    let (bob, _) = api_user(&app.db, "bob").await;
+    let before = rows(&app.db, "token.create").await.len();
+    let (status, body) = call(
+        &app.url("/session"),
+        Method::POST,
+        None,
+        Some(json!({"username": "bob", "password": "pw-123456", "token_name": "desk"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let row = rows(&app.db, "session.create").await.pop().unwrap();
+    assert_eq!((row.actor_kind(), row.actor_id()), ("user", Some(bob.id())));
+    assert_eq!(
+        (row.target_kind(), row.target_id(), row.target_name()),
+        (
+            Some("token"),
+            body["token_meta"]["id"].as_i64(),
+            Some("desk")
+        )
+    );
+    assert_eq!(row.client_ip(), Some("127.0.0.1"));
+    assert_eq!(row.detail(), None);
+    assert_eq!(
+        rows(&app.db, "token.create").await.len(),
+        before,
+        "one row per minted token"
+    );
+}
+
+#[tokio::test]
+async fn creating_and_revoking_a_token_names_its_owner() {
+    let app = test_app().await;
+    let root = api_admin(&app.db).await;
+    let (_, bob) = api_user(&app.db, "bob").await;
+    let (status, body) = call(
+        &app.url("/tokens"),
+        Method::POST,
+        Some(&bob),
+        Some(json!({"name": "ci"})),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let id = body["token_meta"]["id"].as_i64().unwrap();
+    let row = rows(&app.db, "token.create").await.pop().unwrap();
+    assert_eq!(
+        (row.actor_name(), row.target_id(), row.target_name()),
+        (Some("bob"), Some(id), Some("ci"))
+    );
+    assert_eq!(detail(&row), json!({"user": "bob"}));
+
+    let (status, _) = call(
+        &app.url(&format!("/tokens/{id}")),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 204);
+    let (status, _) = call(
+        &app.url(&format!("/tokens/{id}")),
+        Method::DELETE,
+        Some(&root),
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    let revoked = rows(&app.db, "token.revoke").await;
+    assert_eq!(revoked.len(), 1, "the 404 writes nothing");
+    assert_eq!(
+        (revoked[0].actor_name(), revoked[0].target_name()),
+        (Some("root"), Some("ci"))
+    );
+    assert_eq!(detail(&revoked[0]), json!({"user": "bob"}));
+}
+
+#[tokio::test]
+async fn a_failed_insert_mints_no_token() {
+    let app = test_app().await;
+    let (bob_user, bob) = api_user(&app.db, "bob").await;
+    let count = app.db.tokens_for_user(bob_user.id()).await.unwrap().len();
+    boom(app._dir.path());
+    let (status, _) = call(
+        &app.url("/tokens"),
+        Method::POST,
+        Some(&bob),
+        Some(json!({"name": "ci"})),
+    )
+    .await;
+    assert_eq!(status, 500);
+    assert_eq!(
+        app.db.tokens_for_user(bob_user.id()).await.unwrap().len(),
+        count
+    );
 }

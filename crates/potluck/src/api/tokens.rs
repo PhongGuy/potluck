@@ -6,14 +6,17 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
+use super::audit;
 use super::auth::Authenticated;
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult};
 use super::json::ApiJson;
 use super::objects::{IdentityJson, TokenJson, UserJson, WorkspaceJson, identity};
 use super::{validate, workspaces};
 use crate::auth::token::MintedToken;
 use crate::clock::{normalize_rfc3339, now_rfc3339};
-use crate::db::accounts::{NewToken, TokenRecord};
+use crate::db::accounts::{NewToken, TokenOrigin, TokenRecord};
+use crate::db::audit::AuditCtx;
 
 /// The signed-in user, their commit identity and the workspaces they can reach.
 #[derive(Serialize)]
@@ -65,6 +68,7 @@ pub(super) async fn list(
 pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     ApiJson(body): ApiJson<CreateToken>,
 ) -> ApiResult<(StatusCode, Json<CreatedToken>)> {
     let user_id = auth.require_user()?.user().id();
@@ -83,7 +87,15 @@ pub(super) async fn create(
             }
         },
     };
-    let (token, record) = mint_and_create(&state, user_id, name, expires_at.as_deref()).await?;
+    let (token, record) = mint_and_create(
+        &state,
+        user_id,
+        name,
+        expires_at.as_deref(),
+        TokenOrigin::Api,
+        &audit::ctx(&auth, ip),
+    )
+    .await?;
     Ok((
         StatusCode::CREATED,
         Json(CreatedToken {
@@ -93,24 +105,25 @@ pub(super) async fn create(
     ))
 }
 
-/// Mints a token for `user_id` named `name` with `expires_at`, stores its digest, and returns
-/// the secret (shown once) with the stored row; 500 "could not mint a token" if minting fails.
+/// Mints a token for `user_id` named `name` with `expires_at`, stores its digest with the audit
+/// row `origin` names for `ctx`, and returns the secret (shown once) with the stored row; 500
+/// "could not mint a token" if minting fails.
 pub(super) async fn mint_and_create(
     state: &AppState,
     user_id: i64,
     name: &str,
     expires_at: Option<&str>,
+    origin: TokenOrigin,
+    ctx: &AuditCtx,
 ) -> Result<(String, TokenRecord), ApiError> {
     let minted = MintedToken::mint().map_err(|_| ApiError::internal("could not mint a token"))?;
     let record = state
         .db()
-        .create_token(NewToken::new(
-            user_id,
-            name,
-            minted.prefix(),
-            *minted.digest(),
-            expires_at,
-        ))
+        .create_token(
+            NewToken::new(user_id, name, minted.prefix(), *minted.digest(), expires_at),
+            origin,
+            ctx,
+        )
         .await?;
     Ok((minted.secret().to_owned(), record))
 }
@@ -120,6 +133,7 @@ pub(super) async fn mint_and_create(
 pub(super) async fn revoke(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
     // A server admin may revoke anything; anyone else only their own, and others' tokens answer
@@ -135,7 +149,7 @@ pub(super) async fn revoke(
     if owner.is_some_and(|owner| owner != token.user_id()) {
         return Err(missing().into());
     }
-    if state.db().delete_token(id).await? {
+    if state.db().delete_token(id, &audit::ctx(&auth, ip)).await? {
         state.notices().close_token(id);
         Ok(StatusCode::NO_CONTENT)
     } else {

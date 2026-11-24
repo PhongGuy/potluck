@@ -119,6 +119,15 @@ fn table_escapes_control_and_format_characters_in_every_cell() {
     );
 }
 
+#[test]
+fn table_escapes_a_literal_backslash() {
+    let literal = table(&["NAME"], &[vec!["\\u{1b}".to_owned()]]);
+    let control = table(&["NAME"], &[vec!["\u{1b}".to_owned()]]);
+    assert_eq!(literal, "NAME\n\\\\u{1b}\n");
+    assert_eq!(control, "NAME\n\\u{1b}\n");
+    assert_ne!(literal, control);
+}
+
 #[tokio::test]
 async fn user_list_escapes_control_and_format_characters_in_names() {
     let (dir, running) = admin_server().await;

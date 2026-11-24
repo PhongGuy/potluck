@@ -152,6 +152,40 @@ async fn user_list_escapes_control_and_format_characters_in_names() {
     running.shutdown().await;
 }
 
+#[tokio::test]
+async fn user_list_json_escapes_control_and_format_characters_and_keeps_the_value() {
+    let (dir, running) = admin_server().await;
+    let client = AdminClient::connect(running.admin_socket()).await.unwrap();
+    let name = "a\u{202e}b\u{200b}c\u{9b}\u{7f}\u{2028}\u{e0041}é";
+    let body = json!({"username": "eve", "display_name": name, "password": "pw-123456"});
+    let r = client
+        .send(Verb::Post, "/api/v1/users", Some(&body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text());
+    let (result, out) = admin(dir.path(), &["user", "list", "--json"], "").await;
+    result.unwrap();
+    for raw in [
+        '\u{202e}',
+        '\u{200b}',
+        '\u{9b}',
+        '\u{7f}',
+        '\u{2028}',
+        '\u{e0041}',
+    ] {
+        assert!(!out.contains(raw), "raw {raw:?} reached stdout: {out:?}");
+    }
+    assert!(out.contains('é'), "printable text stays raw: {out:?}");
+    assert!(out.contains("\\u202e"), "{out}");
+    assert!(
+        out.contains("\\udb40\\udc41"),
+        "a surrogate pair above the BMP: {out}"
+    );
+    let v: Value = serde_json::from_str(&out).expect("json stdout");
+    assert_eq!(v[0]["display_name"], name, "the decoded value is unchanged");
+    running.shutdown().await;
+}
+
 fn password_line(stdout: &str) -> Option<String> {
     stdout
         .lines()

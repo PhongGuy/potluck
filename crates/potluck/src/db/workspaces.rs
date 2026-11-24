@@ -1,7 +1,7 @@
 //! The workspace rows of `server.db`. The import state is set here and cleared by push
 //! bookkeeping.
 
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::audit::{self, AuditAction, AuditCtx, Entry, WorkspaceCreated};
 use super::{Db, DbError, conflict_on_unique};
@@ -123,6 +123,22 @@ pub(super) fn workspace_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceRec
     })
 }
 
+/// The workspace's audit name, `{team}/{ws}` by slugs as they stand now; `None` when no
+/// workspace has that id. Every audit row names its workspace through this, so
+/// `potluck admin audit` filters match.
+pub(super) fn team_ws_name(
+    conn: &Connection,
+    workspace_id: i64,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT t.slug || '/' || w.slug FROM workspaces w \
+         JOIN teams t ON t.id = w.team_id WHERE w.id = ?1",
+        [workspace_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 impl Db {
     /// Inserts with `created_at = now` and writes its `workspace.create` row in one transaction;
     /// `Conflict` ("workspace {slug} exists in this team") on the `(team_id, slug)` key. The kind
@@ -160,7 +176,7 @@ impl Db {
                  WHERE w.id = ?1"
             );
             let record = tx.query_row(&sql, [tx.last_insert_rowid()], workspace_from_row)?;
-            let name = format!("{}/{}", record.team_slug, record.slug);
+            let name = team_ws_name(&tx, record.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
             let entry = Entry::new(AuditAction::WorkspaceCreate)
                 .target("workspace", Some(record.id), Some(&name))
                 .workspace(&name)
@@ -218,15 +234,7 @@ impl Db {
         // The name is read before the delete, since the row it comes from is about to go.
         self.call(move |conn| {
             let tx = conn.transaction()?;
-            let name: Option<String> = tx
-                .query_row(
-                    "SELECT t.slug || '/' || w.slug FROM workspaces w \
-                     JOIN teams t ON t.id = w.team_id WHERE w.id = ?1",
-                    [id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(name) = name else {
+            let Some(name) = team_ws_name(&tx, id)? else {
                 return Ok(false);
             };
             tx.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;

@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, Row, named_params, params};
 
 use super::audit::{self, AuditAction, AuditCtx, Entry, GrantChange};
 use super::overrides::override_entry;
-use super::workspaces::{WORKSPACE_COLUMNS, WorkspaceRecord, workspace_from_row};
+use super::workspaces::{WORKSPACE_COLUMNS, WorkspaceRecord, team_ws_name, workspace_from_row};
 use super::{Db, DbError};
 use crate::clock;
 use crate::role::Role;
@@ -148,12 +148,8 @@ fn log_grant(
     id: i64,
     change: &GrantChange<'_>,
 ) -> Result<(), DbError> {
-    let workspace: String = conn.query_row(
-        "SELECT t.slug || '/' || w.slug FROM workspaces w \
-         JOIN teams t ON t.id = w.team_id WHERE w.id = ?1",
-        [workspace_id],
-        |row| row.get(0),
-    )?;
+    let workspace =
+        team_ws_name(conn, workspace_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     let entry = Entry::new(action)
         .target(subject.kind(), Some(id), Some(subject.name()))
         .workspace(&workspace)

@@ -4,6 +4,7 @@
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use super::audit::{self, AuditAction, AuditCtx, Entry, OverrideUsed};
+use super::workspaces::team_ws_name;
 use super::{Db, DbError};
 use crate::clock;
 use crate::git::RefMove;
@@ -130,13 +131,14 @@ pub(super) fn override_entry(
     action: AuditAction,
     id: i64,
 ) -> rusqlite::Result<Entry> {
-    let (workspace, for_user): (String, String) = conn.query_row(
-        "SELECT t.slug || '/' || w.slug, u.username FROM overrides o \
-         JOIN workspaces w ON w.id = o.workspace_id JOIN teams t ON t.id = w.team_id \
+    let (workspace_id, for_user): (i64, String) = conn.query_row(
+        "SELECT o.workspace_id, u.username FROM overrides o \
          JOIN users u ON u.id = o.for_user_id WHERE o.id = ?1",
         [id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let workspace =
+        team_ws_name(conn, workspace_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     Ok(Entry::new(action)
         .target("override", Some(id), Some(&for_user))
         .workspace(&workspace))

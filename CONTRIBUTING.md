@@ -84,6 +84,7 @@ scripts/check-public-api.sh target/doc/potluck.json
 - `rules`: `scripts/rules-crates.sh test Cargo.lock`, as above.
 - `zizmor`: audits the workflows.
 - `container`: builds the image and runs the smoke test under podman. It informs and does not block.
+- `advisories`: `cargo deny check advisories` against `Cargo.lock` with `deny.toml`; accepted advisories are listed there with their reason. It informs and does not block. Run it locally with `cargo deny --locked check advisories` after `cargo install cargo-deny --locked --version 0.20.2`.
 
 [`.github/workflows/attribution.yml`](.github/workflows/attribution.yml) checks every pull request's title, body and commit messages, and fails one that credits an AI agent.
 

@@ -26,11 +26,28 @@ fn workflows() -> Vec<(PathBuf, String)> {
 }
 
 #[test]
-fn ci_declares_the_gate_zizmor_and_container_jobs() {
+fn ci_declares_its_jobs() {
     let text = fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).unwrap();
     let names: Vec<String> = jobs(&text).into_iter().map(|(n, _)| n).collect();
-    assert_eq!(names, ["gate", "rules", "zizmor", "container"]);
-    let (_, container) = &jobs(&text)[3];
+    assert_eq!(
+        names,
+        ["gate", "rules", "advisories", "zizmor", "container"]
+    );
+    // The advisories job runs a checksum-pinned cargo-deny against the lockfile.
+    let (_, advisories) = &jobs(&text)[2];
+    for needle in [
+        "CARGO_DENY_VERSION: 0.20.2",
+        "sha256sum -c",
+        "--locked check advisories",
+    ] {
+        assert!(advisories.contains(needle), "{needle} in {advisories}");
+    }
+    let deny = fs::read_to_string(repo_root().join("deny.toml")).unwrap();
+    assert!(
+        deny.contains("RUSTSEC-2023-0071") && deny.contains("reason"),
+        "{deny}"
+    );
+    let (_, container) = &jobs(&text)[4];
     assert!(container.contains("runs-on: ubuntu-26.04\n"), "{container}");
     assert!(
         container.contains("scripts/container-smoke.sh"),

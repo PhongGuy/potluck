@@ -1,9 +1,9 @@
 //! The tar writer: the staged database and repositories as one archive owned by the image user.
 
 use std::fs::{self, File, Metadata};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tar::{Builder, EntryType, Header};
 
@@ -33,7 +33,12 @@ fn append(builder: &mut Builder<&mut dyn Write>, src: &Path, name: &Path) -> io:
     let meta = fs::symlink_metadata(src)?;
     if meta.is_file() {
         let mut header = header(&meta, EntryType::Regular, meta.len());
-        builder.append_data(&mut header, name, File::open(src)?)
+        let data = Exact {
+            inner: File::open(src)?,
+            left: meta.len(),
+            path: src.to_owned(),
+        };
+        builder.append_data(&mut header, name, data)
     } else if meta.is_dir() {
         let mut dir = name.as_os_str().to_owned();
         dir.push("/");
@@ -52,6 +57,48 @@ fn append(builder: &mut Builder<&mut dyn Write>, src: &Path, name: &Path) -> io:
             io::ErrorKind::InvalidData,
             format!("{} is neither a file nor a directory", src.display()),
         ))
+    }
+}
+
+/// A reader that yields exactly `left` bytes of `inner`, so the copy matches the size already
+/// written in the header. A file that ends early or holds more bytes is `InvalidData`.
+struct Exact<R> {
+    inner: R,
+    left: u64,
+    path: PathBuf,
+}
+
+impl<R: Read> Exact<R> {
+    fn changed(&self) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} changed size during the backup", self.path.display()),
+        )
+    }
+}
+
+impl<R: Read> Read for Exact<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        // Once the promised bytes are out, end of file is only real if the source ends too.
+        if self.left == 0 {
+            return match self.inner.read(&mut [0u8])? {
+                0 => Ok(0),
+                _ => Err(self.changed()),
+            };
+        }
+        let want = usize::try_from(self.left)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        match self.inner.read(&mut buf[..want])? {
+            0 => Err(self.changed()),
+            n => {
+                self.left -= n as u64;
+                Ok(n)
+            }
+        }
     }
 }
 
@@ -137,5 +184,60 @@ mod tests {
         let err = write_tar(dir.path(), &mut Vec::new()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
         assert!(err.to_string().contains("link"), "names the path: {err}");
+    }
+
+    /// A sink that rewrites `file` with `bytes` on its first write, between the header and
+    /// the copy of the first entry.
+    struct ChangeOnFirstWrite {
+        file: std::path::PathBuf,
+        bytes: &'static [u8],
+        done: bool,
+        out: Vec<u8>,
+    }
+
+    impl std::io::Write for ChangeOnFirstWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if !self.done {
+                self.done = true;
+                std::fs::write(&self.file, self.bytes).unwrap();
+            }
+            self.out.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn change_mid_copy(bytes: &'static [u8]) -> io::Error {
+        let dir = tempfile::tempdir().unwrap();
+        staging(dir.path());
+        let mut sink = ChangeOnFirstWrite {
+            file: dir.path().join("server.db"),
+            bytes,
+            done: false,
+            out: Vec::new(),
+        };
+        write_tar(dir.path(), &mut sink).unwrap_err()
+    }
+
+    #[test]
+    fn a_file_that_grows_mid_copy_is_an_error_not_a_corrupt_tar() {
+        let err = change_mid_copy(b"db grew while the backup read it");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(
+            err.to_string().contains("server.db"),
+            "names the path: {err}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_shrinks_mid_copy_is_an_error_not_a_corrupt_tar() {
+        let err = change_mid_copy(b"d");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err}");
+        assert!(
+            err.to_string().contains("server.db"),
+            "names the path: {err}"
+        );
     }
 }

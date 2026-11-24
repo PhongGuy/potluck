@@ -96,6 +96,53 @@ fn table_pads_columns_and_leaves_no_trailing_spaces() {
     );
 }
 
+#[test]
+fn table_escapes_control_and_format_characters_in_every_cell() {
+    let rows = vec![
+        vec!["x\u{1b}[2Jy".to_owned(), "1".to_owned()],
+        vec!["a\u{202e}b\u{200b}".to_owned(), "2".to_owned()],
+        vec!["c\u{9b}d\u{feff}".to_owned(), "3".to_owned()],
+        vec!["Søren 中文".to_owned(), "4".to_owned()],
+    ];
+    let out = table(&["A", "B"], &rows);
+    for raw in ['\u{1b}', '\u{202e}', '\u{200b}', '\u{9b}', '\u{feff}'] {
+        assert!(!out.contains(raw), "raw {raw:?} reached the table: {out:?}");
+    }
+    assert_eq!(
+        out,
+        "A                   B\n\
+         x\\u{1b}[2Jy         1\n\
+         a\\u{202e}b\\u{200b}  2\n\
+         c\\u{9b}d\\u{feff}    3\n\
+         Søren 中文            4\n",
+        "escaped, padded by escaped width, printable text unchanged"
+    );
+}
+
+#[tokio::test]
+async fn user_list_escapes_control_and_format_characters_in_names() {
+    let (dir, running) = admin_server().await;
+    let client = AdminClient::connect(running.admin_socket()).await.unwrap();
+    let body = json!({
+        "username": "eve",
+        "display_name": "Eve\u{1b}[31m\u{202e}gnp.exe",
+        "password": "pw-123456",
+    });
+    let r = client
+        .send(Verb::Post, "/api/v1/users", Some(&body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 201, "{}", r.text());
+    let (result, out) = admin(dir.path(), &["user", "list"], "").await;
+    result.unwrap();
+    assert!(
+        !out.contains('\u{1b}') && !out.contains('\u{202e}'),
+        "no raw control or format character reaches the terminal: {out:?}"
+    );
+    assert!(out.contains("Eve\\u{1b}[31m\\u{202e}gnp.exe"), "{out}");
+    running.shutdown().await;
+}
+
 fn password_line(stdout: &str) -> Option<String> {
     stdout
         .lines()

@@ -2,4 +2,6 @@
 [advisories]
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa via openidconnect: Potluck only verifies ID-token signatures with public keys, and the Marvin timing attack targets private-key operations; openidconnect 4.1 requires rsa 0.9" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable; it reaches Potluck only through oauth2 and openidconnect, which pin it, and Potluck never calls it" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime is unmaintained, not vulnerable; it reaches Potluck only through dbento-rules, whose owner session was asked to drop it" },
 ]

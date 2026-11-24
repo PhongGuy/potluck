@@ -14,6 +14,7 @@ use crate::common::{
 };
 
 const TOKEN: &str = "plk_writer_token_000000000000000000000000000";
+const ADMIN: &str = "plk_admin_token_0000000000000000000000000000";
 const ENV_YML: &[u8] = include_bytes!("fixtures/secret-check/bad/env-secret-valued.yml");
 const AWS: &[u8] = include_bytes!("fixtures/secret-check/bad/aws-access-key.txt");
 
@@ -22,6 +23,7 @@ async fn apinata_server(extra_env: &[(&str, &str)]) -> (GitServer, std::path::Pa
     let mut access = TestAccess::new()
         .workspace("core", "api")
         .grant(TOKEN, "core", "api", Role::Write)
+        .grant(ADMIN, "core", "api", Role::Admin)
         .hook_env("POTLUCK_KIND", "apinata");
     for (k, v) in extra_env {
         access = access.hook_env(k, v);
@@ -557,6 +559,55 @@ async fn a_writer_cannot_force_push_or_delete_the_default_branch_over_http() {
         Some(TOKEN),
         &["push", "-q", "--delete", &url, "topic"],
     ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn git_refuses_to_delete_the_default_branch_even_for_an_admin() {
+    // TestAccess hands the hook no role of its own, so the admin's role is passed as the real
+    // resolver would pass it.
+    let (server, home, url) = apinata_server(&[
+        ("POTLUCK_DEFAULT_BRANCH", "main"),
+        ("POTLUCK_ROLE", "admin"),
+    ])
+    .await;
+    let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
+    ok(git(
+        &home,
+        Some(&work),
+        Some(ADMIN),
+        &["push", "-q", &url, "main"],
+    ));
+    let landed = work_head(&home, &work);
+    // A repo-level setting must not reopen the delete: the server's -c wins over it.
+    ok(git(
+        &home,
+        Some(&home),
+        None,
+        &[
+            "--git-dir",
+            repo(&server).to_str().unwrap(),
+            "config",
+            "receive.denyDeleteCurrent",
+            "ignore",
+        ],
+    ));
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(ADMIN),
+        &["push", "--porcelain", "--delete", &url, "main"],
+    ));
+    assert!(
+        output.contains("deletion of the current branch prohibited"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("potluck-reject"),
+        "the hook passes an admin: {output}"
+    );
+    assert_eq!(server_main(&server, &home), Some(landed));
 }
 
 #[tokio::test(flavor = "multi_thread")]

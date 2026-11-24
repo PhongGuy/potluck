@@ -4,10 +4,12 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use potluck::backup::{BackupError, BackupOptions, Phase, Written, write_backup};
+use reqwest::Method;
+use serde_json::json;
 
 use crate::common::{
-    FullServer, api_admin, api_team, api_workspace, config_for, full_server, git, ok, repo_path,
-    work_tree,
+    FullServer, api_admin, api_team, api_user, api_workspace, call, config_for, full_server, git,
+    ok, repo_path, work_tree,
 };
 
 fn options() -> BackupOptions {
@@ -169,4 +171,259 @@ async fn refusals_come_before_any_copy() {
     let err = backup_with(data.clone(), huge, |_| {}).await.unwrap_err();
     assert!(matches!(err, BackupError::NoSpace { .. }), "{err}");
     assert!(!data.join("tmp/backup").exists(), "nothing staged");
+}
+
+fn backup_db(tar: &[u8]) -> (tempfile::TempDir, rusqlite::Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    unpack(tar, dir.path());
+    let conn = rusqlite::Connection::open(dir.path().join("server.db")).unwrap();
+    (dir, conn)
+}
+
+fn count(conn: &rusqlite::Connection, sql: &str) -> i64 {
+    conn.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+fn delete_ws(api: &str, token: &str, ws: &str) {
+    let rt = tokio::runtime::Handle::current();
+    let (status, body) = rt.block_on(call(
+        &format!("{api}/workspaces/core/{ws}"),
+        Method::DELETE,
+        Some(token),
+        None,
+    ));
+    assert_eq!(status, 204, "delete {ws}: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspaces_created_deleted_or_recreated_mid_backup_are_absent() {
+    let (server, root, _) = three_workspaces().await;
+    let api = server.api("");
+    let rt = tokio::runtime::Handle::current();
+    let (r, a) = (root.clone(), api.clone());
+    let (written, tar) = backup_with(server.dir.path().to_path_buf(), options(), move |phase| {
+        if let Phase::ReposCopied = phase {
+            rt.block_on(api_workspace(&a, &r, "core", "late", true));
+            delete_ws(&a, &r, "fresh");
+            delete_ws(&a, &r, "seeded");
+            rt.block_on(api_workspace(&a, &r, "core", "seeded", false));
+        }
+    })
+    .await
+    .unwrap();
+    let (dir, conn) = backup_db(&tar);
+    let mut rows: Vec<String> = conn
+        .prepare("SELECT slug FROM workspaces ORDER BY slug")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    rows.sort();
+    assert_eq!(rows, ["pushed"], "only the untouched workspace");
+    for ws in ["late", "fresh", "seeded"] {
+        assert!(
+            !repo_path(dir.path(), "core", ws).exists(),
+            "{ws} repository absent"
+        );
+    }
+    assert_eq!(written.workspaces, 1);
+    assert_eq!(
+        written.dropped_rows, 2,
+        "late (no copy) and recreated seeded"
+    );
+    assert_eq!(
+        written.dropped_repos, 2,
+        "fresh (no row) and the old seeded copy"
+    );
+    let lines: Vec<String> = written.left_out.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        lines,
+        [
+            "left out: core/fresh (deleted during the backup)",
+            "left out: core/late (created during the backup)",
+            "left out: core/seeded (deleted during the backup)",
+        ],
+        "one line per left-out workspace"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM grants g LEFT JOIN workspaces w ON w.id = g.workspace_id WHERE w.id IS NULL"
+        ),
+        0,
+        "no dangling grants"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_workspace_whose_branch_is_deleted_and_pruned_mid_backup_stays() {
+    let (server, root, home) = three_workspaces().await;
+    let url = server.git_url("core", "pushed");
+    let work = home.join("work");
+    // `topic` carries a commit of its own, so deleting it leaves objects for the prune to remove.
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["checkout", "-q", "-b", "topic"],
+    ));
+    std::fs::write(work.join("topic.txt"), "only on topic\n").unwrap();
+    ok(git(&home, Some(&work), None, &["add", "topic.txt"]));
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["commit", "-q", "-m", "topic"],
+    ));
+    ok(git(
+        &home,
+        Some(&work),
+        Some(&root),
+        &["push", "-q", &url, "topic"],
+    ));
+    ok(git(&home, Some(&work), None, &["checkout", "-q", "main"]));
+    let src = repo_path(server.dir.path(), "core", "pushed");
+    let (h, w, u, r) = (home.clone(), work.clone(), url.clone(), root.clone());
+    let (written, tar) = backup_with(server.dir.path().to_path_buf(), options(), move |phase| {
+        if let Phase::ReposCopied = phase {
+            ok(git(
+                &h,
+                Some(&w),
+                Some(&r),
+                &["push", "-q", &u, ":refs/heads/topic"],
+            ));
+            ok(git(
+                &h,
+                Some(&h),
+                None,
+                &[
+                    "--git-dir",
+                    src.to_str().unwrap(),
+                    "gc",
+                    "-q",
+                    "--prune=now",
+                ],
+            ));
+        }
+    })
+    .await
+    .unwrap();
+    let (_dir, conn) = backup_db(&tar);
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM workspaces WHERE slug = 'pushed'"
+        ),
+        1,
+        "still backed up"
+    );
+    assert_eq!(written.dropped_rows, 0);
+    assert!(
+        written.left_out.is_empty(),
+        "nothing left out: {:?}",
+        written.left_out
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_backup_never_carries_an_armed_override_or_a_stale_import_flag() {
+    let (server, root, _) = three_workspaces().await;
+    let (_, _bob) = api_user(server.db(), "bob").await;
+    let (status, body) = call(
+        &server.api("/workspaces/core/seeded/overrides"),
+        Method::POST,
+        Some(&root),
+        Some(json!({"for_user": "bob", "reason": "pending import"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    // The push to `pushed` cleared its flag; set it again as if its bookkeeping had not landed.
+    let live = rusqlite::Connection::open(server.dir.path().join("server.db")).unwrap();
+    live.busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    live.execute(
+        "UPDATE workspaces SET import_pending = 1 WHERE slug = 'pushed'",
+        [],
+    )
+    .unwrap();
+    let (written, tar) = backup_with(server.dir.path().to_path_buf(), options(), |_| {})
+        .await
+        .unwrap();
+    let (_dir, conn) = backup_db(&tar);
+    assert_eq!(written.disarmed, 1);
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT count(*) FROM overrides WHERE consumed_at IS NULL"
+        ),
+        0,
+        "no armed override"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT import_pending FROM workspaces WHERE slug = 'pushed'"
+        ),
+        0,
+        "has refs: cleared"
+    );
+    assert_eq!(
+        count(
+            &conn,
+            "SELECT import_pending FROM workspaces WHERE slug = 'fresh'"
+        ),
+        1,
+        "empty: still pending"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_push_held_in_pre_receive_is_not_in_the_backup_and_then_lands() {
+    let (server, root, home) = three_workspaces().await;
+    let marks = server.dir.path().join("marks");
+    std::fs::create_dir_all(&marks).unwrap();
+    let m = marks.display();
+    crate::common::write_hook(
+        &server.hooks_dir(),
+        &format!("touch '{m}/started'\nwhile [ ! -e '{m}/release' ]; do sleep 0.05; done\nexit 0"),
+    );
+    let src = repo_path(server.dir.path(), "core", "pushed");
+    let before = refs(&src);
+    let work = home.join("work");
+    std::fs::write(work.join("README"), "two\n").unwrap();
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["commit", "-q", "-am", "two"],
+    ));
+    let (h, w, u, r) = (
+        home.clone(),
+        work.clone(),
+        server.git_url("core", "pushed"),
+        root.clone(),
+    );
+    let push = std::thread::spawn(move || git(&h, Some(&w), Some(&r), &["push", "-q", &u, "main"]));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !marks.join("started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hook never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let (_, tar) = backup_with(server.dir.path().to_path_buf(), options(), |_| {})
+        .await
+        .unwrap();
+    let restored = tempfile::tempdir().unwrap();
+    unpack(&tar, restored.path());
+    assert_eq!(
+        refs(&repo_path(restored.path(), "core", "pushed")),
+        before,
+        "the held push is not in the backup"
+    );
+    std::fs::write(marks.join("release"), b"").unwrap();
+    ok(push.join().unwrap());
+    assert_ne!(refs(&src), before, "the push landed after the backup");
 }

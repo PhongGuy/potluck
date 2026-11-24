@@ -4,11 +4,10 @@
 //! database is snapshotted with SQLite's backup API, and the staged tree is written as a tar.
 
 mod archive;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by write_backup"))]
 mod copy;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired by write_backup"))]
 mod snapshot;
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
@@ -66,6 +65,44 @@ pub struct Written {
     pub dropped_repos: usize,
     /// Armed overrides removed from the staged database.
     pub disarmed: usize,
+    /// Workspaces left out because they changed during the backup, sorted, one entry each.
+    pub left_out: Vec<LeftOut>,
+}
+
+/// A workspace the backup left out because it changed while the backup ran.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LeftOut {
+    /// The team's slug.
+    pub team: String,
+    /// The workspace's slug.
+    pub workspace: String,
+    /// Why it was left out.
+    pub reason: LeftOutReason,
+}
+
+/// Why a workspace was left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LeftOutReason {
+    /// It was deleted, or deleted and created again, while the backup ran.
+    Deleted,
+    /// It was created after the repositories were copied.
+    Created,
+}
+
+impl std::fmt::Display for LeftOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let why = match self.reason {
+            LeftOutReason::Deleted => "deleted",
+            LeftOutReason::Created => "created",
+        };
+        write!(
+            f,
+            "left out: {}/{} ({why} during the backup)",
+            self.team, self.workspace
+        )
+    }
 }
 
 /// Why a backup was refused or failed. A failure after the tar started means the output is
@@ -157,10 +194,35 @@ pub fn write_backup(
     check_space(data, &db, options.reserve_bytes)?;
 
     let staging = Staging::clear(data.join("tmp").join("backup"))?;
-    let workspaces = copy_repos(data, git, &db, &staging.0)?;
+    let (mark, mut left_out) = copy_repos(data, git, &db, &staging.0)?;
     on_phase(Phase::ReposCopied);
-    snapshot::snapshot(&db, &staging.0.join("server.db"))?;
+    let staged_db = staging.0.join("server.db");
+    snapshot::snapshot(&db, &staged_db)?;
     on_phase(Phase::DbSnapshotted);
+
+    let repos = staging.0.join("repos");
+    let states = staged_states(git, &repos)?;
+    let reconciled = snapshot::reconcile(&staged_db, &mark, &|team, ws| {
+        states
+            .get(&(team.to_owned(), ws.to_owned()))
+            .copied()
+            .unwrap_or(snapshot::StagedRepo::Missing)
+    })?;
+    // A staged copy whose row the snapshot dropped or never had belongs to a workspace deleted
+    // during the backup; a deletion wins over a creation when both name the same workspace.
+    let mut dropped_repos = 0;
+    for (team, ws) in states.into_keys() {
+        if reconciled.kept.iter().any(|(t, w)| *t == team && *w == ws) {
+            continue;
+        }
+        remove_dir(&repos.join(&team).join(format!("{ws}.git")))?;
+        dropped_repos += 1;
+        left_out.insert((team, ws), LeftOutReason::Deleted);
+    }
+    for key in reconciled.created {
+        left_out.entry(key).or_insert(LeftOutReason::Created);
+    }
+    remove_empty_teams(&repos)?;
 
     // The archive writer reads staging and writes `out`; only a failure of `out` itself is an
     // output error, anything else is a read of the staged tree.
@@ -179,8 +241,18 @@ pub fn write_backup(
         }
     })?;
     Ok(Written {
-        workspaces,
-        ..Written::default()
+        workspaces: reconciled.kept.len(),
+        dropped_rows: reconciled.dropped_rows,
+        dropped_repos,
+        disarmed: reconciled.disarmed,
+        left_out: left_out
+            .into_iter()
+            .map(|((team, workspace), reason)| LeftOut {
+                team,
+                workspace,
+                reason,
+            })
+            .collect(),
     })
 }
 
@@ -271,12 +343,20 @@ fn tree_size(path: &Path) -> Result<u64, BackupError> {
     Ok(size)
 }
 
-/// Copies every live workspace's repository into `<staging>/repos/<team>/<ws>.git`; returns how
-/// many were staged. A copy that fails for a workspace whose row is gone was deleted during the
-/// backup and is skipped; any other failure aborts.
-fn copy_repos(data: &Path, git: &Path, db: &Path, staging: &Path) -> Result<usize, BackupError> {
-    let (rows, _mark) = snapshot::live(db)?;
-    let mut staged = 0;
+/// Workspaces left out so far, keyed by (team, ws) so each is named once and sorted.
+type LeftOutSet = BTreeMap<(String, String), LeftOutReason>;
+
+/// Copies every live workspace's repository into `<staging>/repos/<team>/<ws>.git`; returns the
+/// listing's audit mark and the workspaces skipped. A copy that fails for a workspace whose row
+/// is gone was deleted during the backup and is skipped; any other failure aborts.
+fn copy_repos(
+    data: &Path,
+    git: &Path,
+    db: &Path,
+    staging: &Path,
+) -> Result<(snapshot::Mark, LeftOutSet), BackupError> {
+    let (rows, mark) = snapshot::live(db)?;
+    let mut skipped = LeftOutSet::new();
     for (team, ws) in rows {
         let name = format!("{ws}.git");
         let src = data.join("repos").join(&team).join(&name);
@@ -287,8 +367,11 @@ fn copy_repos(data: &Path, git: &Path, db: &Path, staging: &Path) -> Result<usiz
             source,
         })?;
         match copy::copy_repo(git, &src, &dst) {
-            Ok(()) => staged += 1,
-            Err(_) if !snapshot::row_exists(db, &team, &ws)? => remove_dir(&dst)?,
+            Ok(()) => {}
+            Err(_) if !snapshot::row_exists(db, &team, &ws)? => {
+                remove_dir(&dst)?;
+                skipped.insert((team, ws), LeftOutReason::Deleted);
+            }
             Err(failed) => {
                 return Err(BackupError::Git {
                     workspace: format!("{team}/{ws}"),
@@ -298,7 +381,61 @@ fn copy_repos(data: &Path, git: &Path, db: &Path, staging: &Path) -> Result<usiz
             }
         }
     }
-    Ok(staged)
+    Ok((mark, skipped))
+}
+
+/// What each staged repository under `repos` holds, keyed by (team, ws).
+fn staged_states(
+    git: &Path,
+    repos: &Path,
+) -> Result<BTreeMap<(String, String), snapshot::StagedRepo>, BackupError> {
+    let mut states = BTreeMap::new();
+    for team in read_dir(repos)? {
+        let team_name = team.file_name().to_string_lossy().into_owned();
+        for repo in read_dir(&team.path())? {
+            let name = repo.file_name().to_string_lossy().into_owned();
+            let Some(ws) = name.strip_suffix(".git") else {
+                continue;
+            };
+            let path = repo.path();
+            let state = match copy::has_refs(git, &path) {
+                Ok(true) => snapshot::StagedRepo::WithRefs,
+                Ok(false) => snapshot::StagedRepo::Empty,
+                Err(failed) => {
+                    return Err(BackupError::Git {
+                        workspace: format!("{team_name}/{ws}"),
+                        step: failed.step,
+                        stderr: failed.stderr,
+                    });
+                }
+            };
+            states.insert((team_name.clone(), ws.to_owned()), state);
+        }
+    }
+    Ok(states)
+}
+
+/// Removes each team directory under `repos` that no staged repository is left in.
+fn remove_empty_teams(repos: &Path) -> Result<(), BackupError> {
+    for team in read_dir(repos)? {
+        let path = team.path();
+        if read_dir(&path)?.is_empty() {
+            fs::remove_dir(&path).map_err(|source| BackupError::Io { path, source })?;
+        }
+    }
+    Ok(())
+}
+
+/// The entries of `dir`.
+fn read_dir(dir: &Path) -> Result<Vec<fs::DirEntry>, BackupError> {
+    let io_err = |source| BackupError::Io {
+        path: dir.to_path_buf(),
+        source,
+    };
+    fs::read_dir(dir)
+        .map_err(io_err)?
+        .collect::<Result<_, _>>()
+        .map_err(io_err)
 }
 
 /// Removes `dir` and everything under it; an absent `dir` is fine.

@@ -524,6 +524,49 @@ fn the_smoke_test_checks_reaping_and_a_graceful_stop() {
     }
 }
 
+/// The stub answers no port, so the script exits right after the first run; the EXIT trap must
+/// still remove the restore container and volume as well as the first ones.
+#[test]
+fn the_smoke_cleanup_removes_the_restore_container_and_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, calls) = smoke_script(dir.path(), "smoke", "localhost/potluck:stub");
+    let removed: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.starts_with("rm -f ") || l.starts_with("volume rm -f "))
+        .collect();
+    for needle in ["-restore", "-restore-data"] {
+        assert!(
+            removed.iter().any(|l| l.contains(needle)),
+            "cleanup does not remove the {needle} resource: {calls}"
+        );
+    }
+    assert!(removed.len() >= 4, "cleanup removes too little: {calls}");
+}
+
+#[test]
+fn the_smoke_test_backs_up_restores_and_clones() {
+    let script = fs::read_to_string(repo_root().join("scripts/container-smoke.sh")).unwrap();
+    for needle in [
+        "potluck admin backup",
+        "--password-stdin",
+        "--entrypoint tar",
+        "ls-remote",
+        "clone",
+        "http.extraHeader",
+    ] {
+        assert!(script.contains(needle), "smoke script lacks {needle:?}");
+    }
+    // The call site, not the function body, must come before the first container stops.
+    let call = script
+        .find("backup_round_trip \"$port\"")
+        .expect("smoke() does not call backup_round_trip");
+    let stop = script.find("stop -t 20").expect("no graceful stop");
+    assert!(
+        call < stop,
+        "the backup must run while the first container is live"
+    );
+}
+
 #[test]
 fn the_readme_and_the_notices_cover_tini() {
     let notices = fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
@@ -582,4 +625,36 @@ fn the_metrics_port_is_documented_on_loopback_and_never_exposed() {
     );
     assert!(section.contains("-p 127.0.0.1:9464:9464"), "{section}");
     assert!(section.contains("no authentication"), "{section}");
+}
+
+#[test]
+fn the_readme_backs_up_a_running_server_through_a_part_file() {
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let blocks = backup_blocks(&readme);
+    for engine in ["podman", "docker"] {
+        let line = format!(
+            "{engine} exec potluck potluck admin backup > potluck-data.tar.part && mv potluck-data.tar.part potluck-data.tar"
+        );
+        assert!(
+            blocks.iter().any(|b| b.contains(&line)),
+            "{engine} online backup block: {blocks:#?}"
+        );
+    }
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| b.contains("exec -t") || b.contains("exec -it")),
+        "a tty corrupts the tar"
+    );
+    let start = readme.find("## Backups").unwrap();
+    let rest = &readme[start..];
+    let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+    assert!(
+        section.contains("password and token hashes"),
+        "the storage warning"
+    );
+    assert!(
+        section.contains("armed override") && section.contains("re-arm"),
+        "armed overrides are not kept; an admin re-arms after a restore: {section}"
+    );
 }

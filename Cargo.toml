@@ -31,13 +31,14 @@ prometheus-client = { version = "=0.26.0", default-features = false }
 potluck-kind = { path = "crates/potluck-kind" }
 regex = "=1.13.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls"] }
-rusqlite = { version = "=0.42.0", features = ["bundled"] }
-rustix = { version = "=1.1.6", default-features = false, features = ["std", "process"] }
+rusqlite = { version = "=0.42.0", features = ["bundled", "backup"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "process", "fs"] }
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.11.1"
 subtle = "=2.6.1"
+tar = { version = "=0.4.46", default-features = false }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "io-util", "time", "process", "fs"] }
@@ -45,7 +46,7 @@ tokio-util = { version = "=0.7.20", features = ["io-util", "rt"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
-url = "=2.5.8"
+url = "=2.5.9"
 
 [patch."https://github.com/PhongGuy/potluck"]
 potluck-kind = { path = "crates/potluck-kind" }

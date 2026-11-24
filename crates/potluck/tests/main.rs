@@ -27,6 +27,7 @@ mod api_system;
 mod audit_api;
 mod audit_wiring;
 mod authenticate;
+mod backup;
 mod branch_protection;
 mod cli_version;
 mod config;

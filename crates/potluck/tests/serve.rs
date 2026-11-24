@@ -751,3 +751,19 @@ async fn dropping_a_running_server_frees_the_data_dir_lock() {
     };
     again.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_start_empties_hook_reports_and_leaves_the_rest_of_tmp() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    std::fs::create_dir_all(config.hook_reports_dir()).unwrap();
+    let stale = config.hook_reports_dir().join("report-stale");
+    std::fs::write(&stale, b"secret_env_file env_file\n").unwrap();
+    let other = config.tmp_dir().join("keep-me");
+    std::fs::write(&other, b"x").unwrap();
+    let running = start(&config).await.unwrap();
+    assert!(!stale.exists(), "a killed push's report is gone");
+    assert!(other.exists(), "only hook-reports is emptied");
+    assert!(config.hook_reports_dir().is_dir());
+    running.shutdown().await;
+}

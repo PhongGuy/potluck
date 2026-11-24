@@ -210,6 +210,11 @@ impl Config {
     pub fn tmp_dir(&self) -> PathBuf {
         self.data.join("tmp")
     }
+
+    /// `<data>/tmp/hook-reports`: where each receive-pack's hook writes its refusal report.
+    pub fn hook_reports_dir(&self) -> PathBuf {
+        self.tmp_dir().join(crate::git::report::DIR_NAME)
+    }
 }
 
 /// Why `serve` flags were refused.

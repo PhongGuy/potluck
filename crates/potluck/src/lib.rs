@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod api;
 pub mod auth;
+pub mod backup;
 pub mod cli;
 pub mod clock;
 pub mod config;
@@ -11,7 +12,6 @@ pub mod git;
 pub mod health_check;
 pub mod hooks;
 pub mod kinds;
-#[allow(dead_code)]
 mod metrics;
 pub mod notices;
 pub mod oidc;

@@ -196,6 +196,10 @@ These families record today:
 - `potluck_git_slots_in_use` and `potluck_git_slots_limit`: git slots held now and configured.
 - `potluck_db_queue_depth`: database jobs waiting to run.
 - `potluck_update_available` and `potluck_update_checks_total`: whether a newer release was found, and update checks by outcome.
+- `potluck_git_requests_total`: git requests that reached the git engine, by service (`advertise`, `upload_pack`, `receive_pack`) and outcome (`ok`, `busy`, `overran`, `failed`).
+- `potluck_git_slot_wait_seconds`: a histogram of how long each git request waited for a slot, whether or not it got one.
+- `potluck_pushes_total`: pushes by outcome (`accepted`, `refused`).
+- `potluck_push_refusals_total`: refusal findings from the push check, by code, rule and workspace kind. Past 128 distinct rules, new ones record as `other`.
 
 Any Prometheus-compatible scraper reads it. With Grafana Alloy, the default `prometheus.scrape` settings accept OpenMetrics:
 
@@ -210,7 +214,23 @@ The example assumes a `prometheus.remote_write "default"` component is defined e
 
 ## Backups
 
-Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. The one-liners, `compose.yaml` and the Quadlet unit all use that same volume name. Stop the server so the copy is consistent, export the volume, then start it again.
+Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. The one-liners, `compose.yaml` and the Quadlet unit all use that same volume name.
+
+`potluck admin backup` copies a running server without stopping it. It writes a consistent tar of the database and the repositories to stdout, and prints a summary line on stderr, plus a `left out:` line for each workspace created or deleted while it ran. Run it without `-t`, because a terminal would corrupt the tar; the command refuses to write to one. Writing to a `.part` file and renaming it only on success keeps a failed run from replacing a good backup:
+
+```sh
+podman exec potluck potluck admin backup > potluck-data.tar.part && mv potluck-data.tar.part potluck-data.tar
+```
+
+With docker:
+
+```sh
+docker exec potluck potluck admin backup > potluck-data.tar.part && mv potluck-data.tar.part potluck-data.tar
+```
+
+The copy is staged inside the volume first, so the volume needs room for a second copy of the data plus a reserve; `--reserve-bytes` (or `POTLUCK_BACKUP_RESERVE_BYTES`) sets that reserve. The tar holds the password and token hashes, so store it as carefully as the volume itself. Armed overrides are not kept: the backup disarms every armed override that has not been used yet, so after a restore an admin re-arms any override still needed. The tar restores with the same steps as an offline backup, below.
+
+To back up offline instead, stop the server so the copy is consistent, export the volume, then start it again.
 
 With podman, for a container started with `podman run` or `podman compose`:
 

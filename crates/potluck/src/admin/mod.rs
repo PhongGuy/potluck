@@ -8,14 +8,15 @@ pub mod teams;
 pub mod update;
 pub mod users;
 
-use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::io::{self, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
 use self::client::{AdminClient, ApiResponse, Verb};
+use crate::backup::{BackupError, BackupOptions, Written, write_backup};
 use crate::slug::{Slug, SlugError};
 
 /// `potluck admin`: one API call per verb, as the `system` actor.
@@ -30,6 +31,13 @@ pub struct AdminArgs {
     json: bool,
     #[command(subcommand)]
     noun: Noun,
+}
+
+impl AdminArgs {
+    /// Whether this is `admin backup`, whose stdout must not be a terminal.
+    pub fn is_backup(&self) -> bool {
+        matches!(self.noun, Noun::Backup(_))
+    }
 }
 
 /// What to manage.
@@ -59,6 +67,20 @@ pub enum Noun {
     Update(update::UpdateCmd),
     /// The server's audit log, newest first.
     Audit(audit::AuditArgs),
+    /// Write a consistent backup of this data directory to stdout as a tar.
+    Backup(BackupArgs),
+}
+
+/// Write a consistent backup of this data directory to stdout as a tar.
+#[derive(clap::Args, Debug)]
+#[non_exhaustive]
+pub struct BackupArgs {
+    /// The git binary to run.
+    #[arg(long, env = "POTLUCK_GIT", default_value = "git")]
+    git: PathBuf,
+    /// Free bytes that must remain on the volume after staging.
+    #[arg(long, env = "POTLUCK_BACKUP_RESERVE_BYTES")]
+    reserve_bytes: Option<u64>,
 }
 
 /// Why a command failed; `main` prints it after `error: `.
@@ -122,6 +144,57 @@ pub enum AdminError {
     /// The OS random number generator failed while generating a password.
     #[error("cannot generate a password: the OS random number generator failed")]
     Rng,
+    /// The backup was refused or failed.
+    #[error(transparent)]
+    Backup(#[from] BackupError),
+}
+
+/// Streams the tar to `stdout`, then reports the summary and each left-out workspace on stderr.
+fn backup(data: &Path, args: &BackupArgs, stdout: &mut dyn Write) -> Result<(), AdminError> {
+    let options = match args.reserve_bytes {
+        Some(bytes) => BackupOptions::default().with_reserve_bytes(bytes),
+        None => BackupOptions::default(),
+    };
+    let mut out = BufWriter::new(stdout);
+    let written = write_backup(data, &args.git, &options, &mut out, &mut |_| {})?;
+    out.flush().map_err(BackupError::Output)?;
+    let mut report = summary(&written);
+    for left in &written.left_out {
+        report.push_str(&format!("{left}\n"));
+    }
+    io::stderr()
+        .lock()
+        .write_all(report.as_bytes())
+        .map_err(AdminError::Output)
+}
+
+/// `backed up N workspaces`, with the dropped and disarmed counts only when non-zero.
+fn summary(written: &Written) -> String {
+    fn count(n: usize, one: &str, many: &str) -> String {
+        format!("{n} {}", if n == 1 { one } else { many })
+    }
+    let mut line = format!(
+        "backed up {}",
+        count(written.workspaces, "workspace", "workspaces")
+    );
+    let mut dropped = Vec::new();
+    if written.dropped_rows > 0 {
+        dropped.push(count(written.dropped_rows, "row", "rows"));
+    }
+    if written.dropped_repos > 0 {
+        dropped.push(count(written.dropped_repos, "repository", "repositories"));
+    }
+    if !dropped.is_empty() {
+        line.push_str(&format!("; dropped {}", dropped.join(", ")));
+    }
+    if written.disarmed > 0 {
+        line.push_str(&format!(
+            "; disarmed {}",
+            count(written.disarmed, "override", "overrides")
+        ));
+    }
+    line.push('\n');
+    line
 }
 
 fn field_note(field: Option<&str>) -> String {
@@ -152,6 +225,8 @@ pub async fn run(
         Noun::Override(cmd) => access::run_override(cmd, &mut cx).await,
         Noun::Update(cmd) => update::run(cmd, &mut cx).await,
         Noun::Audit(args) => audit::run(args, &mut cx).await,
+        // The backup reads the data directory itself; the client never connects.
+        Noun::Backup(backup_args) => backup(&args.data, &backup_args, cx.out),
     }
 }
 

@@ -314,6 +314,7 @@ pub struct GitServer {
     pub repos: Repos,
     pub db: Db,
     pub notices: Notices,
+    pub metrics: Option<SocketAddr>,
     _running: Running,
 }
 
@@ -371,6 +372,7 @@ pub async fn git_server_at(
         repos,
         db,
         notices,
+        metrics: running.metrics_addr(),
         _running: running,
     }
 }
@@ -418,6 +420,7 @@ pub async fn git_server_with(server: GitServer, access: TestAccess) -> GitServer
         repos,
         db,
         notices,
+        metrics: running.metrics_addr(),
         _running: running,
     }
 }

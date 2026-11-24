@@ -19,7 +19,9 @@ use crate::api::error::{ApiError, ApiResult};
 use crate::git::access::{Access, PushContext};
 use crate::git::engine::PushObserver;
 use crate::git::push::RefMove;
+use crate::git::report::HookReport;
 use crate::git::{GitError, Service};
+use crate::metrics::PushOutcome;
 use crate::role::Role;
 use crate::slug::Slug;
 
@@ -128,12 +130,27 @@ async fn rpc(
     Ok(git_response(service.result_type(), out))
 }
 
-/// Hands a push's confirmed moves to the bookkeeping, then to the admin re-check of `repo`. It
-/// runs on the reaper task, so both are spawned rather than awaited.
+/// Counts the push and its refusals, then hands its confirmed moves to the bookkeeping and the
+/// admin re-check of `repo`. It runs on the reaper task, so both are spawned rather than awaited.
 fn observer(state: &AppState, ctx: PushContext, repo: PathBuf, role: Role) -> PushObserver {
     let state = state.clone();
     let tasks = state.git().tasks().clone();
-    Box::new(move |moves: Vec<RefMove>| {
+    Box::new(move |moves: Vec<RefMove>, report: HookReport| {
+        // A refused push counts once plus once per rule; a push with no report and no moves
+        // (nothing changed, or the report was lost) counts as neither.
+        let metrics = state.metrics();
+        if report.refused() {
+            let kind = ctx
+                .workspace_kind()
+                .and_then(crate::kinds::by_name)
+                .map_or("none", |rules| rules.kind());
+            metrics.push(PushOutcome::Refused);
+            for (code, rule) in report.refusals() {
+                metrics.refusal(code, rule, kind);
+            }
+        } else if !moves.is_empty() {
+            metrics.push(PushOutcome::Accepted);
+        }
         // The re-check needs the moves after the record has consumed them, and only an admin
         // or override push is re-checked, so only that push copies them.
         let updates = if role == Role::Admin || ctx.armed_override().is_some() {

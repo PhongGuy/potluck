@@ -2518,6 +2518,33 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_override_recheck_logs_a_ref_outside_heads_and_tags() {
+        const WORKSPACE: i64 = 919_200;
+        let logs = global_logs();
+        let dir = tempfile::tempdir().unwrap();
+        // Ref names alone decide, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let line = format!("{} {} refs/notes/x", "0".repeat(40), "b".repeat(40));
+        let create =
+            vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
+            .override_id(Some(5))
+            .default_branch("main");
+        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), create).await;
+        let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .find(|l| {
+                l.contains("ref outside heads and tags written")
+                    && l.contains(&format!("workspace_id={WORKSPACE}"))
+            })
+            .unwrap_or_else(|| panic!("{text}"));
+        for needle in ["override_id=5", "bob", "refs/notes/x"] {
+            assert!(line.contains(needle), "{needle} in {line}");
+        }
+    }
+
     use crate::metrics::{Metrics, Snapshot, sample};
 
     fn git_count(m: &Metrics, service: &str, outcome: &str) -> f64 {

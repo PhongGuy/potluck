@@ -470,14 +470,16 @@ impl GitEngine {
         }
     }
 
-    /// git with the hardening flags and a clean environment; the caller appends the
-    /// service-specific flags and the repository path.
+    /// git with the hardening flags (fsck, and no deleting HEAD's branch for anyone) and a clean
+    /// environment; the caller appends the service-specific flags and the repository path.
     fn command(&self, service: Service, v2: bool, extra_env: &[(String, String)]) -> Command {
         let mut cmd = Command::new(self.repos.git());
         cmd.arg("-c")
             .arg(format!("core.hooksPath={}", self.hooks_dir.display()))
             .arg("-c")
             .arg("receive.fsckObjects=true")
+            .arg("-c")
+            .arg("receive.denyDeleteCurrent=refuse")
             .arg(service.subcommand())
             .arg("--stateless-rpc");
         // The server's own git config must never shape what is served, so the child starts from an

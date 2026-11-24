@@ -17,7 +17,9 @@ impl HookReport {
         self.refused
     }
 
-    /// (code, rule): code is a known code or "unknown"; rule matches [a-z0-9_]{1,64}.
+    /// (code, rule): code is a known code or "unknown"; rule matches [a-z0-9_]{1,64}, except a real
+    /// rule named `unknown` is `rule:unknown`, so ("unknown", "unknown") is only a report with no
+    /// valid line.
     pub(crate) fn refusals(&self) -> &[(&'static str, String)] {
         &self.refusals
     }
@@ -25,9 +27,9 @@ impl HookReport {
 
 /// Empty input: not refused. Otherwise refused; the first 64 lines of the first 8 KiB that are
 /// exactly two space-separated fields matching [a-z0-9_]{1,64} become refusals (a code outside
-/// the known set becomes "unknown"); none valid gives one ("unknown", "unknown"). When the input
-/// is longer than 8 KiB, the line the cut lands in is incomplete and dropped, unless the byte
-/// right after the cut is a newline.
+/// the known set becomes "unknown", a rule named `unknown` becomes `rule:unknown`); none valid
+/// gives one ("unknown", "unknown"). When the input is longer than 8 KiB, the line the cut lands
+/// in is incomplete and dropped, unless the byte right after the cut is a newline.
 pub(crate) fn parse(bytes: &[u8]) -> HookReport {
     if bytes.is_empty() {
         return HookReport::default();
@@ -53,6 +55,11 @@ pub(crate) fn parse(bytes: &[u8]) -> HookReport {
                 .find(|known| **known == code)
                 .copied()
                 .unwrap_or("unknown");
+            let rule = if rule == "unknown" {
+                UNKNOWN_RULE_LABEL
+            } else {
+                rule
+            };
             Some((code, rule.to_owned()))
         })
         .collect();
@@ -64,6 +71,9 @@ pub(crate) fn parse(bytes: &[u8]) -> HookReport {
         refusals,
     }
 }
+
+/// The label for a real rule named `unknown`; `:` is outside the rule charset, so no rule clashes.
+const UNKNOWN_RULE_LABEL: &str = "rule:unknown";
 
 const KNOWN_CODES: [&str; 6] = [
     "secret_env_file",
@@ -87,6 +97,17 @@ mod tests {
 
     fn pairs(r: &HookReport) -> Vec<(&str, &str)> {
         r.refusals().iter().map(|(c, r)| (*c, r.as_str())).collect()
+    }
+
+    #[test]
+    fn a_real_rule_named_unknown_is_kept_apart_from_a_malformed_report() {
+        let real = parse(b"new_code unknown\n");
+        assert_eq!(pairs(&real), [("unknown", "rule:unknown")]);
+        let known = parse(b"secret_pattern unknown\n");
+        assert_eq!(pairs(&known), [("secret_pattern", "rule:unknown")]);
+        let malformed = parse(b"not a valid line\n");
+        assert_eq!(pairs(&malformed), [("unknown", "unknown")]);
+        assert_ne!(pairs(&real), pairs(&malformed));
     }
 
     #[test]

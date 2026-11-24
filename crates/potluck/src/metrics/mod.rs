@@ -314,7 +314,8 @@ impl Metrics {
 
     /// Counts one refusal finding.
     /// `code`, `rule`, `kind` are already validated; the 129th distinct rule becomes "other", and
-    /// a rule literally named `other` records as `rule:other` so it never joins that series.
+    /// a rule literally named `other` records as `rule:other` so it never joins that series. The
+    /// report parser already maps a real rule named `unknown` to `rule:unknown`.
     pub(crate) fn refusal(&self, code: &'static str, rule: &str, kind: &'static str) {
         // A rule keeps its own series once seen, so the cap only bounds new names.
         let rule = {
@@ -615,6 +616,24 @@ mod tests {
         let text = m.render(&Snapshot::default());
         assert_eq!(sample(&text, &series("rule:other")), Some(2.0), "{text}");
         assert_eq!(sample(&text, &series("other")), Some(1.0), "{text}");
+    }
+
+    #[test]
+    fn a_rule_named_unknown_and_a_malformed_report_record_apart() {
+        let m = Metrics::new("0.1.0");
+        for bytes in [&b"new_code unknown\n"[..], &b"garbage\n"[..]] {
+            for (code, rule) in crate::git::report::parse(bytes).refusals() {
+                m.refusal(code, rule, "apinata");
+            }
+        }
+        let text = m.render(&Snapshot::default());
+        let series = |rule: &str| {
+            format!(
+                "potluck_push_refusals_total{{code=\"unknown\",rule=\"{rule}\",kind=\"apinata\"}}"
+            )
+        };
+        assert_eq!(sample(&text, &series("unknown")), Some(1.0), "{text}");
+        assert_eq!(sample(&text, &series("rule:unknown")), Some(1.0), "{text}");
     }
 
     #[test]

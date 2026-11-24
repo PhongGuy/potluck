@@ -558,3 +558,54 @@ async fn a_writer_cannot_force_push_or_delete_the_default_branch_over_http() {
         &["push", "-q", "--delete", &url, "topic"],
     ));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_cannot_push_a_notes_ref_over_http_but_an_admin_can() {
+    let notes = |server: &GitServer, home: &Path| {
+        git(
+            home,
+            Some(home),
+            None,
+            &[
+                "--git-dir",
+                repo(server).to_str().unwrap(),
+                "rev-parse",
+                "-q",
+                "--verify",
+                "refs/notes/x",
+            ],
+        )
+        .status
+        .success()
+    };
+    let (server, home, url) = apinata_server(&[("POTLUCK_DEFAULT_BRANCH", "main")]).await;
+    let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", &url, "HEAD:refs/notes/x"],
+    ));
+    assert!(
+        output.contains("remote: potluck-reject safety_relaxation refs/notes/x / ref_namespace"),
+        "{output}"
+    );
+    assert!(!notes(&server, &home), "the refused ref is absent");
+    let (server, home, url) = apinata_server(&[
+        ("POTLUCK_DEFAULT_BRANCH", "main"),
+        ("POTLUCK_ROLE", "admin"),
+    ])
+    .await;
+    let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "HEAD:refs/notes/x"],
+    ));
+    assert!(notes(&server, &home), "the admin's ref landed");
+}

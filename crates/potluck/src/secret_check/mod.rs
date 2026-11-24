@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use crate::kinds::RuleSet;
 use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
 use crate::secret_check::scan::{
-    HookEnv, ScanError, accepted_relaxations, default_branch_rewrites, report, scan,
+    HookEnv, ScanError, accepted_relaxations, default_branch_rewrites, foreign_refs, report, scan,
 };
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
@@ -146,6 +146,27 @@ pub fn log_default_branch_rewrites(
             pusher,
             "could not re-check an accepted admin push"
         ),
+    }
+}
+
+/// Logs one info line `ref outside heads and tags written` (`workspace_id`, `pusher`,
+/// `override_id`, `ref`) per update in an accepted push that `foreign_refs` names. Names alone
+/// decide, so it makes no git call and never fails.
+pub fn log_foreign_refs(
+    workspace_id: i64,
+    pusher: &str,
+    override_id: Option<i64>,
+    updates: &[RefUpdate],
+) {
+    for r in foreign_refs(updates) {
+        let ref_name = String::from_utf8_lossy(r.ref_name());
+        tracing::info!(
+            workspace_id,
+            pusher,
+            override_id,
+            "ref" = %ref_name,
+            "ref outside heads and tags written"
+        );
     }
 }
 

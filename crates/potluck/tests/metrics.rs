@@ -239,8 +239,38 @@ async fn the_address_limit_is_counted_apart_from_the_username_limit() {
         429
     );
     let text = scrape(&running).await;
-    let limited = "potluck_sign_ins_total{method=\"password\",outcome=\"rate_limited_ip\"}";
-    assert_eq!(sample(&text, limited), Some(1.0), "{text}");
+    let series = |o: &str| format!("potluck_sign_ins_total{{method=\"password\",outcome=\"{o}\"}}");
+    assert_eq!(
+        sample(&text, &series("rate_limited_ip")),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(sample(&text, &series("failure")), Some(10.0), "{text}");
+    running.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rejected_token_name_records_no_sign_in() {
+    let (_dir, db, running) = metrics_server().await;
+    create_user(&db, "alice", "right-password-1", false).await;
+    let status = client()
+        .post(format!("http://{}/api/v1/session", running.http_addr()))
+        .json(&serde_json::json!({"username": "alice", "password": "right-password-1", "token_name": " "}))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16();
+    assert_eq!(status, 422);
+    let text = scrape(&running).await;
+    // The family may list zero-valued series, but no outcome may hold a sample.
+    for line in text
+        .lines()
+        .filter(|l| l.starts_with("potluck_sign_ins_total{"))
+    {
+        let value = line.rsplit(' ').next().unwrap();
+        assert_eq!(value.parse::<f64>().unwrap(), 0.0, "{text}");
+    }
     running.shutdown().await;
 }
 
@@ -285,7 +315,15 @@ async fn a_scrape_reads_slots_queue_and_the_update_check() {
     let running = start_with_updates(&config, server.source(&key))
         .await
         .unwrap();
-    let before = scrape(&running).await;
+    // The audit pruner's start-up pass may still sit in the DB queue; an idle server drains it.
+    let mut before = scrape(&running).await;
+    for _ in 0..50 {
+        if sample(&before, "potluck_db_queue_depth") == Some(0.0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        before = scrape(&running).await;
+    }
     assert_eq!(
         sample(&before, "potluck_update_available"),
         Some(0.0),

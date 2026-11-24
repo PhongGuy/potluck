@@ -206,6 +206,8 @@ prometheus.scrape "potluck" {
 }
 ```
 
+The example assumes a `prometheus.remote_write "default"` component is defined elsewhere in the Alloy config.
+
 ## Backups
 
 Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. The one-liners, `compose.yaml` and the Quadlet unit all use that same volume name. Stop the server so the copy is consistent, export the volume, then start it again.

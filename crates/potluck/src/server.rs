@@ -187,7 +187,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             source,
         })?;
 
-    // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
+    // One stop flag shared by all three listeners, so shutdown drains them together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
     let (stop, rx) = watch::channel(false);
     let mut state = given.unwrap_or_else(|| AppState::new(db.clone(), config.clone()));

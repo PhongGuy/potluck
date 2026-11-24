@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::common::{
     FullServer, api_admin, api_team, api_user, api_workspace, call, config_for, full_server, git,
-    ok, repo_path, work_tree,
+    ok, potluck, repo_path, work_tree,
 };
 
 fn options() -> BackupOptions {
@@ -428,4 +428,81 @@ async fn a_push_held_in_pre_receive_is_not_in_the_backup_and_then_lands() {
     std::fs::write(marks.join("release"), b"").unwrap();
     ok(push.join().unwrap());
     assert_ne!(refs(&src), before, "the push landed after the backup");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_binary_streams_the_tar_and_reports_on_stderr() {
+    let (server, _, _) = three_workspaces().await;
+    let data = server.dir.path().to_path_buf();
+    let out = tokio::task::spawn_blocking(move || {
+        potluck()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .args([
+                "admin",
+                "backup",
+                "--reserve-bytes",
+                "0",
+                "--data",
+                data.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(stderr.starts_with("backed up 3 workspaces"), "{stderr}");
+    assert!(
+        !stderr.contains("left out:"),
+        "nothing raced, nothing left out: {stderr}"
+    );
+    let restored = tempfile::tempdir().unwrap();
+    let names: Vec<String> = unpack(&out.stdout, restored.path())
+        .into_iter()
+        .map(|(p, _, _)| p)
+        .collect();
+    assert_eq!(names[0], "server.db", "{names:?}");
+}
+
+#[test]
+fn a_terminal_stdout_is_refused_before_anything_else() {
+    use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
+    use std::os::unix::fs::OpenOptionsExt;
+    let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    grantpt(&master).unwrap();
+    unlockpt(&master).unwrap();
+    let name = ptsname(&master, Vec::new()).unwrap();
+    let tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NOCTTY.bits() as i32)
+        .open(name.to_str().unwrap())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = potluck()
+        .args(["admin", "backup", "--data", dir.path().to_str().unwrap()])
+        .stdout(std::process::Stdio::from(tty))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("terminal"),
+        "the terminal check comes before the missing database: {stderr}"
+    );
+}
+
+#[test]
+fn a_missing_database_fails_through_the_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = potluck()
+        .args(["admin", "backup", "--data", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no server.db"),
+        "{out:?}"
+    );
 }

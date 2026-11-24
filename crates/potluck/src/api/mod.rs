@@ -12,6 +12,7 @@ use crate::db::Db;
 use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
 use crate::notices::Notices;
+use crate::oidc::{IdpHttp, OidcState, Provider, Timings};
 use crate::update::UpdateChecker;
 
 mod actor;
@@ -41,8 +42,8 @@ pub use actor::{Actor, AuthUser};
 use error::{ApiError, ErrorResponse};
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver, the git engine, the password hasher, the sign-in rate limiters and, when a release
-/// source is wired, the update checker.
+/// resolver, the git engine, the password hasher, the sign-in rate limiters, the OIDC state when
+/// a provider is configured and, when a release source is wired, the update checker.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -54,6 +55,7 @@ pub struct AppState {
     session_limits: Arc<SessionLimits>,
     notices: Notices,
     updates: Option<UpdateChecker>,
+    oidc: Option<OidcState>,
 }
 
 impl AppState {
@@ -66,6 +68,7 @@ impl AppState {
             GitLimits::default().with_max_runtime(config.git_max_runtime()),
         ));
         let git_access = Arc::new(DbAccess::new(db.clone()));
+        let oidc = oidc_state(&config);
         AppState {
             db,
             config: Arc::new(config),
@@ -75,6 +78,7 @@ impl AppState {
             session_limits: Arc::new(SessionLimits::default()),
             notices: Notices::new(),
             updates: None,
+            oidc,
         }
     }
 
@@ -104,6 +108,18 @@ impl AppState {
     pub fn with_updates(mut self, checker: UpdateChecker) -> Self {
         self.updates = Some(checker);
         self
+    }
+
+    /// Replaces the OIDC state (tests, with a mock provider and short timings).
+    #[must_use]
+    pub fn with_oidc(mut self, oidc: OidcState) -> Self {
+        self.oidc = Some(oidc);
+        self
+    }
+
+    /// The OIDC state, when a provider is configured.
+    pub fn oidc(&self) -> Option<&OidcState> {
+        self.oidc.as_ref()
     }
 
     /// The update checker, when a release source is wired.
@@ -144,6 +160,23 @@ impl AppState {
     /// The validated server configuration.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+}
+
+/// The OIDC state for the configured provider, if any. A client that cannot be built is logged
+/// and leaves OIDC off, so the rest of the server still serves.
+fn oidc_state(config: &Config) -> Option<OidcState> {
+    let settings = config.oidc()?;
+    let https_only = url::Url::parse(settings.issuer()).is_ok_and(|url| url.scheme() == "https");
+    match IdpHttp::new(https_only) {
+        Ok(http) => Some(OidcState::new(
+            Provider::new(settings.clone(), http),
+            Timings::default(),
+        )),
+        Err(err) => {
+            tracing::error!("cannot build the OIDC client ({err}); serving without OIDC sign-in");
+            None
+        }
     }
 }
 

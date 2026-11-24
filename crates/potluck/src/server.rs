@@ -194,6 +194,19 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
     state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
     let git_tasks = state.git().tasks().clone();
+    // The provider is probed in the background, so an IdP that is down never stops the start.
+    if let Some(oidc) = state.oidc().cloned() {
+        tracing::info!(
+            issuer = %oidc.provider().settings().issuer(),
+            redirect_uri = %format_args!("{}/api/v1/oidc/callback", config.public_url()),
+            "OIDC sign-in configured"
+        );
+        tokio::spawn(async move {
+            if let Err(err) = oidc.provider().warm().await {
+                tracing::warn!("the OIDC provider did not answer at startup ({err})");
+            }
+        });
+    }
     // The pruner and the daily loop ride the git tracker and the stop flag, so shutdown ends them
     // before their wait.
     crate::retention::spawn_pruner(db.clone(), config, &git_tasks, rx.clone());

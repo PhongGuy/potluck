@@ -4,11 +4,13 @@
 mod http;
 mod provider;
 mod settings;
+mod state;
 mod store;
 
 pub use http::{IdpHttp, IdpHttpError};
 pub use provider::{IdClaims, Provider, ProviderError};
 pub use settings::{ClientSecret, OidcSettings};
+pub use state::OidcState;
 pub use store::{
     Handoff, HandoffStore, Loopback, MAX_ENTRIES, PendingSignIn, PendingStore, Taken, Timings,
 };

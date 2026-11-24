@@ -250,6 +250,40 @@ fn serve_refuses_oidc_flags_from_the_environment() {
     );
 }
 
+#[test]
+fn serve_with_oidc_starts_while_the_idp_is_down_and_logs_the_redirect_uri() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("oidc-secret");
+    std::fs::write(&secret, "s3cret-value\n").unwrap();
+    let dead = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut child = potluck()
+        .env("POTLUCK_PUBLIC_URL", "http://127.0.0.1:8080")
+        .env("POTLUCK_LISTEN", "127.0.0.1:0")
+        .env("POTLUCK_OIDC_ISSUER", format!("http://{dead}"))
+        .env("POTLUCK_OIDC_CLIENT_ID", "potluck")
+        .env("POTLUCK_OIDC_CLIENT_SECRET_FILE", &secret)
+        .args(["serve", "--data"])
+        .arg(dir.path().join("data"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let still_running = child.try_wait().unwrap().is_none();
+    child.kill().unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(still_running, "serve exited: {stderr}");
+    assert!(
+        stderr.contains("http://127.0.0.1:8080/api/v1/oidc/callback"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("s3cret-value"), "{stderr}");
+}
+
 /// Waits up to `limit` for `child` to exit, killing and reaping it if it has not, so a serve
 /// that should have refused to start fails its test instead of hanging the suite.
 fn output_within(mut child: std::process::Child, limit: Duration) -> (bool, std::process::Output) {

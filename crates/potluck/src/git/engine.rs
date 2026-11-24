@@ -420,7 +420,7 @@ impl GitEngine {
     /// A fresh, empty report file under `<tmp_dir>/hook-reports` for one receive-pack's hook, or
     /// `None` (warned) when it cannot be created; it is removed when dropped.
     fn report_file(&self) -> Option<tempfile::NamedTempFile> {
-        let dir = self.tmp_dir.join("hook-reports");
+        let dir = self.tmp_dir.join(report::DIR_NAME);
         match tempfile::Builder::new().prefix("report-").tempfile_in(&dir) {
             Ok(file) => Some(file),
             Err(err) => {

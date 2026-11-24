@@ -473,7 +473,7 @@ async fn a_refused_secret_push_is_counted_without_leaking_anything() {
         Some(1.0),
         "{text}"
     );
-    // receive-pack exits 0 after a hook refusal (checked with git 2.x during plan review).
+    // receive-pack exits 0 after a hook refusal, so both pushes are ok git requests.
     let rp =
         |o: &str| format!("potluck_git_requests_total{{service=\"receive_pack\",outcome=\"{o}\"}}");
     assert_eq!(sample(&text, &rp("ok")), Some(2.0), "{text}");

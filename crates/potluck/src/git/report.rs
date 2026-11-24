@@ -2,6 +2,8 @@
 
 pub(crate) const MAX_LINES: usize = 64;
 pub(crate) const MAX_BYTES: usize = 8 * 1024;
+/// The directory under the data dir's `tmp` that holds the report files.
+pub(crate) const DIR_NAME: &str = "hook-reports";
 
 /// What a receive-pack's hook reported: whether it refused, and the (code, rule) pairs it gave.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

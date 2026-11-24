@@ -207,7 +207,7 @@ impl Config {
 
     /// `<data>/tmp/hook-reports`: where each receive-pack's hook writes its refusal report.
     pub fn hook_reports_dir(&self) -> PathBuf {
-        self.tmp_dir().join("hook-reports")
+        self.tmp_dir().join(crate::git::report::DIR_NAME)
     }
 }
 

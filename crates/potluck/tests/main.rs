@@ -40,6 +40,7 @@ mod db_tokens;
 mod db_users;
 mod db_workspaces;
 mod dbento_golden;
+mod default_branch_presence;
 mod deploy_files;
 mod events;
 mod git_access_db;

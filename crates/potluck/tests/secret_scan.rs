@@ -917,7 +917,11 @@ fn moved(old: &str, new: &str, name: &str) -> RefUpdate {
 }
 
 fn relax_rows(s: &Scratch, role: Role, u: RefUpdate) -> Vec<String> {
-    // A default branch these updates never touch keeps branch protection out of the rows.
+    // A default branch these updates never touch keeps branch protection out of the rows; it
+    // exists on the server as an unrelated empty commit, so no history under test is shared.
+    let empty = s.bare_git(&["hash-object", "-t", "tree", "/dev/null"]);
+    let trunk = s.bare_git(&["commit-tree", &empty, "-m", "trunk"]);
+    s.bare_git(&["update-ref", "refs/heads/trunk", &trunk]);
     let e = HookEnv::new(None, false, None)
         .with_default_branch("trunk")
         .with_role(role);

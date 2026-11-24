@@ -19,6 +19,7 @@ mod admin_cli;
 mod admin_client;
 mod admin_decode;
 mod admin_grants;
+mod admin_oidc;
 mod admin_teams;
 mod admin_update;
 mod admin_users;

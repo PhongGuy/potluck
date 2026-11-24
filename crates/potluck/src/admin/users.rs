@@ -61,6 +61,18 @@ pub enum UserCmd {
         /// The account whose tokens to list.
         username: String,
     },
+    /// Link the account to an OIDC subject, replacing any link it had.
+    LinkOidc {
+        /// The account to link.
+        username: String,
+        /// The subject (`sub` claim) the identity provider issues for this person.
+        subject: String,
+    },
+    /// Remove the account's OIDC link.
+    UnlinkOidc {
+        /// The account to unlink.
+        username: String,
+    },
 }
 
 /// Personal access tokens.
@@ -164,6 +176,21 @@ pub(crate) async fn run(cmd: UserCmd, cx: &mut Context<'_>) -> Result<(), AdminE
                 output::tokens,
             )
             .await
+        }
+        UserCmd::LinkOidc { username, subject } => {
+            let target = format!("/api/v1/users/{}/oidc", segment("username", &username)?);
+            // The subject travels only in the body; the line echoes what the server stored.
+            let body = json!({"subject": subject}).to_string();
+            cx.call(Verb::Put, &target, Some(&body), &[200], |link| {
+                let stored = link["subject"].as_str().unwrap_or(&subject);
+                format!("linked {username} to {stored}\n")
+            })
+            .await
+        }
+        UserCmd::UnlinkOidc { username } => {
+            let target = format!("/api/v1/users/{}/oidc", segment("username", &username)?);
+            cx.confirm(Verb::Delete, &target, &format!("unlinked {username}\n"))
+                .await
         }
     }
 }

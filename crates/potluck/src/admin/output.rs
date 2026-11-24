@@ -3,8 +3,9 @@
 use serde_json::Value;
 
 /// A text table: `headers` then `rows`, every cell escaped (control and Unicode format
-/// characters in their `\u{..}` form) and padded to its column's widest escaped cell (by
-/// `chars().count()`), two spaces between columns, no trailing spaces, every line `\n`-ended.
+/// characters in their `\u{..}` form, a backslash doubled) and padded to its column's widest
+/// escaped cell (by `chars().count()`), two spaces between columns, no trailing spaces, every
+/// line `\n`-ended.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let rows: Vec<Vec<String>> = std::iter::once(headers.iter().map(|h| escape(h)).collect())
         .chain(
@@ -228,11 +229,12 @@ pub(crate) fn audit(items: &[Value]) -> String {
 
 // Table cells carry names other people chose, so a control character or an invisible format
 // character (bidi override, zero-width) is shown in its escaped form rather than reaching the
-// terminal as a command or a reordering of the line.
+// terminal as a command or a reordering of the line. A backslash is doubled so a name that
+// literally reads `\u{1b}` prints differently from an escaped ESC.
 fn escape(cell: &str) -> String {
     cell.chars()
         .map(|c| {
-            if c.is_control() || is_format(c) {
+            if c == '\\' || c.is_control() || is_format(c) {
                 c.escape_default().to_string()
             } else {
                 c.to_string()

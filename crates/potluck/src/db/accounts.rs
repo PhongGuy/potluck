@@ -386,8 +386,9 @@ fn token_from_row(row: &Row<'_>) -> rusqlite::Result<TokenRecord> {
     })
 }
 
-/// The username of user `id`; a token always has an owner, so a missing one is a storage fault.
-fn owner_name(conn: &rusqlite::Connection, id: i64) -> Result<String, DbError> {
+/// The username of user `id`; a token or link always has its user, so a missing one is a storage
+/// fault.
+pub(super) fn owner_name(conn: &rusqlite::Connection, id: i64) -> Result<String, DbError> {
     Ok(
         conn.query_row("SELECT username FROM users WHERE id = ?1", [id], |row| {
             row.get(0)

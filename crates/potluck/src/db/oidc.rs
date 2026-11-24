@@ -3,7 +3,7 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
-use super::accounts::{USER_COLUMNS, UserRecord, prefixed, user_at};
+use super::accounts::{USER_COLUMNS, UserRecord, owner_name, prefixed, user_at};
 use super::audit::{self, AuditAction, AuditCtx, Entry, OidcSubject};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
@@ -57,15 +57,6 @@ fn select_link(
     Ok(conn
         .query_row(&sql, params![issuer, user_id], link_from_row)
         .optional()?)
-}
-
-/// The username of user `id`, the audit row's target name; a link always has its user.
-fn username_of(conn: &rusqlite::Connection, id: i64) -> Result<String, DbError> {
-    Ok(
-        conn.query_row("SELECT username FROM users WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })?,
-    )
 }
 
 impl Db {
@@ -128,7 +119,7 @@ impl Db {
             })?;
             let link = select_link(&tx, &issuer, user_id)?
                 .ok_or_else(|| DbError::Sqlite("the new link is missing".to_owned()))?;
-            let name = username_of(&tx, user_id)?;
+            let name = owner_name(&tx, user_id)?;
             let entry = Entry::new(AuditAction::UserOidcLink)
                 .target("user", Some(user_id), Some(&name))
                 .detail(&OidcSubject { subject: &subject })?;
@@ -158,7 +149,7 @@ impl Db {
                 "DELETE FROM oidc_links WHERE issuer = ?1 AND user_id = ?2",
                 params![issuer, user_id],
             )?;
-            let name = username_of(&tx, user_id)?;
+            let name = owner_name(&tx, user_id)?;
             let entry = Entry::new(AuditAction::UserOidcUnlink)
                 .target("user", Some(user_id), Some(&name))
                 .detail(&OidcSubject {

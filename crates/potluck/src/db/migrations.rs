@@ -9,6 +9,7 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     include_str!("migrations/0001_init.sql"),
     include_str!("migrations/0002_grant_subjects.sql"),
     include_str!("migrations/0003_audit.sql"),
+    include_str!("migrations/0004_oidc_links.sql"),
 ];
 
 /// Applies the migrations past `PRAGMA user_version` in one transaction and sets
@@ -94,7 +95,7 @@ mod tests {
                 err,
                 DbError::SchemaTooNew {
                     found: 99,
-                    supported: 3
+                    supported: 4
                 }
             ),
             "got {err:?}"
@@ -106,8 +107,8 @@ mod tests {
         let mut c = conn();
         assert_eq!(
             migrate_with(&mut c, MIGRATIONS).unwrap(),
-            3,
-            "schema version 3 applies cleanly"
+            4,
+            "schema version 4 applies cleanly"
         );
     }
 
@@ -125,7 +126,7 @@ mod tests {
                  (1, 'user', 7, 'admin'), (1, 'team', 7, 'admin');",
         )
         .unwrap();
-        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 3);
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 4);
         let mut stmt = c
             .prepare("SELECT subject_kind, subject_id FROM grants ORDER BY 1, 2")
             .unwrap();
@@ -144,7 +145,7 @@ mod tests {
     #[test]
     fn version_3_adds_the_audit_table_with_its_actor_check() {
         let mut c = conn();
-        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 3);
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 4);
         c.execute(
             "INSERT INTO audit (at, action, actor_kind) VALUES ('2026-01-01T00:00:00Z', 'x.y', 'system')",
             [],
@@ -172,7 +173,22 @@ mod tests {
     fn version_3_applies_over_a_version_2_database() {
         let mut c = conn();
         migrate_with(&mut c, &MIGRATIONS[..2]).unwrap();
-        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 3);
+        assert_eq!(migrate_with(&mut c, &MIGRATIONS[..3]).unwrap(), 3);
         assert_eq!(user_version(&c).unwrap(), 3);
+    }
+
+    #[test]
+    fn version_4_applies_over_a_version_3_database() {
+        let mut c = conn();
+        migrate_with(&mut c, &MIGRATIONS[..3]).unwrap();
+        assert_eq!(migrate_with(&mut c, MIGRATIONS).unwrap(), 4);
+        let tables: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'oidc_links'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
     }
 }

@@ -59,7 +59,8 @@ impl IdpHttp {
             .connect_timeout(connect)
             .timeout(total)
             .https_only(https_only);
-        // A plain http issuer is a local one; an ambient proxy must not intercept it.
+        // A plain http issuer is loopback or one the operator accepted with --insecure-http;
+        // either way no ambient proxy is used for it.
         if !https_only {
             builder = builder.no_proxy();
         }

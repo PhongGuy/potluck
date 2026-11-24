@@ -30,6 +30,8 @@ pub enum ErrorCode {
     Internal,
     /// 503: a dependency, such as the database, is down.
     Unavailable,
+    /// 400: an OIDC handoff code that is unknown, used, late, or does not match its verifier.
+    OidcCodeInvalid,
 }
 
 impl ErrorCode {
@@ -45,6 +47,7 @@ impl ErrorCode {
             ErrorCode::RateLimited => "rate_limited",
             ErrorCode::Internal => "internal",
             ErrorCode::Unavailable => "unavailable",
+            ErrorCode::OidcCodeInvalid => "oidc_code_invalid",
         }
     }
 }
@@ -126,6 +129,11 @@ impl ApiError {
     /// 503 `unavailable`.
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::new(503, ErrorCode::Unavailable, message)
+    }
+
+    /// 400 `oidc_code_invalid`.
+    pub fn oidc_code_invalid(message: impl Into<String>) -> Self {
+        Self::new(400, ErrorCode::OidcCodeInvalid, message)
     }
 
     /// The HTTP status this error answers with.
@@ -251,6 +259,7 @@ mod tests {
             (ApiError::rate_limited(30), 429, "rate_limited"),
             (ApiError::internal("x"), 500, "internal"),
             (ApiError::unavailable("x"), 503, "unavailable"),
+            (ApiError::oidc_code_invalid("x"), 400, "oidc_code_invalid"),
         ];
         for (err, want_status, want_code) in cases {
             assert_eq!(err.status(), want_status, "{want_code}");

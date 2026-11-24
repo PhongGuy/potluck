@@ -2,18 +2,24 @@
 
 use serde_json::Value;
 
-/// A text table: `headers` then `rows`, each cell padded to its column's widest cell (by
+/// A text table: `headers` then `rows`, every cell escaped (control and Unicode format
+/// characters in their `\u{..}` form) and padded to its column's widest escaped cell (by
 /// `chars().count()`), two spaces between columns, no trailing spaces, every line `\n`-ended.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
-    for row in rows {
+    let rows: Vec<Vec<String>> = std::iter::once(headers.iter().map(|h| escape(h)).collect())
+        .chain(
+            rows.iter()
+                .map(|row| row.iter().map(|c| escape(c)).collect()),
+        )
+        .collect();
+    let mut widths: Vec<usize> = vec![0; headers.len()];
+    for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
             *width = (*width).max(cell.chars().count());
         }
     }
-    let header: Vec<String> = headers.iter().map(|h| (*h).to_owned()).collect();
     let mut text = String::new();
-    for row in std::iter::once(&header).chain(rows) {
+    for row in &rows {
         let mut line = String::new();
         for (cell, width) in row.iter().zip(&widths) {
             line.push_str(cell);
@@ -185,7 +191,7 @@ pub(crate) fn overrides(items: &[Value]) -> String {
     )
 }
 
-/// `ID  TIME  ACTOR  ACTION  TARGET  WORKSPACE  IP` rows from Audit objects, every cell escaped.
+/// `ID  TIME  ACTOR  ACTION  TARGET  WORKSPACE  IP` rows from Audit objects.
 /// ACTOR is the actor's name, else its kind; TARGET is `kind:name`, else `kind:#id`, else the
 /// kind alone, else `-`.
 pub(crate) fn audit(items: &[Value]) -> String {
@@ -203,7 +209,7 @@ pub(crate) fn audit(items: &[Value]) -> String {
                 (kind, Value::Null, id) => format!("{}:#{}", text(kind), text(id)),
                 (kind, name, _) => format!("{}:{}", text(kind), text(name)),
             };
-            [
+            vec![
                 text(&a["id"]),
                 text(&a["at"]),
                 actor,
@@ -212,9 +218,6 @@ pub(crate) fn audit(items: &[Value]) -> String {
                 text(&a["workspace"]),
                 text(&a["client_ip"]),
             ]
-            .into_iter()
-            .map(|cell| escape(&cell))
-            .collect()
         })
         .collect();
     table(
@@ -223,16 +226,45 @@ pub(crate) fn audit(items: &[Value]) -> String {
     )
 }
 
-// Audit cells carry names other people chose, so a control character is shown in its escaped
-// form rather than reaching the terminal as a command.
+// Table cells carry names other people chose, so a control character or an invisible format
+// character (bidi override, zero-width) is shown in its escaped form rather than reaching the
+// terminal as a command or a reordering of the line.
 fn escape(cell: &str) -> String {
     cell.chars()
         .map(|c| {
-            if c.is_control() {
+            if c.is_control() || is_format(c) {
                 c.escape_default().to_string()
             } else {
                 c.to_string()
             }
         })
         .collect()
+}
+
+/// Whether `c` is in Unicode general category Cf (format).
+fn is_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }

@@ -1,6 +1,7 @@
 //! The OIDC sign-in routes under `/api/v1/oidc`. The browser sees HTML pages; with no provider
 //! configured every route answers `not_found` like an unknown path.
 
+use std::net::IpAddr;
 use std::time::Instant;
 
 use axum::Json;
@@ -21,12 +22,14 @@ use super::json::ApiJson;
 use super::objects::{TokenJson, UserJson};
 use super::oidc_pages::{BAD_START, IDP_UNAVAILABLE, START_AGAIN, page, too_many};
 use super::session::SessionResponse;
+use super::users::{check_email, check_username};
 use super::{tokens, validate};
 use crate::clock;
-use crate::db::accounts::TokenOrigin;
+use crate::db::DbError;
+use crate::db::accounts::{NewUser, TokenOrigin, UserRecord};
 use crate::db::audit::AuditCtx;
 use crate::metrics::{SignInMethod, SignInOutcome};
-use crate::oidc::{Loopback, OidcState, PendingSignIn, Taken, random_secret};
+use crate::oidc::{IdClaims, Loopback, OidcState, PendingSignIn, Taken, random_secret};
 
 /// How long a token minted by an OIDC sign-in lives: seven days.
 const OIDC_TOKEN_SECS: i64 = 7 * 24 * 60 * 60;
@@ -93,8 +96,9 @@ pub(super) async fn start(State(state): State<AppState>, ip: ClientIp, uri: Uri)
 /// "start again" page when `state` names no sign-in in flight. Otherwise the sign-in is removed
 /// and the browser goes 302 to the app's loopback with its `state` and either a handoff `code`
 /// or `error`: `oidc_expired`, `oidc_refused` (IdP error, failed exchange or token, disabled
-/// user) or `account_not_linked`.
-pub(super) async fn callback(State(state): State<AppState>, uri: Uri) -> Response {
+/// user) or `account_not_linked`. With JIT on, an unlinked identity whose `preferred_username`
+/// is a free, valid username gets a new linked account instead of `account_not_linked`.
+pub(super) async fn callback(State(state): State<AppState>, ip: ClientIp, uri: Uri) -> Response {
     let Some(oidc) = state.oidc() else {
         return super::not_found().await.into_response();
     };
@@ -114,7 +118,7 @@ pub(super) async fn callback(State(state): State<AppState>, uri: Uri) -> Respons
         _ => None,
     };
     let outcome = match code {
-        Some(code) => finish(&state, oidc, &entry, code).await,
+        Some(code) => finish(&state, oidc, &entry, code, ip.addr()).await,
         None => Err("oidc_refused"),
     };
     to_loopback(&entry, outcome)
@@ -188,13 +192,15 @@ pub(super) async fn redeem(
     ))
 }
 
-/// Exchanges the IdP code and finds the linked user: a fresh handoff code for that user and the
-/// app's challenge, or the loopback error code.
+/// Exchanges the IdP code and finds the linked user, or creates one just in time: a fresh handoff
+/// code for that user and the app's challenge, or the loopback error code. `client_ip` goes on
+/// a JIT account's audit rows.
 async fn finish(
     state: &AppState,
     oidc: &OidcState,
     entry: &PendingSignIn,
     code: &str,
+    client_ip: Option<IpAddr>,
 ) -> Result<String, &'static str> {
     let provider = oidc.provider();
     let claims = provider
@@ -215,6 +221,13 @@ async fn finish(
             return Err("oidc_refused");
         }
     };
+    let user = match user {
+        Some(user) => Some(user),
+        None if provider.settings().jit() => {
+            create_jit_user(state, issuer, &claims, client_ip).await?
+        }
+        None => None,
+    };
     match user {
         Some(user) if user.disabled() => Err("oidc_refused"),
         Some(user) => {
@@ -231,6 +244,44 @@ async fn finish(
                 "OIDC sign-in by an identity linked to no account"
             );
             Err("account_not_linked")
+        }
+    }
+}
+
+/// Creates the account an unlinked identity asks for, linked to its subject: `None` when the
+/// `preferred_username` is absent, invalid, reserved or taken, so the caller answers
+/// `account_not_linked`. It never links an existing user, whatever name or email matches.
+async fn create_jit_user(
+    state: &AppState,
+    issuer: &str,
+    claims: &IdClaims,
+    client_ip: Option<IpAddr>,
+) -> Result<Option<UserRecord>, &'static str> {
+    let Some(username) = claims
+        .preferred_username()
+        .filter(|name| check_username(name).is_ok())
+    else {
+        return Ok(None);
+    };
+    // Unusable display name or email claims fall back rather than refuse the sign-in.
+    let display_name = claims
+        .name()
+        .and_then(|name| validate::name("display_name", name).ok())
+        .unwrap_or(username);
+    let mut new = NewUser::new(username, display_name);
+    if let Some(email) = claims.email().filter(|email| check_email(email).is_ok()) {
+        new = new.email(email.trim());
+    }
+    match state
+        .db()
+        .create_jit_user(new, issuer, claims.subject(), client_ip)
+        .await
+    {
+        Ok(user) => Ok(Some(user)),
+        Err(DbError::Conflict { .. }) => Ok(None),
+        Err(error) => {
+            tracing::error!(%error, "OIDC sign-in could not create a just-in-time account");
+            Err("oidc_refused")
         }
     }
 }

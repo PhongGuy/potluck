@@ -14,7 +14,7 @@ A team shares its work in workspaces. Each workspace is a bare git repository on
 - **Overrides.** A workspace admin can arm an override that lets one person's next push through the check. Arming, disarming and using an override are logged, and a used override stays in the workspace's history.
 - **Accounts and roles.** People sign in with a local password account and use personal access tokens for git, the JSON API and automation. Each workspace grants a user or a team one of three roles: read (clone and fetch), write (also push) or admin (also manage grants and overrides).
 - **Change notices.** `GET /api/v1/workspaces/{team}/{ws}/events` is a server-sent events stream that carries only which ref now points at which commit; apps then fetch the commits over git. An app that cannot keep the stream open can poll instead.
-- **Git access.** Apps clone, fetch and push a workspace at `<public URL>/git/{team}/{ws}`, signing in with a personal access token.
+- **Git access.** Apps clone, fetch and push a workspace at `<public URL>/git/{team}/{ws}`, signing in with a personal access token. Only a workspace admin, or a push with an armed override, can write refs outside branches and tags (`refs/heads/*` and `refs/tags/*`). To import an existing repository without the admin role, push `'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*'`; a `--mirror` push of a clone carries `refs/remotes/*` and is refused.
 - **Administration.** `potluck admin` on the host manages users, tokens, teams, workspaces, grants, overrides and update checks, and reads the audit log (see [First admin](#first-admin)). The same operations are in the JSON API under `/api/v1`. There is no web UI.
 
 ## Status

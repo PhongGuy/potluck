@@ -168,7 +168,7 @@ fn rejection(ref_name: &[u8], raw: &[u8], lossy: &str, finding: Finding) -> Reje
 /// mode scans no message. A commit or tag object over `MAX_CONTENT_BYTES` is skipped like a
 /// blob. An unset kind means generic rules only; a kind the registry does not know refuses
 /// with `ScanError::UnsupportedKind` unless every update is a delete. The kind's rule set runs
-/// as `scan_with` describes.
+/// as `scan_with` describes, and a non-admin's write outside branches and tags is refused there.
 pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejection>, ScanError> {
     if env.override_id().is_some() {
         return Ok(Vec::new());
@@ -193,7 +193,8 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// earlier hit has the same ref, path and rule. When `env` names a kind and a rule set is given,
 /// every created or format-touching update to a commit gets a format pass: its `format_file` must
 /// hold a format the rule set lists, or the ref gets one `format_unsupported` finding, sorted
-/// last. For a non-admin, `default_branch_rewrites` over each update then adds its refusal last.
+/// last. For a non-admin, `default_branch_rewrites` and then `foreign_refs` over each update add
+/// their refusals last.
 /// A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
@@ -208,7 +209,7 @@ pub fn scan_with(
     }
     let kind = GuardedRules(rules);
     let role = kind_role(env.role());
-    // Passes 0 to 5 are path rule, content, message, tip, format and branch protection, so the
+    // Passes 0 to 5 are path rule, content, message, tip, format and ref protection, so the
     // final sort groups each ref's hits by pass in entry order, then in `check`'s order.
     let mut hits: Vec<(HitKey, Rejection)> = Vec::new();
     let mut candidates: HashMap<Sha, Vec<(usize, usize, Vec<u8>)>> = HashMap::new();
@@ -325,12 +326,13 @@ pub fn scan_with(
             }
         }
     }
-    // An admin may rewrite the default branch, so the ancestry check is not even run for one.
+    // An admin may rewrite the default branch and write any ref, so neither check is even run
+    // for one.
     if role != Role::Admin {
         for (ri, update) in updates.iter().enumerate() {
-            for r in
-                default_branch_rewrites(env.default_branch(), std::slice::from_ref(update), git)?
-            {
+            let one = std::slice::from_ref(update);
+            let refused = default_branch_rewrites(env.default_branch(), one, git)?;
+            for r in refused.into_iter().chain(foreign_refs(one)) {
                 hits.push((
                     HitKey {
                         ref_index: ri,
@@ -428,6 +430,20 @@ pub fn default_branch_rewrites(
         found.push(rejection(update.name(), b"/", "/", finding));
     }
     Ok(found)
+}
+
+/// The `safety_relaxation` refusals `ref_namespace` at path `/`, in update order, for every
+/// update (create, move or delete) whose raw name starts with neither `refs/heads/` nor
+/// `refs/tags/`. Names alone decide, so no git call is made.
+pub fn foreign_refs(updates: &[RefUpdate]) -> Vec<Rejection> {
+    updates
+        .iter()
+        .filter(|u| !u.name().starts_with(b"refs/heads/") && !u.name().starts_with(b"refs/tags/"))
+        .map(|u| {
+            let finding = Finding::new(Code::SafetyRelaxation, "ref_namespace", "/");
+            rejection(u.name(), b"/", "/", finding)
+        })
+        .collect()
 }
 
 /// Where a hit sorts: by ref, then pass, then entry, then its place among one `check`'s findings.

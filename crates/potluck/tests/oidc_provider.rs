@@ -479,6 +479,29 @@ fn a_failed_startup_probe_warns_once() {
     assert_one_warning(&warns, "reason=\"discovery\"");
 }
 
+// Inside the pause after a failed fetch the call is refused without a fetch, and the
+// failure it repeats was already logged, so it adds no warning of its own.
+#[test]
+fn a_call_inside_the_discovery_pause_is_unavailable_without_a_new_warning() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        idp.set_fault(Fault::DiscoveryUnavailable);
+        let t0 = Instant::now();
+        for (at, why) in [(0, "the failed fetch"), (5, "inside the pause")] {
+            let err = provider
+                .authorize_url_at(t0 + Duration::from_secs(at), REDIRECT, "s", "n", VERIFIER)
+                .await
+                .unwrap_err();
+            assert_eq!(err, ProviderError::Unavailable, "{why}");
+        }
+        assert_eq!(
+            idp.discovery_calls(),
+            1,
+            "nothing is fetched inside the pause"
+        );
+    });
+    assert_one_warning(&warns, "reason=\"discovery\"");
+}
+
 #[test]
 fn a_failed_daily_refresh_warns_once_and_keeps_the_stale_copy() {
     let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {

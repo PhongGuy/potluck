@@ -380,16 +380,58 @@ async fn the_backup_never_carries_an_armed_override_or_a_stale_import_flag() {
     );
 }
 
+/// A pre-receive body that marks `started` in `marks` and holds the push until `release` appears.
+/// The hold gives up and declines the push once `marks` is gone or after about 30 s, so a
+/// test that panics mid-hold leaves no shell spinning behind it.
+fn held_hook(marks: &Path) -> String {
+    let m = marks.display();
+    format!(
+        "touch '{m}/started'\nn=0\nwhile [ ! -e '{m}/release' ]; do\n  \
+         [ -d '{m}' ] || exit 1\n  n=$((n + 1))\n  [ \"$n\" -ge 600 ] && exit 1\n  \
+         sleep 0.05\ndone\nexit 0"
+    )
+}
+
+#[test]
+fn the_held_push_hook_gives_up_when_its_marks_are_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let marks = dir.path().join("marks");
+    std::fs::create_dir_all(&marks).unwrap();
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(held_hook(&marks))
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marks.join("started").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the hook never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::remove_dir_all(&marks).unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let status = status.expect("the hook outlived its marks directory");
+    assert!(!status.success(), "a hold that gave up declines the push");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_push_held_in_pre_receive_is_not_in_the_backup_and_then_lands() {
     let (server, root, home) = three_workspaces().await;
     let marks = server.dir.path().join("marks");
     std::fs::create_dir_all(&marks).unwrap();
-    let m = marks.display();
-    crate::common::write_hook(
-        &server.hooks_dir(),
-        &format!("touch '{m}/started'\nwhile [ ! -e '{m}/release' ]; do sleep 0.05; done\nexit 0"),
-    );
+    crate::common::write_hook(&server.hooks_dir(), &held_hook(&marks));
     let src = repo_path(server.dir.path(), "core", "pushed");
     let before = refs(&src);
     let work = home.join("work");

@@ -231,7 +231,7 @@ pub(crate) fn audit(items: &[Value]) -> String {
 // character (bidi override, zero-width) is shown in its escaped form rather than reaching the
 // terminal as a command or a reordering of the line. A backslash is doubled so a name that
 // literally reads `\u{1b}` prints differently from an escaped ESC.
-fn escape(cell: &str) -> String {
+pub(crate) fn escape(cell: &str) -> String {
     cell.chars()
         .map(|c| {
             if c == '\\' || c.is_control() || is_format(c) {

@@ -3,6 +3,7 @@
 use serde_json::Value;
 
 use super::client::Verb;
+use super::output::escape;
 use super::{AdminError, Context};
 use crate::update::IMAGE;
 
@@ -23,20 +24,22 @@ pub(crate) async fn run(cmd: UpdateCmd, cx: &mut Context<'_>) -> Result<(), Admi
     }
 }
 
-fn text<'a>(value: &'a Value, key: &str) -> &'a str {
-    value.get(key).and_then(Value::as_str).unwrap_or("")
+/// Every field comes from the server and the release feed, so it is escaped before printing.
+fn text(value: &Value, key: &str) -> String {
+    escape(value.get(key).and_then(Value::as_str).unwrap_or(""))
 }
 
 /// The update object for a person: one line when up to date, else the release and its steps.
 fn report(body: &Value) -> String {
     let current = text(body, "current");
     match body.get("latest").filter(|latest| latest.is_object()) {
-        Some(latest) => steps(current, latest),
+        Some(latest) => steps(&current, latest),
         None => {
-            let checked = body
-                .get("checked_at")
-                .and_then(Value::as_str)
-                .unwrap_or("never");
+            let checked = escape(
+                body.get("checked_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("never"),
+            );
             format!("potluck {current} is up to date (checked {checked})\n")
         }
     }
@@ -72,4 +75,48 @@ fn steps(current: &str, latest: &Value) -> String {
          Verify the image:\n  \
            gh attestation verify oci://{pinned} --repo PhongGuy/potluck\n"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::report;
+
+    #[test]
+    fn an_available_release_escapes_every_feed_field() {
+        let out = report(&json!({
+            "current": "1.0\u{1b}[0m",
+            "latest": {
+                "version": "9\u{1b}[31m",
+                "published": "2026\u{202E}",
+                "notes_url": "https://x/\u{1b}]8;;",
+                "digest": "sha256:\u{202E}ab",
+            },
+        }));
+        assert!(
+            !out.contains('\u{1b}') && !out.contains('\u{202E}'),
+            "{out:?}"
+        );
+        for needle in [
+            "potluck 9\\u{1b}[31m is available (running 1.0\\u{1b}[0m)\n",
+            "published: 2026\\u{202e}\n",
+            "notes:     https://x/\\u{1b}]8;;\n",
+            "@sha256:\\u{202e}ab\n",
+        ] {
+            assert!(out.contains(needle), "missing {needle:?} in {out:?}");
+        }
+    }
+
+    #[test]
+    fn an_up_to_date_report_escapes_the_version_and_check_time() {
+        let out = report(&json!({
+            "current": "1.0\u{1b}[0m",
+            "checked_at": "now\u{202E}",
+        }));
+        assert_eq!(
+            out,
+            "potluck 1.0\\u{1b}[0m is up to date (checked now\\u{202e})\n"
+        );
+    }
 }

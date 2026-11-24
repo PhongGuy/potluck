@@ -2,6 +2,8 @@
 
 This is the developer guide. The page for people who run Potluck is [README.md](README.md).
 
+Potluck is open source, and changes from anyone are welcome. [Sending a change](#sending-a-change) says what I check before merging.
+
 ## Requirements
 
 - Rust 1.99 or newer (the `rust-version` in [`Cargo.toml`](Cargo.toml)).
@@ -113,6 +115,15 @@ scripts/third-party-crates.sh --write
 The script fails on a crate whose licence is not on its allowlist, and the test suite fails while the list is stale.
 
 ## Sending a change
+
+Issues and pull requests from anyone are welcome, and a first pull request is fine. If you're unsure whether a change fits, open an issue first and I'll say what I think. I'll help get a pull request over the line: if something needs changing, I'll say what and why.
+
+Before I merge, I check that:
+
+- `cargo fmt --check`, clippy with `-Dwarnings` and `cargo test --workspace` pass, as in [Checks](#checks). CI's `gate` job runs them on every pull request.
+- The pull request makes one change. Two unrelated fixes are easier to review as two pull requests.
+
+The rest is housekeeping, and I can fix it up for you if you miss something:
 
 - One issue per branch, and one pull request per issue. The pull request body says `Closes #N`.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/): `<type>(<scope>): <description>`, with the types `feat`, `fix`, `chore`, `refactor`, `docs` and `test`.

@@ -12,6 +12,11 @@ pub(super) const BAD_START: &str = "<!doctype html><meta charset=\"utf-8\"><titl
 <h1>Sign-in could not start</h1><p>The sign-in link from your app is not valid. \
 Close this tab and start the sign-in again from the app.</p>";
 
+/// 400: the callback names no sign-in in flight (never issued, already used, or long gone).
+pub(super) const START_AGAIN: &str = "<!doctype html><meta charset=\"utf-8\"><title>Sign-in expired</title>\
+<h1>This sign-in is no longer valid</h1><p>It was already used, or it is too old. \
+Close this tab and start the sign-in again from the app.</p>";
+
 /// 429: too many starts from this address.
 pub(super) const TOO_MANY: &str = "<!doctype html><meta charset=\"utf-8\"><title>Too many sign-ins</title>\
 <h1>Too many sign-in attempts</h1><p>Wait a minute, then start the sign-in again from your app.</p>";

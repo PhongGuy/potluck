@@ -58,6 +58,7 @@ mod metrics;
 mod name_checks;
 mod notices;
 mod objects;
+mod oidc_callback;
 mod oidc_http;
 mod oidc_mock_idp;
 mod oidc_provider;

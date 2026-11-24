@@ -54,7 +54,6 @@ impl OidcState {
     }
 
     /// Handoff codes waiting for the app to redeem them.
-    #[allow(dead_code, reason = "read by the OIDC routes")]
     pub(crate) fn handoffs(&self) -> &HandoffStore {
         &self.handoffs
     }

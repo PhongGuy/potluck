@@ -26,6 +26,8 @@ mod events;
 mod grants;
 pub(crate) mod json;
 pub mod objects;
+mod oidc;
+mod oidc_pages;
 mod overrides;
 pub(crate) mod pushes;
 mod session;
@@ -209,6 +211,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/server", get(system::server))
         .route("/session", post(session::create))
         .route("/me", get(tokens::me))
+        .route("/oidc/start", get(oidc::start))
         .route("/teams", get(teams::list).post(teams::create))
         .route(
             "/teams/{team}/members/{username}",

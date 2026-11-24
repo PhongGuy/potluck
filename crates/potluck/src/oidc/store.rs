@@ -222,7 +222,7 @@ impl std::fmt::Debug for HandoffStore {
     clippy::expect_used,
     reason = "the OS RNG failing is unrecoverable and the store contract returns a plain value"
 )]
-fn random_secret() -> String {
+pub(crate) fn random_secret() -> String {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).expect("the OS random number generator works");
     URL_SAFE_NO_PAD.encode(bytes)

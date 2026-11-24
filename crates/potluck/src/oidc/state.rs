@@ -49,7 +49,6 @@ impl OidcState {
     }
 
     /// Sign-ins sent to the provider and not yet called back.
-    #[allow(dead_code, reason = "read by the OIDC routes")]
     pub(crate) fn pending(&self) -> &PendingStore {
         &self.pending
     }
@@ -61,7 +60,6 @@ impl OidcState {
     }
 
     /// The per-address limiter of `/oidc/start`.
-    #[allow(dead_code, reason = "read by the OIDC routes")]
     pub(crate) fn start_limiter(&self) -> &RateLimiter {
         &self.start_limiter
     }

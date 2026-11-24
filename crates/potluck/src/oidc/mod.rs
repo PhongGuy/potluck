@@ -11,6 +11,7 @@ pub use http::{IdpHttp, IdpHttpError};
 pub use provider::{IdClaims, Provider, ProviderError};
 pub use settings::{ClientSecret, OidcSettings};
 pub use state::OidcState;
+pub(crate) use store::random_secret;
 pub use store::{
     Handoff, HandoffStore, Loopback, MAX_ENTRIES, PendingSignIn, PendingStore, Taken, Timings,
 };

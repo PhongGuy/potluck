@@ -90,6 +90,14 @@ struct Cached {
     generation: u64,
 }
 
+// The keys a forced refresh hands back, their generation, and whether this call fetched them
+// or took a newer copy another caller had already fetched.
+struct Refreshed {
+    metadata: CoreProviderMetadata,
+    generation: u64,
+    fetched: bool,
+}
+
 // Everything behind the cache lock: the copy plus the instants that space out fetches.
 #[derive(Default)]
 struct Cache {
@@ -182,10 +190,12 @@ impl Provider {
     }
 
     /// Exchanges `code` with the client secret and `pkce_verifier`, then verifies the ID token
-    /// (RS256 signature, iss, aud, exp, nonce). A signature failure refetches discovery and
-    /// keys once and verifies the same token again, unless such a forced refresh started less
-    /// than 60 s before `now`. `Unavailable` when discovery fails before the exchange,
-    /// `Refused` when the exchange fails, the token does not verify, or a forced refresh fails.
+    /// (RS256 signature, iss, aud, exp, nonce). A signature failure verifies the same token
+    /// against newer keys: a copy another caller cached since, and if that still fails, keys it
+    /// fetches itself, unless a forced refresh started less than 60 s before `now`. The code is
+    /// exchanged once and at most one fetch is made. `Unavailable` when discovery fails before
+    /// the exchange, `Refused` when the exchange fails, the token does not verify, or a forced
+    /// refresh fails.
     pub async fn sign_in_at(
         &self,
         now: Instant,
@@ -214,12 +224,21 @@ impl Provider {
                 .set_allowed_algs([CoreJwsSigningAlgorithm::RsaSsaPkcs1V15Sha256]);
             id_token.claims(&verifier, &nonce).cloned()
         };
-        // A signature failure may mean the IdP rotated its keys: verify once more against
-        // fresh keys, never repeating the code exchange.
+        // A signature failure may mean the IdP rotated its keys: verify against newer keys,
+        // never repeating the code exchange. A newer cached copy may predate the rotation, so
+        // when it also fails, refresh once more past it. Only a step that took a cached copy
+        // is followed by another, so at most one fetch is made and three verifications.
         let claims = match verify(&client) {
             Err(ClaimsVerificationError::SignatureVerification(_)) => {
-                let metadata = self.forced_refresh(now, generation).await?;
-                verify(&self.client(metadata, redirect_uri)?)
+                let newer = self.forced_refresh(now, generation).await?;
+                let seen = newer.generation;
+                match verify(&self.client(newer.metadata, redirect_uri)?) {
+                    Err(ClaimsVerificationError::SignatureVerification(_)) if !newer.fetched => {
+                        let fetched = self.forced_refresh(now, seen).await?;
+                        verify(&self.client(fetched.metadata, redirect_uri)?)
+                    }
+                    other => other,
+                }
             }
             other => other,
         }
@@ -275,16 +294,16 @@ impl Provider {
     }
 
     // Fresh keys after a signature failure. If the copy the sign-in used has since been
-    // replaced, that newer copy is used without a fetch; otherwise at most one forced fetch
-    // starts per minute server-wide, and none within the pause after a failure.
-    async fn forced_refresh(
-        &self,
-        now: Instant,
-        seen: u64,
-    ) -> Result<CoreProviderMetadata, ProviderError> {
+    // replaced, that newer copy is returned unfetched, though it may predate the token; otherwise
+    // at most one forced fetch starts per minute server-wide, and none within a failure pause.
+    async fn forced_refresh(&self, now: Instant, seen: u64) -> Result<Refreshed, ProviderError> {
         let mut cache = self.cache.lock().await;
         if let Some(cached) = cache.cached.as_ref().filter(|c| c.generation != seen) {
-            return Ok(cached.metadata.clone());
+            return Ok(Refreshed {
+                metadata: cached.metadata.clone(),
+                generation: cached.generation,
+                fetched: false,
+            });
         }
         if paused(cache.forced, now, FORCED_SPACING) || paused(cache.failed, now, FAILURE_PAUSE) {
             return Err(refused("refresh_spacing"));
@@ -294,7 +313,11 @@ impl Provider {
             .await
             .map_err(|_| refused("refresh_failed"))?;
         let cached = cache.cached.as_ref().ok_or(ProviderError::Refused)?;
-        Ok(cached.metadata.clone())
+        Ok(Refreshed {
+            metadata: cached.metadata.clone(),
+            generation: cached.generation,
+            fetched: true,
+        })
     }
 
     // Fetches discovery and its keys into `cache`, recording the instant of a failure. It logs

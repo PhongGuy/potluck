@@ -29,7 +29,7 @@ impl HookReport {
 /// exactly two space-separated fields matching [a-z0-9_]{1,64} become refusals (a code outside
 /// the known set becomes "unknown", a rule named `unknown` becomes `rule:unknown`); none valid
 /// gives one ("unknown", "unknown"). When the input is longer than 8 KiB, the line the cut lands
-/// in is incomplete and dropped.
+/// in is incomplete and dropped, unless the byte right after the cut is a newline.
 pub(crate) fn parse(bytes: &[u8]) -> HookReport {
     if bytes.is_empty() {
         return HookReport::default();
@@ -37,7 +37,7 @@ pub(crate) fn parse(bytes: &[u8]) -> HookReport {
     // The file is hook-written and untrusted: read a bounded prefix, keep only well-formed lines,
     // and fold codes outside the known set into "unknown" so labels stay bounded.
     let mut head = &bytes[..bytes.len().min(MAX_BYTES)];
-    if bytes.len() > MAX_BYTES {
+    if bytes.len() > MAX_BYTES && bytes[MAX_BYTES] != b'\n' {
         let complete = head.iter().rposition(|&b| b == b'\n').unwrap_or(0);
         head = &head[..complete];
     }
@@ -181,6 +181,18 @@ mod tests {
         text.push(b'\n');
         text.extend_from_slice(last);
         assert_eq!(text.len(), MAX_BYTES);
+        let r = parse(&text);
+        assert_eq!(pairs(&r), [("secret_pattern", "last_rule")]);
+    }
+
+    #[test]
+    fn a_line_ending_exactly_at_the_byte_limit_is_kept() {
+        let last = b"secret_pattern last_rule";
+        let mut text = vec![b'x'; MAX_BYTES - last.len() - 1];
+        text.push(b'\n');
+        text.extend_from_slice(last);
+        text.extend_from_slice(b"\nsecret_pattern late\n");
+        assert_eq!(text[MAX_BYTES], b'\n');
         let r = parse(&text);
         assert_eq!(pairs(&r), [("secret_pattern", "last_rule")]);
     }

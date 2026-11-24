@@ -88,6 +88,34 @@ async fn a_subject_linked_to_another_user_conflicts() {
 }
 
 #[tokio::test]
+async fn a_refused_link_keeps_the_users_old_link() {
+    let (_dir, db) = migrated_db().await;
+    let ada = create_user(&db, "ada", "pw-123456", false).await;
+    let bob = create_user(&db, "bob", "pw-123456", false).await;
+    db.put_oidc_link(ISS, ada.id(), "sub-1", &AuditCtx::system())
+        .await
+        .unwrap();
+    db.put_oidc_link(ISS, bob.id(), "sub-b", &AuditCtx::system())
+        .await
+        .unwrap();
+    let err = db
+        .put_oidc_link(ISS, bob.id(), "sub-1", &AuditCtx::system())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::Conflict { .. }), "{err:?}");
+    let kept = db
+        .oidc_link_of(ISS, bob.id())
+        .await
+        .unwrap()
+        .expect("bob keeps a link");
+    assert_eq!(
+        kept.subject(),
+        "sub-b",
+        "the refused put rolled back its delete"
+    );
+}
+
+#[tokio::test]
 async fn delete_reports_whether_a_link_went() {
     let (_dir, db) = migrated_db().await;
     let ada = create_user(&db, "ada", "pw-123456", false).await;

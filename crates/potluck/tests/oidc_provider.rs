@@ -343,6 +343,34 @@ async fn a_rotated_key_is_fetched_once_and_the_token_verified_again() {
 }
 
 #[tokio::test]
+async fn two_sign_ins_across_one_rotation_share_a_single_refresh() {
+    let (_dir, idp, provider) = setup().await;
+    let t0 = Instant::now();
+    sign_in(&idp, &provider, t0).await.unwrap();
+    let jwks_before = idp.jwks_calls();
+    idp.rotate_key();
+    let t1 = t0 + Duration::from_secs(1);
+    let mut codes = Vec::new();
+    for _ in 0..2 {
+        let url = provider
+            .authorize_url_at(t1, REDIRECT, "server-state", "server-nonce", VERIFIER)
+            .await
+            .unwrap();
+        codes.push(idp.authorize(&url).await.0);
+    }
+    // On the single-threaded test runtime both sign-ins read the cached keys before either
+    // exchange can answer, so the second to reach the forced refresh finds the first's newer
+    // copy; without that shortcut the 60 s spacing would refuse it.
+    let (a, b) = tokio::join!(
+        provider.sign_in_at(t1, REDIRECT, &codes[0], VERIFIER, "server-nonce"),
+        provider.sign_in_at(t1, REDIRECT, &codes[1], VERIFIER, "server-nonce"),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(idp.jwks_calls(), jwks_before + 1, "one refresh for both");
+}
+
+#[tokio::test]
 async fn forced_refreshes_are_spaced_a_minute_apart() {
     let (_dir, idp, provider) = setup().await;
     let t0 = Instant::now();
@@ -391,4 +419,146 @@ async fn warm_reports_an_unreachable_provider_and_a_later_call_recovers() {
         )
         .await
         .unwrap();
+}
+
+// Runs `scenario` against a fresh mock IdP and provider on a current-thread runtime, so every
+// event lands in this thread's capture, and returns the WARN lines it logged. None may name
+// the client secret, the verifier, an IdP code or the issuer's address.
+fn warns_during(scenario: impl AsyncFnOnce(&MockIdp, &Provider)) -> Vec<String> {
+    let mut address = String::new();
+    let text = crate::logs::captured_logs(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_dir, idp, provider) = setup().await;
+            address = idp.issuer().trim_start_matches("http://").to_owned();
+            scenario(&idp, &provider).await;
+        });
+    });
+    let warns: Vec<String> = text
+        .lines()
+        .filter(|line| line.contains(" WARN "))
+        .map(str::to_owned)
+        .collect();
+    for line in &warns {
+        for secret in [CLIENT_SECRET, VERIFIER, "idp-code-", address.as_str()] {
+            assert!(!line.contains(secret), "{secret} in a warning: {line}");
+        }
+    }
+    warns
+}
+
+// Each failed call logs exactly one warning, and it carries the call's own reason.
+fn assert_one_warning(warns: &[String], reason: &str) {
+    assert_eq!(warns.len(), 1, "one warning per failure: {warns:#?}");
+    assert!(warns[0].contains(reason), "{reason} is named: {warns:#?}");
+}
+
+#[test]
+fn an_unreachable_discovery_warns_once() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        idp.set_fault(Fault::Unavailable);
+        let err = provider
+            .authorize_url_at(Instant::now(), REDIRECT, "s", "n", VERIFIER)
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProviderError::Unavailable, "no cached copy");
+    });
+    assert_one_warning(&warns, "reason=\"discovery\"");
+}
+
+#[test]
+fn a_failed_startup_probe_warns_once() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        idp.set_fault(Fault::Unavailable);
+        let err = provider.warm().await.unwrap_err();
+        assert_eq!(err, ProviderError::Unavailable, "the probe fails");
+    });
+    assert_one_warning(&warns, "reason=\"discovery\"");
+}
+
+#[test]
+fn a_failed_daily_refresh_warns_once_and_keeps_the_stale_copy() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        let t0 = Instant::now();
+        provider
+            .authorize_url_at(t0, REDIRECT, "s", "n", VERIFIER)
+            .await
+            .unwrap();
+        idp.set_fault(Fault::Unavailable);
+        provider
+            .authorize_url_at(
+                t0 + DAY + Duration::from_secs(1),
+                REDIRECT,
+                "s",
+                "n",
+                VERIFIER,
+            )
+            .await
+            .unwrap();
+    });
+    assert_one_warning(&warns, "keeping the cached copy");
+}
+
+#[test]
+fn a_failed_exchange_warns_once() {
+    let warns = warns_during(async |_idp: &MockIdp, provider: &Provider| {
+        let now = Instant::now();
+        provider
+            .authorize_url_at(now, REDIRECT, "s", "n", VERIFIER)
+            .await
+            .unwrap();
+        let err = provider
+            .sign_in_at(now, REDIRECT, "never-issued", VERIFIER, "n")
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProviderError::Refused, "the IdP refuses the code");
+    });
+    assert_one_warning(&warns, "reason=\"exchange\"");
+}
+
+#[test]
+fn a_token_that_does_not_verify_warns_once() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        idp.set_fault(Fault::WrongNonce);
+        let err = sign_in(idp, provider, Instant::now()).await.unwrap_err();
+        assert_eq!(err, ProviderError::Refused, "the nonce differs");
+    });
+    assert_one_warning(&warns, "reason=\"claims\"");
+}
+
+#[test]
+fn a_forced_refresh_refused_by_spacing_warns_once() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        let t0 = Instant::now();
+        sign_in(idp, provider, t0).await.unwrap();
+        idp.rotate_key();
+        sign_in(idp, provider, t0 + Duration::from_secs(1))
+            .await
+            .unwrap();
+        idp.rotate_key();
+        let err = sign_in(idp, provider, t0 + Duration::from_secs(30))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProviderError::Refused, "within 60 s of the last");
+    });
+    assert_one_warning(&warns, "reason=\"refresh_spacing\"");
+}
+
+#[test]
+fn a_forced_refresh_whose_fetch_fails_warns_once() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        let t0 = Instant::now();
+        sign_in(idp, provider, t0).await.unwrap();
+        idp.rotate_key();
+        idp.set_fault(Fault::DiscoveryUnavailable);
+        let err = sign_in(idp, provider, t0 + Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ProviderError::Refused, "the refetch fails");
+        assert_eq!(idp.token_calls(), 2, "the second code was exchanged");
+    });
+    assert_one_warning(&warns, "reason=\"refresh_failed\"");
 }

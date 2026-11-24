@@ -583,3 +583,35 @@ fn the_metrics_port_is_documented_on_loopback_and_never_exposed() {
     assert!(section.contains("-p 127.0.0.1:9464:9464"), "{section}");
     assert!(section.contains("no authentication"), "{section}");
 }
+
+#[test]
+fn the_readme_backs_up_a_running_server_through_a_part_file() {
+    let readme = fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let blocks = backup_blocks(&readme);
+    for engine in ["podman", "docker"] {
+        let line = format!(
+            "{engine} exec potluck potluck admin backup > potluck-data.tar.part && mv potluck-data.tar.part potluck-data.tar"
+        );
+        assert!(
+            blocks.iter().any(|b| b.contains(&line)),
+            "{engine} online backup block: {blocks:#?}"
+        );
+    }
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| b.contains("exec -t") || b.contains("exec -it")),
+        "a tty corrupts the tar"
+    );
+    let start = readme.find("## Backups").unwrap();
+    let rest = &readme[start..];
+    let section = &rest[..rest.find("\n## ").unwrap_or(rest.len())];
+    assert!(
+        section.contains("password and token hashes"),
+        "the storage warning"
+    );
+    assert!(
+        section.contains("armed override") && section.contains("re-arm"),
+        "armed overrides are not kept; an admin re-arms after a restore: {section}"
+    );
+}

@@ -370,6 +370,62 @@ async fn two_sign_ins_across_one_rotation_share_a_single_refresh() {
     assert_eq!(idp.jwks_calls(), jwks_before + 1, "one refresh for both");
 }
 
+// The daily refresh lands while a sign-in's code exchange is in flight and fetches the keys
+// just before the IdP rotates, so the newer cached copy still lacks the key the token is
+// signed with; the sign-in must fetch once more rather than settle for that copy.
+#[tokio::test]
+async fn a_rotation_after_a_daily_refresh_that_raced_a_sign_in_still_verifies() {
+    let (_dir, idp, provider) = setup().await;
+    let t0 = Instant::now();
+    sign_in(&idp, &provider, t0).await.unwrap();
+    let jwks_before = idp.jwks_calls();
+    let tokens_before = idp.token_calls();
+    let t1 = t0 + Duration::from_secs(1);
+    let url = provider
+        .authorize_url_at(t1, REDIRECT, "server-state", "server-nonce", VERIFIER)
+        .await
+        .unwrap();
+    let (code, _) = idp.authorize(&url).await;
+    let release = idp.hold_token();
+    let race = async {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while idp.token_calls() == tokens_before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the code exchange reaches the IdP");
+        provider
+            .authorize_url_at(
+                t0 + DAY + Duration::from_secs(3600),
+                REDIRECT,
+                "s",
+                "n",
+                VERIFIER,
+            )
+            .await
+            .unwrap();
+        assert_eq!(idp.jwks_calls(), jwks_before + 1, "the daily refresh ran");
+        idp.rotate_key();
+        release.send(()).unwrap();
+    };
+    let (signed_in, ()) = tokio::join!(
+        provider.sign_in_at(t1, REDIRECT, &code, VERIFIER, "server-nonce"),
+        race,
+    );
+    signed_in.unwrap();
+    assert_eq!(
+        idp.jwks_calls(),
+        jwks_before + 2,
+        "one forced fetch beyond the daily refresh"
+    );
+    assert_eq!(
+        idp.token_calls(),
+        tokens_before + 1,
+        "the code is exchanged once"
+    );
+}
+
 #[tokio::test]
 async fn forced_refreshes_are_spaced_a_minute_apart() {
     let (_dir, idp, provider) = setup().await;
@@ -475,6 +531,29 @@ fn a_failed_startup_probe_warns_once() {
         idp.set_fault(Fault::Unavailable);
         let err = provider.warm().await.unwrap_err();
         assert_eq!(err, ProviderError::Unavailable, "the probe fails");
+    });
+    assert_one_warning(&warns, "reason=\"discovery\"");
+}
+
+// Inside the pause after a failed fetch the call is refused without a fetch, and the
+// failure it repeats was already logged, so it adds no warning of its own.
+#[test]
+fn a_call_inside_the_discovery_pause_is_unavailable_without_a_new_warning() {
+    let warns = warns_during(async |idp: &MockIdp, provider: &Provider| {
+        idp.set_fault(Fault::DiscoveryUnavailable);
+        let t0 = Instant::now();
+        for (at, why) in [(0, "the failed fetch"), (5, "inside the pause")] {
+            let err = provider
+                .authorize_url_at(t0 + Duration::from_secs(at), REDIRECT, "s", "n", VERIFIER)
+                .await
+                .unwrap_err();
+            assert_eq!(err, ProviderError::Unavailable, "{why}");
+        }
+        assert_eq!(
+            idp.discovery_calls(),
+            1,
+            "nothing is fetched inside the pause"
+        );
     });
     assert_one_warning(&warns, "reason=\"discovery\"");
 }

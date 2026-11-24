@@ -25,6 +25,8 @@ pub(crate) mod http;
 
 /// Distinct refusal rule names kept as their own series; later ones become "other".
 pub(crate) const MAX_RULES: usize = 128;
+/// The label of a real rule named `other`; `:` is outside the rule charset, so no rule clashes.
+const OTHER_RULE_LABEL: &str = "rule:other";
 
 const HTTP_BUCKETS: [f64; 17] = [
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 30.0, 60.0,
@@ -311,14 +313,19 @@ impl Metrics {
     }
 
     /// Counts one refusal finding.
-    /// `code`, `rule`, `kind` are already validated; the 129th distinct rule becomes "other".
+    /// `code`, `rule`, `kind` are already validated; the 129th distinct rule becomes "other", and
+    /// a rule literally named `other` records as `rule:other` so it never joins that series.
     pub(crate) fn refusal(&self, code: &'static str, rule: &str, kind: &'static str) {
         // A rule keeps its own series once seen, so the cap only bounds new names.
         let rule = {
             let mut seen = self.seen_rules.lock().unwrap_or_else(|e| e.into_inner());
             if seen.contains(rule) || seen.len() < MAX_RULES {
                 seen.insert(rule.to_owned());
-                rule.to_owned()
+                if rule == "other" {
+                    OTHER_RULE_LABEL.to_owned()
+                } else {
+                    rule.to_owned()
+                }
             } else {
                 "other".to_owned()
             }
@@ -583,6 +590,31 @@ mod tests {
             Some(2.0),
             "a seen rule keeps its own series"
         );
+    }
+
+    #[test]
+    fn a_rule_named_other_is_kept_apart_from_the_overflow_series() {
+        let m = Metrics::new("0.1.0");
+        let series = |rule: &str| {
+            format!(
+                "potluck_push_refusals_total{{code=\"secret_pattern\",rule=\"{rule}\",kind=\"apinata\"}}"
+            )
+        };
+        m.refusal("secret_pattern", "other", "apinata");
+        let text = m.render(&Snapshot::default());
+        assert_eq!(sample(&text, &series("rule:other")), Some(1.0), "{text}");
+        assert_eq!(sample(&text, &series("other")), None, "{text}");
+        for i in 1..MAX_RULES {
+            m.refusal("secret_pattern", &format!("rule_{i}"), "apinata");
+        }
+        m.refusal("secret_pattern", "one_too_many", "apinata");
+        let text = m.render(&Snapshot::default());
+        assert_eq!(sample(&text, &series("other")), Some(1.0), "{text}");
+        assert_eq!(sample(&text, &series("rule:other")), Some(1.0), "{text}");
+        m.refusal("secret_pattern", "other", "apinata");
+        let text = m.render(&Snapshot::default());
+        assert_eq!(sample(&text, &series("rule:other")), Some(2.0), "{text}");
+        assert_eq!(sample(&text, &series("other")), Some(1.0), "{text}");
     }
 
     #[test]

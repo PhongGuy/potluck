@@ -25,14 +25,19 @@ impl HookReport {
 
 /// Empty input: not refused. Otherwise refused; the first 64 lines of the first 8 KiB that are
 /// exactly two space-separated fields matching [a-z0-9_]{1,64} become refusals (a code outside
-/// the known set becomes "unknown"); none valid gives one ("unknown", "unknown").
+/// the known set becomes "unknown"); none valid gives one ("unknown", "unknown"). When the input
+/// is longer than 8 KiB, the line the cut lands in is incomplete and dropped.
 pub(crate) fn parse(bytes: &[u8]) -> HookReport {
     if bytes.is_empty() {
         return HookReport::default();
     }
     // The file is hook-written and untrusted: read a bounded prefix, keep only well-formed lines,
     // and fold codes outside the known set into "unknown" so labels stay bounded.
-    let head = &bytes[..bytes.len().min(MAX_BYTES)];
+    let mut head = &bytes[..bytes.len().min(MAX_BYTES)];
+    if bytes.len() > MAX_BYTES {
+        let complete = head.iter().rposition(|&b| b == b'\n').unwrap_or(0);
+        head = &head[..complete];
+    }
     let mut refusals: Vec<(&'static str, String)> = head
         .split(|&b| b == b'\n')
         .take(MAX_LINES)
@@ -122,6 +127,40 @@ mod tests {
         let r = parse(b"\xff\xfe garbage\n");
         assert!(r.refused());
         assert_eq!(pairs(&r), [("unknown", "unknown")]);
+    }
+
+    #[test]
+    fn a_line_cut_at_the_byte_limit_is_dropped() {
+        // The cut lands after "secret_pattern aws", which alone would parse as rule `aws`.
+        let mut text = b"secret_value early\n".to_vec();
+        let cut_line = b"secret_pattern aws";
+        let filler = MAX_BYTES - text.len() - cut_line.len() - 1;
+        text.extend(std::iter::repeat_n(b'x', filler));
+        text.push(b'\n');
+        text.extend_from_slice(b"secret_pattern aws_access_key\n");
+        assert_eq!(&text[MAX_BYTES - cut_line.len()..MAX_BYTES], cut_line);
+        let r = parse(&text);
+        assert_eq!(pairs(&r), [("secret_value", "early")]);
+    }
+
+    #[test]
+    fn an_oversized_report_with_no_newline_is_unknown() {
+        let mut text = b"secret_pattern ".to_vec();
+        text.extend(std::iter::repeat_n(b'a', MAX_BYTES));
+        let r = parse(&text);
+        assert!(r.refused());
+        assert_eq!(pairs(&r), [("unknown", "unknown")]);
+    }
+
+    #[test]
+    fn a_report_of_exactly_the_byte_limit_keeps_its_last_line() {
+        let last = b"secret_pattern last_rule";
+        let mut text = vec![b'x'; MAX_BYTES - last.len() - 1];
+        text.push(b'\n');
+        text.extend_from_slice(last);
+        assert_eq!(text.len(), MAX_BYTES);
+        let r = parse(&text);
+        assert_eq!(pairs(&r), [("secret_pattern", "last_rule")]);
     }
 
     #[test]

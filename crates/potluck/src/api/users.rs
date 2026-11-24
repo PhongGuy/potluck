@@ -1,10 +1,10 @@
 //! User management: `GET /users` and `POST /users` for server admins, `PATCH /users/{username}`
-//! for admins and the user themself.
+//! for admins and the user themself, and `PUT`/`DELETE /users/{username}/oidc` for server admins.
 
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::AppState;
 use super::audit;
@@ -15,7 +15,8 @@ use super::events;
 use super::json::ApiJson;
 use super::objects::UserJson;
 use super::validate;
-use crate::db::accounts::{NewUser, UserPatch};
+use crate::db::OidcLink;
+use crate::db::accounts::{NewUser, UserPatch, UserRecord};
 use crate::slug::Slug;
 
 /// The `POST /users` body. No `Debug`, so the password cannot reach a log by formatting.
@@ -228,6 +229,98 @@ pub(super) async fn patch(
         tracing::error!(user = user.id(), error = ?err, "closing streams after an admin drop failed");
     }
     Ok(Json(UserJson::from(&user)))
+}
+
+/// The `PUT /users/{username}/oidc` body.
+#[derive(Deserialize)]
+pub(super) struct PutOidc {
+    subject: String,
+}
+
+/// The answer to `PUT /users/{username}/oidc`: `{issuer, subject, linked_at}`.
+#[derive(Serialize)]
+pub(super) struct OidcLinkJson {
+    issuer: String,
+    subject: String,
+    linked_at: String,
+}
+
+impl From<&OidcLink> for OidcLinkJson {
+    fn from(link: &OidcLink) -> Self {
+        OidcLinkJson {
+            issuer: link.issuer().to_owned(),
+            subject: link.subject().to_owned(),
+            linked_at: link.linked_at().to_owned(),
+        }
+    }
+}
+
+/// `PUT /users/{username}/oidc` (server admin or `System`) `{subject}`: links the user to that
+/// subject under the configured issuer, replacing any link it had. 409 when OIDC is not
+/// configured or the subject is linked to another user, 404 for an unknown user, 422 `subject`
+/// unless it is 1 to 255 characters; else 200 `{issuer, subject, linked_at}`.
+pub(super) async fn put_oidc(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    ip: ClientIp,
+    Path(username): Path<String>,
+    ApiJson(body): ApiJson<PutOidc>,
+) -> ApiResult<Json<OidcLinkJson>> {
+    let (issuer, user) = oidc_target(&state, &auth, &username).await?;
+    let subject = subject(&body.subject)?;
+    let link = state
+        .db()
+        .put_oidc_link(&issuer, user.id(), subject, &audit::ctx(&auth, ip))
+        .await?;
+    Ok(Json(OidcLinkJson::from(&link)))
+}
+
+/// `DELETE /users/{username}/oidc` (server admin or `System`): removes the user's link under the
+/// configured issuer. 204 whether or not a link existed, 409 when OIDC is not configured, 404 for
+/// an unknown user.
+pub(super) async fn delete_oidc(
+    State(state): State<AppState>,
+    auth: Authenticated,
+    ip: ClientIp,
+    Path(username): Path<String>,
+) -> ApiResult<StatusCode> {
+    let (issuer, user) = oidc_target(&state, &auth, &username).await?;
+    state
+        .db()
+        .delete_oidc_link(&issuer, user.id(), &audit::ctx(&auth, ip))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// Both link routes check in the same order: the caller's role, then that OIDC is configured
+// (links are keyed by its issuer), then that the user exists.
+async fn oidc_target(
+    state: &AppState,
+    auth: &Authenticated,
+    username: &str,
+) -> ApiResult<(String, UserRecord)> {
+    auth.require_server_admin()?;
+    let Some(oidc) = state.oidc() else {
+        return Err(ApiError::conflict("OIDC sign-in is not configured").into());
+    };
+    let issuer = oidc.provider().settings().issuer().to_owned();
+    let Some(user) = state.db().user_by_username(username).await? else {
+        return Err(ApiError::not_found("no such user").into());
+    };
+    Ok((issuer, user))
+}
+
+/// 1 to 255 characters, taken as given: a subject is the IdP's opaque identifier, so it is
+/// neither trimmed nor otherwise normalised.
+fn subject(s: &str) -> Result<&str, ApiError> {
+    if (1..=255).contains(&s.chars().count()) {
+        Ok(s)
+    } else {
+        Err(ApiError::invalid_value(
+            "subject",
+            "subject must be 1 to 255 characters",
+        ))
+    }
 }
 
 /// `^[a-z0-9][a-z0-9-]{0,62}$` and not the reserved `system`.

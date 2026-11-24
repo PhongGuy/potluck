@@ -5,3 +5,5 @@
 
 #[expect(dead_code, reason = "wired by write_backup")]
 mod copy;
+#[expect(dead_code, reason = "wired by write_backup")]
+mod snapshot;

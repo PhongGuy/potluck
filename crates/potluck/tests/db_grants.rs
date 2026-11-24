@@ -1,6 +1,7 @@
 //! Grants, the highest-grant rule, and the armed-override lookup.
 
 use potluck::db::accounts::{NewUser, UserRecord};
+use potluck::db::audit::AuditCtx;
 use potluck::db::grants::{GrantRecord, Subject};
 use potluck::db::teams::TeamRecord;
 use potluck::db::workspaces::{NewWorkspace, WorkspaceRecord};
@@ -33,29 +34,32 @@ struct Fx {
 
 async fn fx() -> (tempfile::TempDir, Fx) {
     let (dir, db) = migrated_db().await;
-    let core = db.create_team(&slug("core"), "Core").await.unwrap();
+    let core = db
+        .create_team(&slug("core"), "Core", &AuditCtx::system())
+        .await
+        .unwrap();
     let api = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("api"),
-            "API",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("api"), "API", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
     let docs = db
-        .create_workspace(NewWorkspace::new(
-            core.id(),
-            &slug("docs"),
-            "Docs",
-            "apinata",
-            "main",
-        ))
+        .create_workspace(
+            NewWorkspace::new(core.id(), &slug("docs"), "Docs", "apinata", "main"),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap();
-    let bob = db.create_user(NewUser::new("bob", "Bob")).await.unwrap();
-    let ann = db.create_user(NewUser::new("ann", "Ann")).await.unwrap();
+    let bob = db
+        .create_user(NewUser::new("bob", "Bob"), &AuditCtx::system())
+        .await
+        .unwrap();
+    let ann = db
+        .create_user(NewUser::new("ann", "Ann"), &AuditCtx::system())
+        .await
+        .unwrap();
     (
         dir,
         Fx {
@@ -87,33 +91,33 @@ fn role_parse_matches_as_str() {
 async fn grants_are_upserted_listed_and_deleted() {
     let (_d, f) = fx().await;
     let g =
-        f.db.put_grant(f.api.id(), user("bob"), Role::Read)
+        f.db.put_grant(f.api.id(), user("bob"), Role::Read, &AuditCtx::system())
             .await
             .unwrap()
             .unwrap();
     assert_eq!(g, GrantRecord::new(user("bob"), Role::Read));
     let g =
-        f.db.put_grant(f.api.id(), user("bob"), Role::Write)
+        f.db.put_grant(f.api.id(), user("bob"), Role::Write, &AuditCtx::system())
             .await
             .unwrap()
             .unwrap();
     assert_eq!(g.role(), Role::Write, "a second put replaces the role");
-    f.db.put_grant(f.api.id(), team("core"), Role::Read)
+    f.db.put_grant(f.api.id(), team("core"), Role::Read, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
-    f.db.put_grant(f.api.id(), user("ann"), Role::Admin)
+    f.db.put_grant(f.api.id(), user("ann"), Role::Admin, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        f.db.put_grant(f.api.id(), user("nobody"), Role::Read)
+        f.db.put_grant(f.api.id(), user("nobody"), Role::Read, &AuditCtx::system())
             .await
             .unwrap(),
         None
     );
     assert_eq!(
-        f.db.put_grant(f.api.id(), team("nope"), Role::Read)
+        f.db.put_grant(f.api.id(), team("nope"), Role::Read, &AuditCtx::system())
             .await
             .unwrap(),
         None
@@ -131,13 +135,23 @@ async fn grants_are_upserted_listed_and_deleted() {
         f.db.list_grants(f.docs.id()).await.unwrap().is_empty(),
         "grants are per workspace"
     );
-    assert!(f.db.delete_grant(f.api.id(), user("bob")).await.unwrap());
     assert!(
-        !f.db.delete_grant(f.api.id(), user("bob")).await.unwrap(),
+        f.db.delete_grant(f.api.id(), user("bob"), &AuditCtx::system())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.db
+            .delete_grant(f.api.id(), user("bob"), &AuditCtx::system())
+            .await
+            .unwrap(),
         "gone"
     );
     assert!(
-        !f.db.delete_grant(f.api.id(), user("nobody")).await.unwrap(),
+        !f.db
+            .delete_grant(f.api.id(), user("nobody"), &AuditCtx::system())
+            .await
+            .unwrap(),
         "unknown subject"
     );
     assert_eq!(f.db.list_grants(f.api.id()).await.unwrap().len(), 2);
@@ -151,13 +165,15 @@ async fn the_highest_grant_wins_and_membership_alone_grants_nothing() {
         None,
         "no grant, no role"
     );
-    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
+    f.db.add_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
     assert_eq!(
         f.db.role_for(f.api.id(), f.bob.id()).await.unwrap(),
         None,
         "membership of the owning team is not a grant"
     );
-    f.db.put_grant(f.api.id(), team("core"), Role::Write)
+    f.db.put_grant(f.api.id(), team("core"), Role::Write, &AuditCtx::system())
         .await
         .unwrap();
     assert_eq!(
@@ -170,7 +186,7 @@ async fn the_highest_grant_wins_and_membership_alone_grants_nothing() {
         None,
         "and nobody else"
     );
-    f.db.put_grant(f.api.id(), user("bob"), Role::Read)
+    f.db.put_grant(f.api.id(), user("bob"), Role::Read, &AuditCtx::system())
         .await
         .unwrap();
     assert_eq!(
@@ -178,7 +194,7 @@ async fn the_highest_grant_wins_and_membership_alone_grants_nothing() {
         Some(Role::Write),
         "the higher of user and team wins"
     );
-    f.db.put_grant(f.api.id(), user("bob"), Role::Admin)
+    f.db.put_grant(f.api.id(), user("bob"), Role::Admin, &AuditCtx::system())
         .await
         .unwrap();
     assert_eq!(
@@ -190,8 +206,12 @@ async fn the_highest_grant_wins_and_membership_alone_grants_nothing() {
         None,
         "another workspace"
     );
-    f.db.remove_member(f.core.id(), f.bob.id()).await.unwrap();
-    f.db.delete_grant(f.api.id(), user("bob")).await.unwrap();
+    f.db.remove_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
+    f.db.delete_grant(f.api.id(), user("bob"), &AuditCtx::system())
+        .await
+        .unwrap();
     assert_eq!(
         f.db.role_for(f.api.id(), f.bob.id()).await.unwrap(),
         None,
@@ -208,14 +228,16 @@ async fn workspaces_for_user_lists_held_roles_in_order() {
             .unwrap()
             .is_empty()
     );
-    f.db.put_grant(f.docs.id(), user("bob"), Role::Read)
+    f.db.put_grant(f.docs.id(), user("bob"), Role::Read, &AuditCtx::system())
         .await
         .unwrap();
-    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
-    f.db.put_grant(f.api.id(), team("core"), Role::Write)
+    f.db.add_member(f.core.id(), f.bob.id(), &AuditCtx::system())
         .await
         .unwrap();
-    f.db.put_grant(f.api.id(), user("bob"), Role::Read)
+    f.db.put_grant(f.api.id(), team("core"), Role::Write, &AuditCtx::system())
+        .await
+        .unwrap();
+    f.db.put_grant(f.api.id(), user("bob"), Role::Read, &AuditCtx::system())
         .await
         .unwrap();
     let held = f.db.workspaces_for_user(f.bob.id()).await.unwrap();
@@ -236,13 +258,19 @@ async fn workspaces_for_user_lists_held_roles_in_order() {
 #[tokio::test]
 async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
     let (_d, f) = fx().await;
-    f.db.put_grant(f.api.id(), user("bob"), Role::Read)
+    f.db.put_grant(f.api.id(), user("bob"), Role::Read, &AuditCtx::system())
         .await
         .unwrap();
     let id =
-        f.db.arm_override(f.api.id(), f.bob.id(), "import", "system")
-            .await
-            .unwrap();
+        f.db.arm_override(
+            f.api.id(),
+            f.bob.id(),
+            "import",
+            "system",
+            &AuditCtx::system(),
+        )
+        .await
+        .unwrap();
     assert_eq!(
         f.db.armed_override(f.api.id(), f.bob.id()).await.unwrap(),
         Some(id)
@@ -258,7 +286,7 @@ async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
         "on one workspace"
     );
     let second =
-        f.db.arm_override(f.api.id(), f.bob.id(), "again", "ann")
+        f.db.arm_override(f.api.id(), f.bob.id(), "again", "ann", &AuditCtx::system())
             .await
             .unwrap();
     assert!(second > id);
@@ -267,7 +295,11 @@ async fn deleting_a_workspace_takes_its_grants_and_overrides_with_it() {
         Some(id),
         "the earliest armed override is the one a push consumes"
     );
-    assert!(f.db.delete_workspace(f.api.id()).await.unwrap());
+    assert!(
+        f.db.delete_workspace(f.api.id(), &AuditCtx::system())
+            .await
+            .unwrap()
+    );
     assert!(f.db.list_grants(f.api.id()).await.unwrap().is_empty());
     assert_eq!(
         f.db.armed_override(f.api.id(), f.bob.id()).await.unwrap(),
@@ -292,15 +324,15 @@ fn grant_rows(c: &rusqlite::Connection) -> i64 {
 #[tokio::test]
 async fn deleting_a_user_takes_their_grants_with_it() {
     let (d, f) = fx().await;
-    f.db.put_grant(f.api.id(), user("ann"), Role::Admin)
+    f.db.put_grant(f.api.id(), user("ann"), Role::Admin, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
-    f.db.put_grant(f.docs.id(), user("ann"), Role::Read)
+    f.db.put_grant(f.docs.id(), user("ann"), Role::Read, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
-    f.db.put_grant(f.api.id(), user("bob"), Role::Write)
+    f.db.put_grant(f.api.id(), user("bob"), Role::Write, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
@@ -313,7 +345,10 @@ async fn deleting_a_user_takes_their_grants_with_it() {
         [GrantRecord::new(user("bob"), Role::Write)]
     );
     // SQLite gives the freed highest id to the next user, who must not inherit ann's role.
-    let cat = f.db.create_user(NewUser::new("cat", "Cat")).await.unwrap();
+    let cat =
+        f.db.create_user(NewUser::new("cat", "Cat"), &AuditCtx::system())
+            .await
+            .unwrap();
     assert_eq!(cat.id(), f.ann.id(), "precondition: the id is reused");
     assert_eq!(f.db.role_for(f.api.id(), cat.id()).await.unwrap(), None);
 }
@@ -321,21 +356,24 @@ async fn deleting_a_user_takes_their_grants_with_it() {
 #[tokio::test]
 async fn deleting_a_team_takes_only_its_own_grants_with_it() {
     let (d, f) = fx().await;
-    let ops = f.db.create_team(&slug("ops"), "Ops").await.unwrap();
+    let ops =
+        f.db.create_team(&slug("ops"), "Ops", &AuditCtx::system())
+            .await
+            .unwrap();
     assert_eq!(
         ops.id(),
         f.ann.id(),
         "precondition: a team and a user share an id"
     );
-    f.db.put_grant(f.api.id(), team("ops"), Role::Write)
+    f.db.put_grant(f.api.id(), team("ops"), Role::Write, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
-    f.db.put_grant(f.api.id(), team("core"), Role::Read)
+    f.db.put_grant(f.api.id(), team("core"), Role::Read, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
-    f.db.put_grant(f.api.id(), user("ann"), Role::Read)
+    f.db.put_grant(f.api.id(), user("ann"), Role::Read, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
@@ -359,7 +397,7 @@ async fn deleting_a_team_takes_only_its_own_grants_with_it() {
 #[tokio::test]
 async fn a_rolled_back_delete_keeps_the_grants() {
     let (d, f) = fx().await;
-    f.db.put_grant(f.api.id(), user("ann"), Role::Admin)
+    f.db.put_grant(f.api.id(), user("ann"), Role::Admin, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
@@ -383,7 +421,7 @@ async fn a_rolled_back_delete_keeps_the_grants() {
 #[tokio::test]
 async fn list_grants_skips_a_grant_whose_subject_is_gone() {
     let (d, f) = fx().await;
-    f.db.put_grant(f.api.id(), user("bob"), Role::Read)
+    f.db.put_grant(f.api.id(), user("bob"), Role::Read, &AuditCtx::system())
         .await
         .unwrap()
         .unwrap();
@@ -406,8 +444,10 @@ async fn list_grants_skips_a_grant_whose_subject_is_gone() {
 #[tokio::test]
 async fn an_unknown_grant_role_is_an_error_not_read() {
     let (d, f) = fx().await;
-    f.db.add_member(f.core.id(), f.bob.id()).await.unwrap();
-    f.db.put_grant(f.api.id(), team("core"), Role::Admin)
+    f.db.add_member(f.core.id(), f.bob.id(), &AuditCtx::system())
+        .await
+        .unwrap();
+    f.db.put_grant(f.api.id(), team("core"), Role::Admin, &AuditCtx::system())
         .await
         .unwrap();
     let c = raw(&d);

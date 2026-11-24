@@ -8,7 +8,9 @@ use serde::Deserialize;
 
 use super::AppState;
 use super::actor::Actor;
+use super::audit;
 use super::auth::Authenticated;
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::json::ApiJson;
 use super::objects::OverrideJson;
@@ -48,6 +50,7 @@ pub(super) async fn list(
 pub(super) async fn arm(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     path: WsPath,
     body: Result<ApiJson<ArmOverride>, ErrorResponse>,
 ) -> ApiResult<(StatusCode, Json<OverrideJson>)> {
@@ -79,7 +82,7 @@ pub(super) async fn arm(
     let armed_by = actor_name(&auth);
     let id = state
         .db()
-        .arm_override(ws.id(), user.id(), reason, armed_by)
+        .arm_override(ws.id(), user.id(), reason, armed_by, &audit::ctx(&auth, ip))
         .await?;
     let Some(record) = state.db().override_by_id(ws.id(), id).await? else {
         tracing::error!(id, "an override vanished right after it was armed");
@@ -100,6 +103,7 @@ pub(super) async fn arm(
 pub(super) async fn disarm(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     path: OverridePath,
 ) -> ApiResult<StatusCode> {
     // The role is checked before the id is parsed, so a caller without admin learns nothing.
@@ -112,7 +116,11 @@ pub(super) async fn disarm(
     let Some(id) = id else {
         return Err(ApiError::not_found("no such override").into());
     };
-    match state.db().disarm_override(ws.id(), id).await? {
+    match state
+        .db()
+        .disarm_override(ws.id(), id, &audit::ctx(&auth, ip))
+        .await?
+    {
         Disarmed::Removed => {
             let disarmed_by = actor_name(&auth);
             tracing::info!(

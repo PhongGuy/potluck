@@ -3,6 +3,7 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 
+use super::audit::{self, AuditAction, AuditCtx, Entry, WorkspaceCreated};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 use crate::slug::Slug;
@@ -123,13 +124,21 @@ pub(super) fn workspace_from_row(row: &Row<'_>) -> rusqlite::Result<WorkspaceRec
 }
 
 impl Db {
-    /// Inserts with `created_at = now`; `Conflict` ("workspace {slug} exists in this team")
-    /// on the `(team_id, slug)` key. The kind must pass the schema's CHECK.
-    pub async fn create_workspace(&self, ws: NewWorkspace) -> Result<WorkspaceRecord, DbError> {
+    /// Inserts with `created_at = now` and writes its `workspace.create` row in one transaction;
+    /// `Conflict` ("workspace {slug} exists in this team") on the `(team_id, slug)` key. The kind
+    /// must pass the schema's CHECK.
+    pub async fn create_workspace(
+        &self,
+        ws: NewWorkspace,
+        ctx: &AuditCtx,
+    ) -> Result<WorkspaceRecord, DbError> {
+        let ctx = ctx.clone();
         // The UNIQUE constraint is the duplicate check, so a writer on another connection is
         // caught too; an unknown kind or team is left to the schema and surfaces as `Sqlite`.
+        // An error at any step drops `tx` uncommitted.
         self.call(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO workspaces \
                  (team_id, slug, name, kind, default_branch, import_pending, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -150,7 +159,18 @@ impl Db {
                 "SELECT {WORKSPACE_COLUMNS} FROM workspaces w JOIN teams t ON t.id = w.team_id \
                  WHERE w.id = ?1"
             );
-            Ok(conn.query_row(&sql, [conn.last_insert_rowid()], workspace_from_row)?)
+            let record = tx.query_row(&sql, [tx.last_insert_rowid()], workspace_from_row)?;
+            let name = format!("{}/{}", record.team_slug, record.slug);
+            let entry = Entry::new(AuditAction::WorkspaceCreate)
+                .target("workspace", Some(record.id), Some(&name))
+                .workspace(&name)
+                .detail(&WorkspaceCreated {
+                    kind: &record.kind,
+                    seed: !record.import_pending,
+                })?;
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(record)
         })
         .await
     }
@@ -191,11 +211,31 @@ impl Db {
         .await
     }
 
-    /// Deletes the row; grants and overrides cascade. `Ok(true)` when a row went.
-    pub async fn delete_workspace(&self, id: i64) -> Result<bool, DbError> {
+    /// Deletes the row (grants and overrides cascade) and writes its `workspace.delete` row in
+    /// one transaction. `Ok(true)` when a row went; `Ok(false)`, and no audit row, otherwise.
+    pub async fn delete_workspace(&self, id: i64, ctx: &AuditCtx) -> Result<bool, DbError> {
+        let ctx = ctx.clone();
+        // The name is read before the delete, since the row it comes from is about to go.
         self.call(move |conn| {
-            let changed = conn.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
-            Ok(changed > 0)
+            let tx = conn.transaction()?;
+            let name: Option<String> = tx
+                .query_row(
+                    "SELECT t.slug || '/' || w.slug FROM workspaces w \
+                     JOIN teams t ON t.id = w.team_id WHERE w.id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(name) = name else {
+                return Ok(false);
+            };
+            tx.execute("DELETE FROM workspaces WHERE id = ?1", [id])?;
+            let entry = Entry::new(AuditAction::WorkspaceDelete)
+                .target("workspace", Some(id), Some(&name))
+                .workspace(&name);
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(true)
         })
         .await
     }

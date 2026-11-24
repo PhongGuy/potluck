@@ -24,6 +24,7 @@ mod admin_update;
 mod admin_users;
 mod api_system;
 mod audit_api;
+mod audit_wiring;
 mod authenticate;
 mod branch_protection;
 mod cli_version;

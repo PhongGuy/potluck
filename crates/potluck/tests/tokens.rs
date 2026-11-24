@@ -1,6 +1,7 @@
 //! Own tokens, an admin's view of a user's tokens, and `/me`.
 
 use potluck::db::accounts::UserPatch;
+use potluck::db::audit::AuditCtx;
 use serde_json::{Value, json};
 
 use crate::common::{
@@ -225,6 +226,7 @@ async fn me_returns_the_user_the_identity_and_no_workspaces_yet() {
             UserPatch::default()
                 .display_name("Bob B")
                 .email(Some("bob@example.com")),
+            &AuditCtx::system(),
         )
         .await
         .unwrap();

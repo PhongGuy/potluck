@@ -7,10 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use super::client_ip::ClientIp;
-use super::error::{ApiError, ApiResult};
+use super::error::{ApiError, ApiResult, ErrorResponse};
 use super::json::ApiJson;
 use super::objects::{TokenJson, UserJson};
 use super::{tokens, validate};
+use crate::db::accounts::TokenOrigin;
+use crate::db::audit::{AuditCtx, SignInFailure};
 use crate::metrics::{SignInMethod, SignInOutcome};
 
 /// The sign-in body. No `Debug`, so the password cannot reach a log by formatting.
@@ -52,17 +54,16 @@ pub(super) async fn create(
         ApiError::rate_limited(e)
     })?;
 
-    // Every credential failure gets the same refusal; only the username reaches the log.
-    let refused = || {
-        tracing::debug!(username = %body.username, "sign-in refused");
-        count(SignInOutcome::Failure);
-        ApiError::unauthenticated("invalid username or password")
-    };
+    // Every credential failure gets the same refusal, checked in the order of the stored reason.
     let Some(user) = state.db().user_by_username(&body.username).await? else {
-        return Err(refused().into());
+        return Err(refuse(&state, ip, &body.username, None, SignInFailure::UnknownUser).await);
     };
-    let Some(phc) = user.password_hash().filter(|_| !user.disabled()) else {
-        return Err(refused().into());
+    let known = Some((user.id(), user.username()));
+    if user.disabled() {
+        return Err(refuse(&state, ip, &body.username, known, SignInFailure::Disabled).await);
+    }
+    let Some(phc) = user.password_hash() else {
+        return Err(refuse(&state, ip, &body.username, known, SignInFailure::NoPassword).await);
     };
     // argon2 is deliberately slow, so it runs off the async workers.
     let passwords = state.passwords().clone();
@@ -72,14 +73,37 @@ pub(super) async fn create(
         .map_err(|_| ApiError::internal("password check failed"))?;
     match verified {
         Ok(true) => {}
-        Ok(false) => return Err(refused().into()),
+        Ok(false) => {
+            return Err(refuse(
+                &state,
+                ip,
+                &body.username,
+                known,
+                SignInFailure::WrongPassword,
+            )
+            .await);
+        }
         Err(_) => {
             tracing::error!(username = %body.username, "stored password hash is unusable");
             return Err(ApiError::internal("password check failed").into());
         }
     }
 
-    let (token, record) = tokens::mint_and_create(&state, user.id(), token_name, None).await?;
+    // The sign-in is the new token owner's act, not the anonymous request's.
+    let ctx = AuditCtx::user(user.id(), user.username());
+    let ctx = match ip.addr() {
+        Some(addr) => ctx.with_client_ip(addr),
+        None => ctx,
+    };
+    let (token, record) = tokens::mint_and_create(
+        &state,
+        user.id(),
+        token_name,
+        None,
+        TokenOrigin::Session,
+        &ctx,
+    )
+    .await?;
     count(SignInOutcome::Success);
     Ok((
         StatusCode::CREATED,
@@ -89,4 +113,27 @@ pub(super) async fn create(
             user: UserJson::from(&user),
         }),
     ))
+}
+
+/// Counts and records the refusal and returns the 401. A failed insert is logged and answered the
+/// same way, so the log's health never shows in the response.
+async fn refuse(
+    state: &AppState,
+    ip: ClientIp,
+    username: &str,
+    user: Option<(i64, &str)>,
+    reason: SignInFailure,
+) -> ErrorResponse {
+    tracing::debug!(username = %username, "sign-in refused");
+    state
+        .metrics()
+        .sign_in(SignInMethod::Password, SignInOutcome::Failure);
+    if let Err(e) = state
+        .db()
+        .record_failed_sign_in(user, reason, ip.addr())
+        .await
+    {
+        tracing::error!(error = %e, "could not record a refused sign-in");
+    }
+    ApiError::unauthenticated("invalid username or password").into()
 }

@@ -18,6 +18,14 @@ pub(crate) enum ClientIp {
 }
 
 impl ClientIp {
+    /// The network address, or `None` for the admin socket.
+    pub(crate) fn addr(&self) -> Option<IpAddr> {
+        match self {
+            ClientIp::Peer(addr) => Some(*addr),
+            ClientIp::Local => None,
+        }
+    }
+
     /// The rate-limiter key: `local`; `ip:<a.b.c.d>` for IPv4 (an IPv4-mapped IPv6 address is
     /// unmapped first); `ip:<prefix>::/64` for IPv6, the address masked to its first 64 bits, so
     /// one host's whole /64 shares a window.
@@ -111,6 +119,12 @@ mod tests {
 
     fn trusted(list: &'static [&'static str]) -> impl Fn(IpAddr) -> bool {
         move |a| list.iter().any(|c| ip(c) == a)
+    }
+
+    #[test]
+    fn addr_is_the_peer_and_none_for_the_socket() {
+        assert_eq!(ClientIp::Peer(ip("10.0.0.7")).addr(), Some(ip("10.0.0.7")));
+        assert_eq!(ClientIp::Local.addr(), None);
     }
 
     #[test]

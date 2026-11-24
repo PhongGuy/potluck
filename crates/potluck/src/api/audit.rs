@@ -3,12 +3,13 @@
 use axum::Json;
 use axum::extract::{RawQuery, State};
 
-use super::AppState;
 use super::auth::Authenticated;
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult};
 use super::objects::AuditJson;
+use super::{Actor, AppState};
 use crate::clock;
-use crate::db::audit::AuditFilter;
+use crate::db::audit::{AuditCtx, AuditFilter};
 
 /// `GET /audit?actor=&workspace=&action=&since=&until=&before=&limit=` (server admin or
 /// `System`): `[Audit]`. A bad `since`, `until`, `before` or `limit` is 422 naming it.
@@ -21,6 +22,20 @@ pub(super) async fn list(
     let filter = parse(query.as_deref().unwrap_or(""))?;
     let rows = state.db().audit(filter).await?;
     Ok(Json(rows.iter().map(AuditJson::from).collect()))
+}
+
+/// `System` for the admin socket, the user for a token, `anonymous` otherwise; the client address
+/// for a TCP peer, none for `ClientIp::Local`.
+pub(super) fn ctx(auth: &Authenticated, ip: ClientIp) -> AuditCtx {
+    let ctx = match auth.actor() {
+        Actor::System => AuditCtx::system(),
+        Actor::User(user) => AuditCtx::user(user.user().id(), user.user().username()),
+        Actor::Anonymous => AuditCtx::anonymous(),
+    };
+    match ip.addr() {
+        Some(addr) => ctx.with_client_ip(addr),
+        None => ctx,
+    }
 }
 
 // Each known parameter narrows the filter as it comes, so a repeated one ends on its last

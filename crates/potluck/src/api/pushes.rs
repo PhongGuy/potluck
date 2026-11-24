@@ -31,7 +31,7 @@ pub(crate) async fn record(state: AppState, push: PushContext, moves: Vec<RefMov
         .join(", ");
     match state
         .db()
-        .record_push(workspace_id, override_id, &moves)
+        .record_push(workspace_id, override_id, &moves, pusher)
         .await
     {
         Ok(done) => {

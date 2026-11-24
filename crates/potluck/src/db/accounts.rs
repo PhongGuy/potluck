@@ -4,6 +4,7 @@
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 
+use super::audit::{self, AuditAction, AuditCtx, Entry, TokenOwner, UserCreated, UserUpdated};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 
@@ -274,6 +275,16 @@ impl std::fmt::Debug for NewToken {
     }
 }
 
+/// Which door minted a token, and so which audit action records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TokenOrigin {
+    /// `POST /session`.
+    Session,
+    /// `POST /tokens` or direct.
+    Api,
+}
+
 /// A `tokens` row without its digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -375,6 +386,15 @@ fn token_from_row(row: &Row<'_>) -> rusqlite::Result<TokenRecord> {
     })
 }
 
+/// The username of user `id`; a token always has an owner, so a missing one is a storage fault.
+fn owner_name(conn: &rusqlite::Connection, id: i64) -> Result<String, DbError> {
+    Ok(
+        conn.query_row("SELECT username FROM users WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })?,
+    )
+}
+
 fn select_token(conn: &rusqlite::Connection, id: i64) -> Result<Option<TokenRecord>, DbError> {
     let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
     Ok(conn.query_row(&sql, [id], token_from_row).optional()?)
@@ -415,12 +435,15 @@ fn select_user(conn: &rusqlite::Connection, username: &str) -> Result<Option<Use
 }
 
 impl Db {
-    /// Inserts with `created_at = clock::now_rfc3339()`; `Conflict` when the username exists.
-    pub async fn create_user(&self, user: NewUser) -> Result<UserRecord, DbError> {
+    /// Inserts with `created_at = clock::now_rfc3339()` and its `user.create` row in one
+    /// transaction; `Conflict` when the username exists.
+    pub async fn create_user(&self, user: NewUser, ctx: &AuditCtx) -> Result<UserRecord, DbError> {
+        let ctx = ctx.clone();
         // The UNIQUE constraint is the duplicate check, so a writer on another connection is
-        // caught too.
+        // caught too. An error at any step drops `tx` uncommitted.
         self.call(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO users \
                  (username, display_name, email, password_hash, server_admin, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -437,7 +460,15 @@ impl Db {
                 conflict_on_unique(e, || format!("username {} is taken", user.username))
             })?;
             let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
-            Ok(conn.query_row(&sql, [conn.last_insert_rowid()], user_from_row)?)
+            let created = tx.query_row(&sql, [tx.last_insert_rowid()], user_from_row)?;
+            let entry = Entry::new(AuditAction::UserCreate)
+                .target("user", Some(created.id), Some(&created.username))
+                .detail(&UserCreated {
+                    server_admin: created.server_admin,
+                })?;
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(created)
         })
         .await
     }
@@ -461,17 +492,30 @@ impl Db {
         .await
     }
 
-    /// Applies the set fields; `Ok(None)` for an unknown username.
+    /// Applies the set fields and writes their `user.update` row in one transaction;
+    /// `Ok(None)` for an unknown username. No row when nothing is set or the user is unknown.
     pub async fn update_user(
         &self,
         username: &str,
         patch: UserPatch,
+        ctx: &AuditCtx,
     ) -> Result<Option<UserRecord>, DbError> {
         let username = username.to_owned();
+        let ctx = ctx.clone();
         self.call(move |conn| {
+            let (server_admin, disabled) = (patch.server_admin, patch.disabled);
             // Column names come from the fixed list in `assignments`, never from the caller;
             // every value is a bound parameter, with the username last.
             let set = patch.assignments();
+            let fields: Vec<&'static str> = set
+                .iter()
+                .map(|(column, _)| match *column {
+                    "password_hash" => "password",
+                    column => column,
+                })
+                .collect();
+            let tx = conn.transaction()?;
+            let mut changed = false;
             if !set.is_empty() {
                 let columns: Vec<String> = set
                     .iter()
@@ -487,16 +531,37 @@ impl Db {
                     .into_iter()
                     .map(|(_, value)| value)
                     .chain(std::iter::once(Value::Text(username.clone())));
-                conn.execute(&sql, params_from_iter(values))?;
+                changed = tx.execute(&sql, params_from_iter(values))? > 0;
             }
-            select_user(conn, &username)
+            let user = select_user(&tx, &username)?;
+            if changed && let Some(user) = &user {
+                let entry = Entry::new(AuditAction::UserUpdate)
+                    .target("user", Some(user.id), Some(&user.username))
+                    .detail(&UserUpdated {
+                        fields,
+                        server_admin,
+                        disabled,
+                    })?;
+                audit::insert(&tx, &ctx, &entry)?;
+            }
+            tx.commit()?;
+            Ok(user)
         })
         .await
     }
-    /// Inserts with `created_at = clock::now_rfc3339()`.
-    pub async fn create_token(&self, token: NewToken) -> Result<TokenRecord, DbError> {
+
+    /// Inserts with `created_at = clock::now_rfc3339()` and its audit row in one transaction:
+    /// `session.create` without detail for `Session`, `token.create` naming the owner for `Api`.
+    pub async fn create_token(
+        &self,
+        token: NewToken,
+        origin: TokenOrigin,
+        ctx: &AuditCtx,
+    ) -> Result<TokenRecord, DbError> {
+        let ctx = ctx.clone();
         self.call(move |conn| {
-            conn.execute(
+            let tx = conn.transaction()?;
+            tx.execute(
                 "INSERT INTO tokens (user_id, name, prefix, digest, created_at, expires_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
@@ -509,7 +574,22 @@ impl Db {
                 ],
             )?;
             let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
-            Ok(conn.query_row(&sql, [conn.last_insert_rowid()], token_from_row)?)
+            let created = tx.query_row(&sql, [tx.last_insert_rowid()], token_from_row)?;
+            let target = Entry::new(match origin {
+                TokenOrigin::Session => AuditAction::SessionCreate,
+                TokenOrigin::Api => AuditAction::TokenCreate,
+            })
+            .target("token", Some(created.id), Some(&created.name));
+            let entry = match origin {
+                TokenOrigin::Session => target,
+                TokenOrigin::Api => {
+                    let owner = owner_name(&tx, created.user_id)?;
+                    target.detail(&TokenOwner { user: &owner })?
+                }
+            };
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(created)
         })
         .await
     }
@@ -559,10 +639,26 @@ impl Db {
         self.call(move |conn| select_token(conn, id)).await
     }
 
-    /// `Ok(true)` when a row went.
-    pub async fn delete_token(&self, id: i64) -> Result<bool, DbError> {
-        self.call(move |conn| Ok(conn.execute("DELETE FROM tokens WHERE id = ?1", [id])? > 0))
-            .await
+    /// Deletes the token and writes its `token.revoke` row in one transaction; `Ok(true)` when a
+    /// row went, and no audit row otherwise.
+    pub async fn delete_token(&self, id: i64, ctx: &AuditCtx) -> Result<bool, DbError> {
+        let ctx = ctx.clone();
+        self.call(move |conn| {
+            // The name and owner are read before the delete, which leaves nothing to read.
+            let tx = conn.transaction()?;
+            let Some(token) = select_token(&tx, id)? else {
+                return Ok(false);
+            };
+            let owner = owner_name(&tx, token.user_id)?;
+            tx.execute("DELETE FROM tokens WHERE id = ?1", [id])?;
+            let entry = Entry::new(AuditAction::TokenRevoke)
+                .target("token", Some(token.id), Some(&token.name))
+                .detail(&TokenOwner { user: &owner })?;
+            audit::insert(&tx, &ctx, &entry)?;
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
     }
 
     /// Sets `last_used_at = now` only when it is null or before `stale_before`; a missing row is

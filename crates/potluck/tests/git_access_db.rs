@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use potluck::db::accounts::UserPatch;
+use potluck::db::audit::AuditCtx;
 use reqwest::Method;
 use serde_json::json;
 
@@ -192,7 +193,11 @@ async fn roles_decide_who_fetches_and_pushes() {
     ));
     a.server
         .db()
-        .update_user("ann", UserPatch::default().disabled(true))
+        .update_user(
+            "ann",
+            UserPatch::default().disabled(true),
+            &AuditCtx::system(),
+        )
         .await
         .unwrap()
         .unwrap();
@@ -293,7 +298,7 @@ async fn the_hook_sees_kind_pusher_token_and_flags() {
     let id = a
         .server
         .db()
-        .arm_override(ws.id(), bob.id(), "import", "system")
+        .arm_override(ws.id(), bob.id(), "import", "system", &AuditCtx::system())
         .await
         .unwrap();
     let out = failed(git(

@@ -9,7 +9,8 @@ use crate::auth::password::Passwords;
 use crate::auth::token::MintedToken;
 use crate::config::{Config, ServeArgs};
 use crate::db::Db;
-use crate::db::accounts::{NewToken, NewUser, UserRecord};
+use crate::db::accounts::{NewToken, NewUser, TokenOrigin, UserRecord};
+use crate::db::audit::AuditCtx;
 
 /// A `Config` for a server on an ephemeral loopback port with `dir` as its data directory.
 pub(crate) fn config_for(dir: &Path) -> Config {
@@ -58,6 +59,7 @@ pub(crate) async fn create_user(
         NewUser::new(username, username)
             .password_hash(&hash)
             .server_admin(server_admin),
+        &AuditCtx::system(),
     )
     .await
     .expect("create user")
@@ -71,13 +73,17 @@ pub(crate) async fn mint_token(
     expires_at: Option<&str>,
 ) -> String {
     let minted = MintedToken::mint().expect("rng");
-    db.create_token(NewToken::new(
-        user.id(),
-        name,
-        minted.prefix(),
-        *minted.digest(),
-        expires_at,
-    ))
+    db.create_token(
+        NewToken::new(
+            user.id(),
+            name,
+            minted.prefix(),
+            *minted.digest(),
+            expires_at,
+        ),
+        TokenOrigin::Api,
+        &AuditCtx::system(),
+    )
     .await
     .expect("create token");
     minted.secret().to_owned()

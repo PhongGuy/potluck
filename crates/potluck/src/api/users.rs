@@ -7,7 +7,9 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Deserializer};
 
 use super::AppState;
+use super::audit;
 use super::auth::Authenticated;
+use super::client_ip::ClientIp;
 use super::error::{ApiError, ApiResult};
 use super::events;
 use super::json::ApiJson;
@@ -83,6 +85,7 @@ pub(super) async fn list(
 pub(super) async fn create(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     ApiJson(body): ApiJson<CreateUser>,
 ) -> ApiResult<(StatusCode, Json<UserJson>)> {
     auth.require_server_admin()?;
@@ -107,7 +110,7 @@ pub(super) async fn create(
     if let Some(email) = &body.email {
         new = new.email(email.trim());
     }
-    let user = state.db().create_user(new).await?;
+    let user = state.db().create_user(new, &audit::ctx(&auth, ip)).await?;
     Ok((StatusCode::CREATED, Json(UserJson::from(&user))))
 }
 
@@ -124,6 +127,7 @@ pub(super) async fn create(
 pub(super) async fn patch(
     State(state): State<AppState>,
     auth: Authenticated,
+    ip: ClientIp,
     Path(username): Path<String>,
     ApiJson(body): ApiJson<PatchUser>,
 ) -> ApiResult<Json<UserJson>> {
@@ -209,7 +213,8 @@ pub(super) async fn patch(
     if let Some(yes) = disabled {
         patch = patch.disabled(yes);
     }
-    let Some(user) = state.db().update_user(&username, patch).await? else {
+    let ctx = audit::ctx(&auth, ip);
+    let Some(user) = state.db().update_user(&username, patch, &ctx).await? else {
         return Err(ApiError::not_found("no such user").into());
     };
     if disabled == Some(true) {

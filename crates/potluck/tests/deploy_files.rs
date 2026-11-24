@@ -524,6 +524,49 @@ fn the_smoke_test_checks_reaping_and_a_graceful_stop() {
     }
 }
 
+/// The stub answers no port, so the script exits right after the first run; the EXIT trap must
+/// still remove the restore container and volume as well as the first ones.
+#[test]
+fn the_smoke_cleanup_removes_the_restore_container_and_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, calls) = smoke_script(dir.path(), "smoke", "localhost/potluck:stub");
+    let removed: Vec<&str> = calls
+        .lines()
+        .filter(|l| l.starts_with("rm -f ") || l.starts_with("volume rm -f "))
+        .collect();
+    for needle in ["-restore", "-restore-data"] {
+        assert!(
+            removed.iter().any(|l| l.contains(needle)),
+            "cleanup does not remove the {needle} resource: {calls}"
+        );
+    }
+    assert!(removed.len() >= 4, "cleanup removes too little: {calls}");
+}
+
+#[test]
+fn the_smoke_test_backs_up_restores_and_clones() {
+    let script = fs::read_to_string(repo_root().join("scripts/container-smoke.sh")).unwrap();
+    for needle in [
+        "potluck admin backup",
+        "--password-stdin",
+        "--entrypoint tar",
+        "ls-remote",
+        "clone",
+        "http.extraHeader",
+    ] {
+        assert!(script.contains(needle), "smoke script lacks {needle:?}");
+    }
+    // The call site, not the function body, must come before the first container stops.
+    let call = script
+        .find("backup_round_trip \"$port\"")
+        .expect("smoke() does not call backup_round_trip");
+    let stop = script.find("stop -t 20").expect("no graceful stop");
+    assert!(
+        call < stop,
+        "the backup must run while the first container is live"
+    );
+}
+
 #[test]
 fn the_readme_and_the_notices_cover_tini() {
     let notices = fs::read_to_string(repo_root().join("THIRD_PARTY_NOTICES.md")).unwrap();

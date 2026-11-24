@@ -1,5 +1,4 @@
 //! The refusal report a pre-receive hook writes: one `<code> <rule>` line per refusal.
-#![cfg_attr(not(test), allow(dead_code))]
 
 pub(crate) const MAX_LINES: usize = 64;
 pub(crate) const MAX_BYTES: usize = 8 * 1024;

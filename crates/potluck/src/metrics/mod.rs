@@ -54,6 +54,8 @@ impl AuthScheme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SignInMethod {
     Password,
+    // The OIDC sign-in route records this once it is wired.
+    #[allow(dead_code)]
     Oidc,
 }
 

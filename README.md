@@ -176,6 +176,36 @@ docker compose up -d
 
 Outside a container, restart the server after replacing its binary. The push check runs the binary at the path the server started from, so a binary replaced while the server runs checks pushes for an older server until the restart. The container commands above restart it for you.
 
+## Metrics
+
+The server can serve Prometheus metrics on a second port. It is off unless you set `--metrics-listen` or `POTLUCK_METRICS_LISTEN`. Inside the container, listen on all interfaces and publish the port on the host's loopback only:
+
+```sh
+podman run -d --name potluck -p 127.0.0.1:8080:8080 -e POTLUCK_METRICS_LISTEN=0.0.0.0:9464 -p 127.0.0.1:9464:9464 -v potluck-data:/data -e POTLUCK_PUBLIC_URL=http://127.0.0.1:8080 ghcr.io/phongguy/potluck:latest
+```
+
+`GET /metrics` on that port answers in the OpenMetrics text format; every other path answers 404. It has no authentication, so keep the port off the public network and do not route it through your reverse proxy. The metrics carry no user names, tokens, team or workspace names.
+
+These families record today:
+
+- `potluck_build_info`: the running version.
+- `http_server_request_duration_seconds`: a histogram of API and git requests by method, route template and status code. The change-notice stream is left out.
+- `potluck_auth_failures_total`: requests answered 401 although they carried credentials, by scheme.
+- `potluck_sign_ins_total`: password sign-ins by outcome (`success`, `failure`, `rate_limited_ip`, `rate_limited_username`).
+- `potluck_sse_subscribers`: open change-notice streams.
+- `potluck_git_slots_in_use` and `potluck_git_slots_limit`: git slots held now and configured.
+- `potluck_db_queue_depth`: database jobs waiting to run.
+- `potluck_update_available` and `potluck_update_checks_total`: whether a newer release was found, and update checks by outcome.
+
+Any Prometheus-compatible scraper reads it. With Grafana Alloy, the default `prometheus.scrape` settings accept OpenMetrics:
+
+```alloy
+prometheus.scrape "potluck" {
+  targets    = [{"__address__" = "127.0.0.1:9464"}]
+  forward_to = [prometheus.remote_write.default.receiver]
+}
+```
+
 ## Backups
 
 Everything lives in the `potluck-data` volume: the database `/data/server.db` (with its `server.db-wal` and `server.db-shm` files) and the workspaces' git repositories under `/data/repos`. The one-liners, `compose.yaml` and the Quadlet unit all use that same volume name. Stop the server so the copy is consistent, export the volume, then start it again.

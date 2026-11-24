@@ -223,6 +223,7 @@ fn the_readme_and_the_notices_name_the_image_the_proxy_and_the_git_licence() {
             "## First admin",
             "## Reverse proxy and TLS",
             "## Updating",
+            "## Metrics",
             "## Backups",
             "## Verifying the image",
             "## Bind mounts",
@@ -559,4 +560,26 @@ fn the_updating_section_opens_with_the_update_notice() {
             "first Updating paragraph lacks {needle:?}: {first}"
         );
     }
+}
+
+#[test]
+fn the_metrics_port_is_documented_on_loopback_and_never_exposed() {
+    let image = containerfile();
+    let exposed: Vec<&str> = image
+        .lines()
+        .filter(|l| l.trim_start().starts_with("EXPOSE"))
+        .collect();
+    assert_eq!(exposed, ["EXPOSE 8080"], "only the API port is exposed");
+    assert!(
+        !image.contains("9464"),
+        "the image never sets a metrics port"
+    );
+    let readme = std::fs::read_to_string(crate::common::repo_root().join("README.md")).unwrap();
+    let section = readme_section(&readme, "## Metrics");
+    assert!(
+        section.contains("POTLUCK_METRICS_LISTEN=0.0.0.0:9464"),
+        "{section}"
+    );
+    assert!(section.contains("-p 127.0.0.1:9464:9464"), "{section}");
+    assert!(section.contains("no authentication"), "{section}");
 }

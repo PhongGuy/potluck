@@ -48,10 +48,12 @@ fn line(name: &str) -> String {
     format!("{name} / safety_relaxation ref_namespace")
 }
 
-/// A commit staged in the bare repository on no ref, ready to be pushed anywhere.
+/// A commit on the server's `main`, so the default branch exists, ready to be pushed anywhere.
 fn staged(s: &Scratch) -> String {
     s.write("a.txt", b"one\n");
-    s.stage_commit("one")
+    let tip = s.commit("one");
+    s.publish("main");
+    tip
 }
 
 #[test]

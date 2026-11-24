@@ -165,6 +165,9 @@ async fn refusals_come_before_any_copy() {
         .await
         .unwrap_err();
     assert!(matches!(err, BackupError::InProgress), "{err}");
+    // A sibling test's git child, forked but not yet exec'd, holds a copy of this fd; only an
+    // explicit unlock releases the lock regardless of such copies.
+    lock.unlock().unwrap();
     drop(lock);
 
     let huge = BackupOptions::default().with_reserve_bytes(u64::MAX / 2);
@@ -212,14 +215,13 @@ async fn workspaces_created_deleted_or_recreated_mid_backup_are_absent() {
     .await
     .unwrap();
     let (dir, conn) = backup_db(&tar);
-    let mut rows: Vec<String> = conn
+    let rows: Vec<String> = conn
         .prepare("SELECT slug FROM workspaces ORDER BY slug")
         .unwrap()
         .query_map([], |r| r.get(0))
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    rows.sort();
     assert_eq!(rows, ["pushed"], "only the untouched workspace");
     for ws in ["late", "fresh", "seeded"] {
         assert!(

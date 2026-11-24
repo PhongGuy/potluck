@@ -7,7 +7,7 @@ mod archive;
 mod copy;
 mod snapshot;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
 use std::os::unix::fs::MetadataExt;
@@ -210,11 +210,13 @@ pub fn write_backup(
     })?;
     // A staged copy whose row the snapshot dropped or never had belongs to a workspace deleted
     // during the backup; a deletion wins over a creation when both name the same workspace.
+    let kept: BTreeSet<&(String, String)> = reconciled.kept.iter().collect();
     let mut dropped_repos = 0;
-    for (team, ws) in states.into_keys() {
-        if reconciled.kept.iter().any(|(t, w)| *t == team && *w == ws) {
+    for key in states.into_keys() {
+        if kept.contains(&key) {
             continue;
         }
+        let (team, ws) = key;
         remove_dir(&repos.join(&team).join(format!("{ws}.git")))?;
         dropped_repos += 1;
         left_out.insert((team, ws), LeftOutReason::Deleted);
@@ -284,8 +286,8 @@ fn refuse_early(db: &Path) -> Result<(), BackupError> {
     Ok(())
 }
 
-/// Takes `<tmp>/backup.lock` without waiting; the lock lasts as long as the returned file.
-fn take_lock(tmp: &Path) -> Result<File, BackupError> {
+/// Takes `<tmp>/backup.lock` without waiting; the lock lasts as long as the returned guard.
+fn take_lock(tmp: &Path) -> Result<BackupLock, BackupError> {
     let path = tmp.join("backup.lock");
     let io_err = |source| BackupError::Io {
         path: path.clone(),
@@ -300,7 +302,7 @@ fn take_lock(tmp: &Path) -> Result<File, BackupError> {
         .open(&path)
         .map_err(io_err)?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(BackupLock(file)),
         Err(TryLockError::WouldBlock) => Err(BackupError::InProgress),
         Err(TryLockError::Error(source)) => Err(io_err(source)),
     }
@@ -446,6 +448,17 @@ fn remove_dir(dir: &Path) -> Result<(), BackupError> {
             source: e,
         }),
         _ => Ok(()),
+    }
+}
+
+/// The held backup lock, released when this goes out of scope.
+struct BackupLock(File);
+
+impl Drop for BackupLock {
+    fn drop(&mut self) {
+        // LOCK_UN acts on the lock's open file description, so a forked child's duplicate
+        // cannot keep the lock held after the backup returns. Closing the file releases it too.
+        let _ = self.0.unlock();
     }
 }
 

@@ -1,6 +1,7 @@
 //! `oidc_links`: one subject per user per issuer, lookups by (issuer, subject), audited writes.
 
 use potluck::db::DbError;
+use potluck::db::accounts::NewUser;
 use potluck::db::audit::{AuditCtx, AuditFilter};
 
 use crate::common::{create_user, migrated_db};
@@ -187,4 +188,103 @@ async fn a_refused_link_and_an_absent_unlink_write_no_row() {
             .unwrap()
             .is_empty()
     );
+}
+
+async fn actions(db: &potluck::db::Db, action: &str) -> Vec<potluck::db::audit::AuditRecord> {
+    db.audit(AuditFilter::new().action(action).limit(1000))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn jit_audits_the_user_and_the_link_as_the_new_user() {
+    let (_dir, db) = migrated_db().await;
+    let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    let user = db
+        .create_jit_user(NewUser::new("ada", "Ada L"), ISS, "sub-ada", Some(ip))
+        .await
+        .unwrap();
+    let created = actions(&db, "user.create").await;
+    let linked = actions(&db, "user.oidc_link").await;
+    assert_eq!((created.len(), linked.len()), (1, 1));
+    for row in [&created[0], &linked[0]] {
+        assert_eq!(row.actor_kind(), "user");
+        assert_eq!(
+            (row.actor_id(), row.actor_name()),
+            (Some(user.id()), Some("ada"))
+        );
+        assert_eq!(row.target_name(), Some("ada"));
+        assert_eq!(row.client_ip(), Some("192.0.2.7"));
+    }
+    assert_eq!(created[0].detail(), Some(r#"{"server_admin":false}"#));
+    assert_eq!(linked[0].detail(), Some(r#"{"subject":"sub-ada"}"#));
+}
+
+#[tokio::test]
+async fn jit_creates_and_links_in_one_go() {
+    let (_dir, db) = migrated_db().await;
+    let user = db
+        .create_jit_user(
+            NewUser::new("ada", "Ada L").email("ada@example.com"),
+            ISS,
+            "sub-ada",
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(user.password_hash().is_none());
+    assert!(!user.server_admin());
+    assert_eq!(
+        db.user_by_oidc(ISS, "sub-ada").await.unwrap().unwrap().id(),
+        user.id()
+    );
+}
+
+#[tokio::test]
+async fn a_taken_username_or_subject_writes_nothing() {
+    let (_dir, db) = migrated_db().await;
+    create_user(&db, "ada", "pw-123456", false).await;
+    let err = db
+        .create_jit_user(NewUser::new("ada", "ada"), ISS, "sub-new", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::Conflict { .. }), "{err:?}");
+    assert!(db.user_by_oidc(ISS, "sub-new").await.unwrap().is_none());
+
+    let bob = create_user(&db, "bob", "pw-123456", false).await;
+    db.put_oidc_link(ISS, bob.id(), "sub-bob", &AuditCtx::system())
+        .await
+        .unwrap();
+    let err = db
+        .create_jit_user(NewUser::new("carol", "carol"), ISS, "sub-bob", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DbError::Conflict { .. }), "{err:?}");
+    assert!(
+        db.user_by_username("carol").await.unwrap().is_none(),
+        "the user insert rolled back"
+    );
+    let jit_rows = actions(&db, "user.create").await;
+    assert!(
+        jit_rows.iter().all(|row| row.actor_kind() != "user"),
+        "no JIT audit row survived"
+    );
+    let links = actions(&db, "user.oidc_link").await;
+    assert_eq!(links.len(), 1, "only bob's link was audited");
+    assert_eq!(links[0].actor_kind(), "system");
+}
+
+#[tokio::test]
+async fn jit_ignores_a_password_or_admin_flag_it_is_handed() {
+    let (_dir, db) = migrated_db().await;
+    let user = NewUser::new("ada", "Ada L")
+        .password_hash("$argon2id$v=19$m=8,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2g")
+        .server_admin(true);
+    let user = db
+        .create_jit_user(user, ISS, "sub-ada", None)
+        .await
+        .unwrap();
+    let stored = db.user_by_username("ada").await.unwrap().unwrap();
+    assert!(user.password_hash().is_none() && stored.password_hash().is_none());
+    assert!(!user.server_admin() && !stored.server_admin());
 }

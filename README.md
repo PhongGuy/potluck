@@ -196,6 +196,10 @@ These families record today:
 - `potluck_git_slots_in_use` and `potluck_git_slots_limit`: git slots held now and configured.
 - `potluck_db_queue_depth`: database jobs waiting to run.
 - `potluck_update_available` and `potluck_update_checks_total`: whether a newer release was found, and update checks by outcome.
+- `potluck_git_requests_total`: git requests that reached the git engine, by service (`advertise`, `upload_pack`, `receive_pack`) and outcome (`ok`, `busy`, `overran`, `failed`).
+- `potluck_git_slot_wait_seconds`: a histogram of how long each git request waited for a slot, whether or not it got one.
+- `potluck_pushes_total`: pushes by outcome (`accepted`, `refused`).
+- `potluck_push_refusals_total`: refusal findings from the push check, by code, rule and workspace kind. Past 128 distinct rules, new ones record as `other`.
 
 Any Prometheus-compatible scraper reads it. With Grafana Alloy, the default `prometheus.scrape` settings accept OpenMetrics:
 

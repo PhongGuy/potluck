@@ -26,9 +26,9 @@ pub(super) struct SessionRequest {
 /// The minted secret, shown this once, its metadata and the signed-in user.
 #[derive(Serialize)]
 pub(super) struct SessionResponse {
-    token: String,
-    token_meta: TokenJson,
-    user: UserJson,
+    pub(super) token: String,
+    pub(super) token_meta: TokenJson,
+    pub(super) user: UserJson,
 }
 
 /// `POST /api/v1/session` `{username, password, token_name}`: `token_name` 1..=100 chars after

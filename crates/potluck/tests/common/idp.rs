@@ -39,13 +39,13 @@ pub enum Fault {
     AlgNone,
     /// Discovery also lists HS256, and ID tokens are HS256, MACed with the client secret.
     Hs256,
-    /// Every endpoint answers 503.
+    /// Every server-to-IdP endpoint (discovery, JWKS, token) answers 503; authorize always answers.
     Unavailable,
-    /// Every endpoint sleeps 60 s before answering.
+    /// Every server-to-IdP endpoint sleeps 60 s before answering; authorize always answers.
     Hang,
-    /// Every endpoint answers 302 to itself.
+    /// Every server-to-IdP endpoint answers 302 to itself; authorize always answers.
     Redirect,
-    /// Every endpoint answers 2 MiB of JSON-looking padding.
+    /// Every server-to-IdP endpoint answers 2 MiB of JSON-looking padding; authorize always answers.
     Oversized,
 }
 
@@ -216,7 +216,8 @@ fn signing_key(index: usize) -> CoreRsaPrivateSigningKey {
     CoreRsaPrivateSigningKey::from_pem(pem, Some(JsonWebKeyId::new(kid.into()))).unwrap()
 }
 
-// The transport faults answer every endpoint the same way; `None` means answer normally.
+// The transport faults answer every server-to-IdP endpoint (discovery, JWKS, token) the same
+// way; authorize never calls this and always answers. `None` means answer normally.
 async fn transport_fault(fault: Fault, uri: &Uri) -> Option<Response> {
     match fault {
         Fault::Unavailable => Some(StatusCode::SERVICE_UNAVAILABLE.into_response()),

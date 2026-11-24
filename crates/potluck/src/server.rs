@@ -116,6 +116,33 @@ enum Serve {
     Given(AppState),
 }
 
+/// Removes every report a receive-pack killed while no server ran left behind. Nothing can push
+/// yet, so none is live; a failure is logged and never stops the start.
+fn empty_hook_reports(dir: &std::path::Path) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(error = %err, "could not list hook reports at startup");
+            return;
+        }
+    };
+    let mut removed = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let result = match entry.file_type() {
+            Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) => tracing::warn!(error = %err, "could not remove a stale hook report"),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed stale hook reports at startup");
+    }
+}
+
 async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerError> {
     config.check_admin_socket()?;
     for path in [
@@ -123,6 +150,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
         config.repos_dir(),
         config.hooks_dir(),
         config.tmp_dir(),
+        config.hook_reports_dir(),
     ] {
         std::fs::create_dir_all(&path).map_err(|source| ServerError::DataDir { path, source })?;
     }
@@ -147,6 +175,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             Vec::new()
         }
     };
+    empty_hook_reports(&config.hook_reports_dir());
     let hooks_dir = config.hooks_dir();
     std::env::current_exe()
         .and_then(|exe| crate::hooks::install(&hooks_dir, &exe, config.git()))
@@ -194,6 +223,18 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
     state.git().mark_dirty(&deferred);
     let notices = state.notices().clone();
     let git_tasks = state.git().tasks().clone();
+    // The provider is probed in the background, so an IdP that is down never stops the start.
+    if let Some(oidc) = state.oidc().cloned() {
+        tracing::info!(
+            issuer = %oidc.provider().settings().issuer(),
+            redirect_uri = %format_args!("{}/api/v1/oidc/callback", config.public_url()),
+            "OIDC sign-in configured"
+        );
+        // A failed probe is already logged once by the provider, so its result is not needed here.
+        tokio::spawn(async move {
+            let _ = oidc.provider().warm().await;
+        });
+    }
     // The pruner and the daily loop ride the git tracker and the stop flag, so shutdown ends them
     // before their wait.
     crate::retention::spawn_pruner(db.clone(), config, &git_tasks, rx.clone());

@@ -1,5 +1,6 @@
 //! Shared helpers. Every test reaches only 127.0.0.1 or a Unix socket under a temp dir.
 pub mod idp;
+pub mod oidc;
 pub mod release;
 pub mod scratch;
 
@@ -313,6 +314,7 @@ pub struct GitServer {
     pub repos: Repos,
     pub db: Db,
     pub notices: Notices,
+    pub metrics: Option<SocketAddr>,
     _running: Running,
 }
 
@@ -370,6 +372,7 @@ pub async fn git_server_at(
         repos,
         db,
         notices,
+        metrics: running.metrics_addr(),
         _running: running,
     }
 }
@@ -417,6 +420,7 @@ pub async fn git_server_with(server: GitServer, access: TestAccess) -> GitServer
         repos,
         db,
         notices,
+        metrics: running.metrics_addr(),
         _running: running,
     }
 }

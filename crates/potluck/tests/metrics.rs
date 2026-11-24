@@ -5,10 +5,16 @@ use std::net::SocketAddr;
 use potluck::admin::client::{AdminClient, Verb};
 use potluck::api::AppState;
 use potluck::db::Db;
+use potluck::git::access::PushContext;
+use potluck::role::Role;
 use potluck::server::{Running, ServerError, start, start_with, start_with_updates};
+use potluck::slug::Slug;
 
 use crate::common::release::{ReleaseServer, TestKey, manifest};
-use crate::common::{client, config_for, create_user, fast_passwords, parse_config};
+use crate::common::{
+    APINATA_FORMAT, TestAccess, client, config_for, create_user, failed, fast_passwords, git,
+    git_server, ok, parse_config, work_tree,
+};
 
 /// The value of the first sample whose series is exactly `series`.
 pub fn sample(text: &str, series: &str) -> Option<f64> {
@@ -374,4 +380,106 @@ async fn a_scrape_reads_slots_queue_and_the_update_check() {
         assert_eq!(sample(&after, &series), Some(want), "{series} in {after}");
     }
     running.shutdown().await;
+}
+
+const PUSH_TOKEN: &str = "plk_metrics_push_token_000000000000000000000";
+const CANARY: &str = "sk_live_canary_7f3a9c2e1b";
+
+async fn scrape_at(addr: SocketAddr) -> String {
+    client()
+        .get(format!("http://{addr}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap()
+}
+
+/// Scrapes until `series` is present, since the reaper records after the client has its answer.
+async fn scrape_until(addr: SocketAddr, series: &str) -> String {
+    for _ in 0..200 {
+        let text = scrape_at(addr).await;
+        if sample(&text, series).is_some() {
+            return text;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("{series} never appeared");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_secret_push_is_counted_without_leaking_anything() {
+    let access = TestAccess::new()
+        .workspace("acme", "ledger")
+        .grant(PUSH_TOKEN, "acme", "ledger", Role::Write)
+        .hook_env("POTLUCK_KIND", "apinata")
+        .push_context(PushContext::new(1, "alice").kind("apinata"));
+    let server = git_server(access, None, &["--metrics-listen", "127.0.0.1:0"]).await;
+    server
+        .repos
+        .init(
+            &Slug::parse("acme").unwrap(),
+            &Slug::parse("ledger").unwrap(),
+            "main",
+        )
+        .await
+        .unwrap();
+    let home = server.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let url = server.url("acme", "ledger");
+    let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    ok(git(&home, Some(&work), None, &["add", "-A"]));
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["commit", "-q", "-m", "format"],
+    ));
+    ok(git(
+        &home,
+        Some(&work),
+        Some(PUSH_TOKEN),
+        &["push", "--porcelain", &url, "main"],
+    ));
+    std::fs::write(work.join(".env"), format!("API_KEY={CANARY}\n")).unwrap();
+    ok(git(&home, Some(&work), None, &["add", "-A"]));
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["commit", "-q", "-m", "env"],
+    ));
+    let out = failed(git(
+        &home,
+        Some(&work),
+        Some(PUSH_TOKEN),
+        &["push", "--porcelain", &url, "main"],
+    ));
+    assert!(out.contains("potluck-reject secret_env_file"), "{out}");
+
+    let refusal =
+        "potluck_push_refusals_total{code=\"secret_env_file\",rule=\"env_file\",kind=\"apinata\"}";
+    let text = scrape_until(server.metrics.expect("metrics listener"), refusal).await;
+    assert_eq!(sample(&text, refusal), Some(1.0), "{text}");
+    assert_eq!(
+        sample(&text, "potluck_pushes_total{outcome=\"refused\"}"),
+        Some(1.0),
+        "{text}"
+    );
+    assert_eq!(
+        sample(&text, "potluck_pushes_total{outcome=\"accepted\"}"),
+        Some(1.0),
+        "{text}"
+    );
+    // receive-pack exits 0 after a hook refusal, so both pushes are ok git requests.
+    let rp =
+        |o: &str| format!("potluck_git_requests_total{{service=\"receive_pack\",outcome=\"{o}\"}}");
+    assert_eq!(sample(&text, &rp("ok")), Some(2.0), "{text}");
+    let route = "http_route=\"/git/{team}/{repo}/git-receive-pack\"";
+    assert!(text.contains(route), "{text}");
+    for leak in [CANARY, PUSH_TOKEN, "acme", "ledger", "alice", ".env"] {
+        assert!(!text.contains(leak), "{leak} leaked: {text}");
+    }
 }

@@ -13,6 +13,7 @@ use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
 use crate::metrics::Metrics;
 use crate::notices::Notices;
+use crate::oidc::{IdpHttp, OidcState, Provider, Timings};
 use crate::update::UpdateChecker;
 
 mod actor;
@@ -25,6 +26,8 @@ mod events;
 mod grants;
 pub(crate) mod json;
 pub mod objects;
+mod oidc;
+mod oidc_pages;
 mod overrides;
 pub(crate) mod pushes;
 mod session;
@@ -43,7 +46,8 @@ use error::{ApiError, ErrorResponse};
 
 /// What every handler can reach: the database handle, the validated config, the git access
 /// resolver, the git engine, the password hasher, the sign-in rate limiters, the metrics
-/// registry and, when a release source is wired, the update checker.
+/// registry, the OIDC state when a provider is configured and, when a release source is wired,
+/// the update checker.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -55,6 +59,7 @@ pub struct AppState {
     session_limits: Arc<SessionLimits>,
     notices: Notices,
     updates: Option<UpdateChecker>,
+    oidc: Option<OidcState>,
     metrics: Arc<Metrics>,
 }
 
@@ -63,11 +68,14 @@ impl AppState {
     /// the default git limits under the configured run limit and the production hashing cost;
     /// the engine reads its paths and body cap from `config`.
     pub fn new(db: Db, config: Config) -> Self {
+        let metrics = Metrics::new(env!("CARGO_PKG_VERSION"));
         let git = Arc::new(git_engine(
             &config,
             GitLimits::default().with_max_runtime(config.git_max_runtime()),
+            Arc::clone(&metrics),
         ));
         let git_access = Arc::new(DbAccess::new(db.clone()));
+        let oidc = oidc_state(&config);
         AppState {
             db,
             config: Arc::new(config),
@@ -77,7 +85,8 @@ impl AppState {
             session_limits: Arc::new(SessionLimits::default()),
             notices: Notices::new(),
             updates: None,
-            metrics: Metrics::new(env!("CARGO_PKG_VERSION")),
+            oidc,
+            metrics,
         }
     }
 
@@ -91,7 +100,7 @@ impl AppState {
     /// Rebuilds the engine with `limits`.
     #[must_use]
     pub fn with_git_limits(mut self, limits: GitLimits) -> Self {
-        self.git = Arc::new(git_engine(&self.config, limits));
+        self.git = Arc::new(git_engine(&self.config, limits, Arc::clone(&self.metrics)));
         self
     }
 
@@ -107,6 +116,18 @@ impl AppState {
     pub fn with_updates(mut self, checker: UpdateChecker) -> Self {
         self.updates = Some(checker);
         self
+    }
+
+    /// Replaces the OIDC state (tests, with a mock provider and short timings).
+    #[must_use]
+    pub fn with_oidc(mut self, oidc: OidcState) -> Self {
+        self.oidc = Some(oidc);
+        self
+    }
+
+    /// The OIDC state, when a provider is configured.
+    pub fn oidc(&self) -> Option<&OidcState> {
+        self.oidc.as_ref()
     }
 
     /// The update checker, when a release source is wired.
@@ -155,7 +176,24 @@ impl AppState {
     }
 }
 
-fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
+/// The OIDC state for the configured provider, if any. A client that cannot be built is logged
+/// and leaves OIDC off, so the rest of the server still serves.
+fn oidc_state(config: &Config) -> Option<OidcState> {
+    let settings = config.oidc()?;
+    let https_only = url::Url::parse(settings.issuer()).is_ok_and(|url| url.scheme() == "https");
+    match IdpHttp::new(https_only) {
+        Ok(http) => Some(OidcState::new(
+            Provider::new(settings.clone(), http),
+            Timings::default(),
+        )),
+        Err(err) => {
+            tracing::error!("cannot build the OIDC client ({err}); serving without OIDC sign-in");
+            None
+        }
+    }
+}
+
+fn git_engine(config: &Config, limits: GitLimits, metrics: Arc<Metrics>) -> GitEngine {
     let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
     GitEngine::new(
         repos,
@@ -164,6 +202,7 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
         config.max_push_bytes(),
         limits,
     )
+    .with_metrics(metrics)
 }
 
 /// Every route under `/api/v1` and the git smart HTTP routes under `/git`; unknown paths and
@@ -175,6 +214,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/server", get(system::server))
         .route("/session", post(session::create))
         .route("/me", get(tokens::me))
+        .route("/oidc/start", get(oidc::start))
+        .route("/oidc/callback", get(oidc::callback))
+        .route("/oidc/redeem", post(oidc::redeem))
         .route("/teams", get(teams::list).post(teams::create))
         .route(
             "/teams/{team}/members/{username}",

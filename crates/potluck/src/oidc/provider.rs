@@ -133,7 +133,9 @@ impl Provider {
     /// Fetches discovery and keys once now; the startup probe. `Unavailable` when that fails.
     pub async fn warm(&self) -> Result<(), ProviderError> {
         let mut cache = self.cache.lock().await;
-        self.fetch(&mut cache, Instant::now()).await
+        self.fetch(&mut cache, Instant::now())
+            .await
+            .map_err(|_| unavailable("discovery"))
     }
 
     /// The settings this provider was built from.
@@ -182,8 +184,8 @@ impl Provider {
     /// Exchanges `code` with the client secret and `pkce_verifier`, then verifies the ID token
     /// (RS256 signature, iss, aud, exp, nonce). A signature failure refetches discovery and
     /// keys once and verifies the same token again, unless such a forced refresh started less
-    /// than 60 s before `now`. `Unavailable` when discovery fails, `Refused` when the exchange
-    /// fails or the token does not verify.
+    /// than 60 s before `now`. `Unavailable` when discovery fails before the exchange,
+    /// `Refused` when the exchange fails, the token does not verify, or a forced refresh fails.
     pub async fn sign_in_at(
         &self,
         now: Instant,
@@ -265,7 +267,7 @@ impl Provider {
                 Err(_) if cache.cached.is_some() => {
                     tracing::warn!("identity provider refresh failed; keeping the cached copy");
                 }
-                Err(error) => return Err(error),
+                Err(_) => return Err(unavailable("discovery")),
             }
         }
         let cached = cache.cached.as_ref().ok_or(ProviderError::Unavailable)?;
@@ -295,10 +297,11 @@ impl Provider {
         Ok(cached.metadata.clone())
     }
 
-    // Fetches discovery and its keys into `cache`, recording the instant of a failure.
+    // Fetches discovery and its keys into `cache`, recording the instant of a failure. It logs
+    // nothing: each caller logs the failure once with its own reason.
     async fn fetch(&self, cache: &mut Cache, now: Instant) -> Result<(), ProviderError> {
         let issuer = IssuerUrl::new(self.settings.issuer().to_owned())
-            .map_err(|_| unavailable("discovery"))?;
+            .map_err(|_| ProviderError::Unavailable)?;
         match CoreProviderMetadata::discover_async(issuer, &self.http_client()).await {
             Ok(metadata) => {
                 let generation = cache.cached.as_ref().map_or(0, |c| c.generation + 1);
@@ -312,7 +315,7 @@ impl Provider {
             }
             Err(_) => {
                 cache.failed = Some(now);
-                Err(unavailable("discovery"))
+                Err(ProviderError::Unavailable)
             }
         }
     }

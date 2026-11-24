@@ -1,4 +1,5 @@
-//! Default-branch protection: only an admin or an armed override may force-push or delete it.
+//! Default-branch protection: the hook lets only an admin or an armed override force-push or
+//! delete it, and git still refuses the delete over HTTP.
 
 use std::path::PathBuf;
 

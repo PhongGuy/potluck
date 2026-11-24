@@ -47,6 +47,8 @@ pub enum Fault {
     Redirect,
     /// Every server-to-IdP endpoint answers 2 MiB of JSON-looking padding; authorize always answers.
     Oversized,
+    /// Only discovery answers 503, so a code exchange succeeds while a refresh fails.
+    DiscoveryUnavailable,
 }
 
 /// The user the mock signs in.
@@ -251,6 +253,9 @@ async fn discovery(State(shared): State<Shared>, uri: Uri) -> Response {
     };
     if let Some(answer) = transport_fault(fault, &uri).await {
         return answer;
+    }
+    if fault == Fault::DiscoveryUnavailable {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
     json_response(json!({
         "issuer": issuer,

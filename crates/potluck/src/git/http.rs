@@ -133,7 +133,7 @@ async fn rpc(
 fn observer(state: &AppState, ctx: PushContext, repo: PathBuf, role: Role) -> PushObserver {
     let state = state.clone();
     let tasks = state.git().tasks().clone();
-    Box::new(move |moves: Vec<RefMove>| {
+    Box::new(move |moves: Vec<RefMove>, _report| {
         // The re-check needs the moves after the record has consumed them, and only an admin
         // or override push is re-checked, so only that push copies them.
         let updates = if role == Role::Admin || ctx.armed_override().is_some() {

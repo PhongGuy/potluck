@@ -13,6 +13,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::api::error::ApiError;
 use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
+use crate::git::report::{self, HookReport};
 use crate::git::{Repos, Service, spool, sweep};
 use crate::metrics::{GitOutcome, GitService, Metrics};
 
@@ -65,8 +66,9 @@ impl Default for GitLimits {
 
 /// Told the moves of one receive-pack, once, after git exits with any status: the command list
 /// against the refs before git started and as they stand after it exited (`moved`), an empty
-/// list when nothing moved. Not called only when the refs cannot be read (logged at error).
-pub(crate) type PushObserver = Box<dyn FnOnce(Vec<RefMove>) + Send + 'static>;
+/// list when nothing moved, with the hook's refusal report (the default when there was no report
+/// file). Not called only when the refs cannot be read (logged at error).
+pub(crate) type PushObserver = Box<dyn FnOnce(Vec<RefMove>, HookReport) + Send + 'static>;
 
 /// Spawns git for the smart HTTP routes within the configured limits.
 #[derive(Debug)]
@@ -321,8 +323,16 @@ impl GitEngine {
         };
         let repos = self.repos.clone();
         let repo_path = repo.to_path_buf();
-        let spawned = self
-            .command(service, v2, extra_env)
+        let report_file = if service == Service::ReceivePack {
+            self.report_file()
+        } else {
+            None
+        };
+        let mut cmd = self.command(service, v2, extra_env);
+        if let Some(file) = &report_file {
+            cmd.env(crate::secret_check::REPORT_ENV, file.path());
+        }
+        let spawned = cmd
             .arg(repo)
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::piped())
@@ -397,13 +407,27 @@ impl GitEngine {
             // Whatever the exit status, the refs are the ground truth: a client that hangs up
             // mid-report kills git with SIGPIPE after the refs already moved.
             if let Some((on_push, before)) = watch {
+                let report = read_report(report_file).await;
                 match list_refs(&repos, &repo_path).await {
-                    Ok(after) => on_push(moved(&commands, &before, &after)),
+                    Ok(after) => on_push(moved(&commands, &before, &after), report),
                     Err(err) => tracing::error!(error = %err, "cannot list refs after a push"),
                 }
             }
         });
         Ok(Body::from_stream(tokio_util::io::ReaderStream::new(stdout)))
+    }
+
+    /// A fresh, empty report file under `<tmp_dir>/hook-reports` for one receive-pack's hook, or
+    /// `None` (warned) when it cannot be created; it is removed when dropped.
+    fn report_file(&self) -> Option<tempfile::NamedTempFile> {
+        let dir = self.tmp_dir.join("hook-reports");
+        match tempfile::Builder::new().prefix("report-").tempfile_in(&dir) {
+            Ok(file) => Some(file),
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot create a hook report file");
+                None
+            }
+        }
     }
 
     /// `Ok` when `<hooks_dir>/pre-receive` is a regular file with any execute bit. git accepts a
@@ -474,6 +498,32 @@ impl GitEngine {
         cmd.process_group(0);
         cmd.kill_on_drop(true);
         cmd
+    }
+}
+
+/// The hook's report from `file`, which is then removed: at most `MAX_BYTES` are read, through
+/// tokio so the reaper never blocks a worker. No file, or one that cannot be read (warned), is
+/// the default report.
+async fn read_report(file: Option<tempfile::NamedTempFile>) -> HookReport {
+    let Some(file) = file else {
+        return HookReport::default();
+    };
+    let mut bytes = Vec::new();
+    let read = match file.reopen() {
+        Ok(std_file) => tokio::fs::File::from_std(std_file)
+            .take(report::MAX_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map(drop),
+        Err(err) => Err(err),
+    };
+    drop(file);
+    match read {
+        Ok(()) => report::parse(&bytes),
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot read a hook report file");
+            HookReport::default()
+        }
     }
 }
 
@@ -770,7 +820,7 @@ mod tests {
             )
             .await
             .unwrap();
-        std::fs::create_dir_all(dir.join("tmp")).unwrap();
+        std::fs::create_dir_all(dir.join("tmp").join("hook-reports")).unwrap();
         write_stub_hook(&dir.join("hooks"), 0o755);
         (
             GitEngine::new(
@@ -1263,11 +1313,86 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (
-            Box::new(move |moves| {
+            Box::new(move |moves, _report| {
                 let _ = tx.send(moves);
             }),
             rx,
         )
+    }
+
+    #[tokio::test]
+    async fn a_refusing_hook_reaches_the_observer_through_the_report_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        write_script(
+            &dir.path().join("hooks").join("pre-receive"),
+            "#!/bin/sh\ncat >/dev/null\nprintf 'secret_env_file env_file\\n' > \"$POTLUCK_HOOK_REPORT\"\nexit 1\n",
+            0o755,
+        );
+        let (body, _tip) = push_body(dir.path());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let on_push: PushObserver = Box::new(move |moves, report| {
+            let _ = tx.send((moves, report));
+        });
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        let (moves, report) = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(moves.is_empty(), "nothing landed");
+        assert!(report.refused());
+        assert_eq!(
+            report.refusals(),
+            [("secret_env_file", "env_file".to_owned())]
+        );
+        engine.tasks.close();
+        engine.tasks.wait().await;
+        let left = std::fs::read_dir(dir.path().join("tmp").join("hook-reports"))
+            .unwrap()
+            .count();
+        assert_eq!(left, 0, "the report file is removed");
+    }
+
+    #[tokio::test]
+    async fn an_accepting_hook_gives_an_unrefused_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        let (body, _tip) = push_body(dir.path());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let on_push: PushObserver = Box::new(move |moves, report| {
+            let _ = tx.send((moves, report));
+        });
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        let (moves, report) = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(moves.len(), 1);
+        assert!(!report.refused());
     }
 
     #[tokio::test]

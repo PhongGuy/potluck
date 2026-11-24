@@ -301,3 +301,27 @@ impl<K: Eq + Hash + Clone, V> Capped<K, V> {
             .len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A key never taken pins the front of the log, so the stale entries every take leaves
+    // behind it can only go through compaction.
+    #[test]
+    fn the_order_log_is_compacted_behind_a_live_front_entry() {
+        let capped = Capped::new(Duration::from_secs(60));
+        let now = Instant::now();
+        capped.insert(now, 0usize, ());
+        for key in 1..=3 * MAX_ENTRIES {
+            capped.insert(now, key, ());
+            assert!(capped.take(now, &key).is_some(), "key {key} is takeable");
+            let logged = capped.slots.lock().unwrap().order.len();
+            assert!(
+                logged <= 2 * MAX_ENTRIES,
+                "{logged} log entries after key {key}"
+            );
+        }
+        assert!(capped.take(now, &0).is_some(), "the pinned key survives");
+    }
+}

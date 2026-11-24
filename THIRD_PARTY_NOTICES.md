@@ -163,9 +163,9 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
 - `curve25519-dalek` 5.0.0: BSD-3-Clause
   - Copyright (c) 2016-2021 Henry de Valence. All rights reserved.
   - Copyright (c) 2016-2021 isis agora lovecruft. All rights reserved.
-- `dbento-rules` 0.1.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#fb3a851d): MIT OR Apache-2.0
+- `dbento-rules` 0.1.1 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.1#356cb932): MIT OR Apache-2.0
   - No copyright line, authors or repository published
-- `dbento-workspace` 0.2.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.0#fb3a851d): MIT OR Apache-2.0
+- `dbento-workspace` 0.2.0 (https://github.com/PhongGuy/dbento?tag=dbento-rules-v0.1.1#356cb932): MIT OR Apache-2.0
   - No copyright line, authors or repository published
 - `der` 0.7.10: Apache-2.0 OR MIT
   - Copyright (c) 2020-2023 The RustCrypto Project Developers
@@ -258,10 +258,6 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2015-2025 Sean McArthur
 - `httpdate` 1.0.3: MIT OR Apache-2.0
   - Copyright (c) 2016 Pyfisch
-- `humantime` 2.4.0: MIT OR Apache-2.0
-  - Copyright (c) 2016 Pyfisch
-  - Copyright (c) 2016 The humantime Developers
-  - Copyright © 2005-2013 Rich Felker
 - `hybrid-array` 0.4.15: MIT OR Apache-2.0
   - Copyright (c) 2022-2026 The RustCrypto Project Developers
 - `hyper-rustls` 0.27.10: Apache-2.0 OR ISC OR MIT

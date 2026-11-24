@@ -271,7 +271,7 @@ fn list_refuses_a_tag_git_could_misread() {
 
 /// The crate-scoped tags the workspace pins each rules crate at.
 const APINATA_RULES_TAG: &str = "apinata-rules-v0.1.0";
-const DBENTO_RULES_TAG: &str = "dbento-rules-v0.1.0";
+const DBENTO_RULES_TAG: &str = "dbento-rules-v0.1.1";
 
 #[test]
 fn the_real_lock_pins_each_rules_crate_at_its_tag() {

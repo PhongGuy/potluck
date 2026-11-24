@@ -47,7 +47,12 @@ async fn v6_sends_the_browser_to_the_ipv6_loopback() {
         "{}&loopback=v6",
         app.start_url(50000, APP_STATE, &challenge(VERIFIER))
     );
-    let to = app.browse(&url).await.location();
+    let hop = app.browse(&url).await;
+    assert_eq!(
+        hop.headers["cache-control"], "no-store",
+        "the redirect carries a code"
+    );
+    let to = hop.location();
     assert_eq!(to.host_str(), Some("[::1]"));
     assert_eq!(to.port(), Some(50000));
 }
@@ -124,6 +129,7 @@ async fn a_late_return_is_expired_and_a_later_one_starts_again() {
         Some("oidc_expired")
     );
     assert_eq!(param(&hop.location(), "state").as_deref(), Some(APP_STATE));
+    assert_eq!(hop.headers["cache-control"], "no-store");
 
     let start = app
         .get(&app.start_url(49152, APP_STATE, &challenge(VERIFIER)))

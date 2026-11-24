@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use axum::Json;
 use axum::extract::{FromRequest, Request, State};
-use axum::http::header::LOCATION;
+use axum::http::header::{CACHE_CONTROL, LOCATION};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -235,8 +235,9 @@ async fn finish(
     }
 }
 
-/// 302 to the app's loopback listener with `code` or `error`, and the app's `state`. The URL is
-/// built from fixed parts and the stored port; no request input shapes it.
+/// 302 to the app's loopback listener with `code` or `error`, and the app's `state`, never
+/// cached since it can carry a code. The URL is built from fixed parts and the stored port; no
+/// request input shapes it.
 fn to_loopback(entry: &PendingSignIn, outcome: Result<String, &'static str>) -> Response {
     let base = match entry.loopback {
         Loopback::V6 => "http://[::1]/callback",
@@ -255,7 +256,14 @@ fn to_loopback(entry: &PendingSignIn, outcome: Result<String, &'static str>) -> 
     url.query_pairs_mut()
         .append_pair(name, value)
         .append_pair("state", &entry.app_state);
-    (StatusCode::FOUND, [(LOCATION, String::from(url))]).into_response()
+    (
+        StatusCode::FOUND,
+        [
+            (LOCATION, String::from(url)),
+            (CACHE_CONTROL, "no-store".to_owned()),
+        ],
+    )
+        .into_response()
 }
 
 /// The IdP redirect URI this server registered: `{public_url}/api/v1/oidc/callback`.

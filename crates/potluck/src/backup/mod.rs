@@ -176,8 +176,8 @@ impl From<snapshot::SnapshotError> for BackupError {
 }
 
 /// Writes a tar of `data` (`server.db`, then `repos/`) to `out`, consistent while the server
-/// keeps running. Refuses before copying anything when there is no database, its schema is
-/// older than 3, this user does not own it, another backup holds `<data>/tmp/backup.lock`, or
+/// keeps running. Refuses before copying anything when there is no database, this user does
+/// not own it, its schema is older than 3, another backup holds `<data>/tmp/backup.lock`, or
 /// the volume lacks room for the staged copy plus `options.reserve_bytes`. `on_phase` is told
 /// when the repositories and then the database are staged. Staging under `<data>/tmp/backup/`
 /// is removed on every return once the lock is held.
@@ -258,8 +258,13 @@ pub fn write_backup(
     })
 }
 
-/// The refusals that need no lock: no database, an old schema, another owner.
+/// The refusals that need no lock: no database, another owner, an old schema.
 fn refuse_early(db: &Path) -> Result<(), BackupError> {
+    refuse_early_as(db, rustix::process::getuid().as_raw())
+}
+
+/// `refuse_early` for a process running as `uid`.
+fn refuse_early_as(db: &Path, uid: u32) -> Result<(), BackupError> {
     let meta = match fs::metadata(db) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -274,14 +279,16 @@ fn refuse_early(db: &Path) -> Result<(), BackupError> {
             });
         }
     };
-    let version = snapshot::schema_version(db)?;
-    if version < MIN_SCHEMA {
-        return Err(BackupError::OldSchema { version });
-    }
-    if meta.uid() != rustix::process::getuid().as_raw() {
+    // Opening the database as another user could leave sidecar files it cannot use, so
+    // the owner is checked from the stat alone before the schema read opens it.
+    if meta.uid() != uid {
         return Err(BackupError::NotOwner {
             path: db.to_path_buf(),
         });
+    }
+    let version = snapshot::schema_version(db)?;
+    if version < MIN_SCHEMA {
+        return Err(BackupError::OldSchema { version });
     }
     Ok(())
 }
@@ -497,5 +504,43 @@ impl Write for Sink<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush().inspect_err(|_| self.failed = true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::MetadataExt;
+
+    use super::*;
+
+    #[test]
+    fn another_owner_is_refused_before_the_database_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("server.db");
+        let bytes = b"not a sqlite database, and never opened".to_vec();
+        std::fs::write(&db, &bytes).unwrap();
+        let owner = std::fs::metadata(&db).unwrap().uid();
+        let err = refuse_early_as(&db, owner.wrapping_add(1)).unwrap_err();
+        assert!(matches!(err, BackupError::NotOwner { .. }), "{err:?}");
+        assert_eq!(std::fs::read(&db).unwrap(), bytes, "database untouched");
+        let mut names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["server.db"], "no -wal, -shm or journal");
+    }
+
+    #[test]
+    fn the_owner_still_gets_the_schema_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("server.db");
+        rusqlite::Connection::open(&db).unwrap();
+        let owner = std::fs::metadata(&db).unwrap().uid();
+        let err = refuse_early_as(&db, owner).unwrap_err();
+        assert!(
+            matches!(err, BackupError::OldSchema { version: 0 }),
+            "{err:?}"
+        );
     }
 }

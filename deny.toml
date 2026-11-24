@@ -1,0 +1,5 @@
+# Only the RustSec advisory check is configured; CI runs `cargo deny check advisories`.
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa via openidconnect: Potluck only verifies ID-token signatures with public keys, and the Marvin timing attack targets private-key operations; openidconnect 4.1 requires rsa 0.9" },
+]

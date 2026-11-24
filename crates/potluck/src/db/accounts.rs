@@ -62,6 +62,17 @@ impl NewUser {
     }
 }
 
+impl NewUser {
+    /// The same user with no password hash and no server admin flag.
+    pub(super) fn without_credentials(self) -> Self {
+        NewUser {
+            password_hash: None,
+            server_admin: false,
+            ..self
+        }
+    }
+}
+
 impl std::fmt::Debug for NewUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NewUser")
@@ -415,6 +426,32 @@ pub(super) fn prefixed(alias: &str, columns: &str) -> String {
         .join(", ")
 }
 
+/// Inserts `user` and reads the new row back; `Conflict` when the username is taken. The
+/// caller owns the transaction, so a later failure in it leaves no user behind.
+pub(super) fn insert_user(
+    conn: &rusqlite::Connection,
+    user: &NewUser,
+) -> Result<UserRecord, DbError> {
+    // The UNIQUE constraint is the duplicate check, so a writer on another connection is caught
+    // too.
+    conn.execute(
+        "INSERT INTO users \
+         (username, display_name, email, password_hash, server_admin, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            user.username,
+            user.display_name,
+            user.email,
+            user.password_hash,
+            user.server_admin,
+            clock::now_rfc3339(),
+        ],
+    )
+    .map_err(|e| conflict_on_unique(e, || format!("username {} is taken", user.username)))?;
+    let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
+    Ok(conn.query_row(&sql, [conn.last_insert_rowid()], user_from_row)?)
+}
+
 fn user_from_row(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
     user_at(row, 0)
 }
@@ -444,28 +481,10 @@ impl Db {
     /// transaction; `Conflict` when the username exists.
     pub async fn create_user(&self, user: NewUser, ctx: &AuditCtx) -> Result<UserRecord, DbError> {
         let ctx = ctx.clone();
-        // The UNIQUE constraint is the duplicate check, so a writer on another connection is
-        // caught too. An error at any step drops `tx` uncommitted.
+        // An error at any step drops `tx` uncommitted.
         self.call(move |conn| {
             let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO users \
-                 (username, display_name, email, password_hash, server_admin, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    user.username,
-                    user.display_name,
-                    user.email,
-                    user.password_hash,
-                    user.server_admin,
-                    clock::now_rfc3339(),
-                ],
-            )
-            .map_err(|e| {
-                conflict_on_unique(e, || format!("username {} is taken", user.username))
-            })?;
-            let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
-            let created = tx.query_row(&sql, [tx.last_insert_rowid()], user_from_row)?;
+            let created = insert_user(&tx, &user)?;
             let entry = Entry::new(AuditAction::UserCreate)
                 .target("user", Some(created.id), Some(&created.username))
                 .detail(&UserCreated {

@@ -64,13 +64,16 @@ pub(crate) fn parse(bytes: &[u8]) -> HookReport {
         })
         .collect();
     if refusals.is_empty() {
-        refusals.push(("unknown", "unknown".to_owned()));
+        refusals.push(("unknown", MALFORMED_RULE.to_owned()));
     }
     HookReport {
         refused: true,
         refusals,
     }
 }
+
+/// The rule of the single refusal a report with no valid line yields.
+pub(crate) const MALFORMED_RULE: &str = "unknown";
 
 /// The label for a real rule named `unknown`; `:` is outside the rule charset, so no rule clashes.
 const UNKNOWN_RULE_LABEL: &str = "rule:unknown";

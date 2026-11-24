@@ -343,6 +343,34 @@ async fn a_rotated_key_is_fetched_once_and_the_token_verified_again() {
 }
 
 #[tokio::test]
+async fn two_sign_ins_across_one_rotation_share_a_single_refresh() {
+    let (_dir, idp, provider) = setup().await;
+    let t0 = Instant::now();
+    sign_in(&idp, &provider, t0).await.unwrap();
+    let jwks_before = idp.jwks_calls();
+    idp.rotate_key();
+    let t1 = t0 + Duration::from_secs(1);
+    let mut codes = Vec::new();
+    for _ in 0..2 {
+        let url = provider
+            .authorize_url_at(t1, REDIRECT, "server-state", "server-nonce", VERIFIER)
+            .await
+            .unwrap();
+        codes.push(idp.authorize(&url).await.0);
+    }
+    // On the single-threaded test runtime both sign-ins read the cached keys before either
+    // exchange can answer, so the second to reach the forced refresh finds the first's newer
+    // copy; without that shortcut the 60 s spacing would refuse it.
+    let (a, b) = tokio::join!(
+        provider.sign_in_at(t1, REDIRECT, &codes[0], VERIFIER, "server-nonce"),
+        provider.sign_in_at(t1, REDIRECT, &codes[1], VERIFIER, "server-nonce"),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(idp.jwks_calls(), jwks_before + 1, "one refresh for both");
+}
+
+#[tokio::test]
 async fn forced_refreshes_are_spaced_a_minute_apart() {
     let (_dir, idp, provider) = setup().await;
     let t0 = Instant::now();

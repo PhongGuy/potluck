@@ -315,10 +315,14 @@ impl Metrics {
     /// Counts one refusal finding.
     /// `code`, `rule`, `kind` are already validated; the 129th distinct rule becomes "other", and
     /// a rule literally named `other` records as `rule:other` so it never joins that series. The
-    /// report parser already maps a real rule named `unknown` to `rule:unknown`.
+    /// malformed-report placeholder rule records under its own label and is exempt from the cap;
+    /// the report parser maps a real rule named `unknown` to `rule:unknown`, so they never clash.
     pub(crate) fn refusal(&self, code: &'static str, rule: &str, kind: &'static str) {
-        // A rule keeps its own series once seen, so the cap only bounds new names.
-        let rule = {
+        // The placeholder is one fixed label, so it skips the cap and never takes a rule's slot.
+        // A real rule keeps its own series once seen, so the cap only bounds new names.
+        let rule = if rule == crate::git::report::MALFORMED_RULE {
+            rule.to_owned()
+        } else {
             let mut seen = self.seen_rules.lock().unwrap_or_else(|e| e.into_inner());
             if seen.contains(rule) || seen.len() < MAX_RULES {
                 seen.insert(rule.to_owned());
@@ -634,6 +638,49 @@ mod tests {
         };
         assert_eq!(sample(&text, &series("unknown")), Some(1.0), "{text}");
         assert_eq!(sample(&text, &series("rule:unknown")), Some(1.0), "{text}");
+    }
+
+    #[test]
+    fn a_malformed_report_after_the_cap_keeps_its_own_series() {
+        let m = Metrics::new("0.1.0");
+        for i in 0..MAX_RULES {
+            m.refusal("secret_pattern", &format!("rule_{i}"), "apinata");
+        }
+        for (code, rule) in crate::git::report::parse(b"garbage\n").refusals() {
+            m.refusal(code, rule, "apinata");
+        }
+        let text = m.render(&Snapshot::default());
+        let series = |code: &str, rule: &str| {
+            format!(
+                "potluck_push_refusals_total{{code=\"{code}\",rule=\"{rule}\",kind=\"apinata\"}}"
+            )
+        };
+        assert_eq!(
+            sample(&text, &series("unknown", "unknown")),
+            Some(1.0),
+            "{text}"
+        );
+        assert_eq!(sample(&text, &series("unknown", "other")), None, "{text}");
+    }
+
+    #[test]
+    fn a_malformed_report_does_not_use_up_a_rule_slot() {
+        let m = Metrics::new("0.1.0");
+        for (code, rule) in crate::git::report::parse(b"garbage\n").refusals() {
+            m.refusal(code, rule, "apinata");
+        }
+        for i in 0..MAX_RULES {
+            m.refusal("secret_pattern", &format!("rule_{i}"), "apinata");
+        }
+        let text = m.render(&Snapshot::default());
+        let series = |rule: &str| {
+            format!(
+                "potluck_push_refusals_total{{code=\"secret_pattern\",rule=\"{rule}\",kind=\"apinata\"}}"
+            )
+        };
+        let last = format!("rule_{}", MAX_RULES - 1);
+        assert_eq!(sample(&text, &series(&last)), Some(1.0), "{text}");
+        assert_eq!(sample(&text, &series("other")), None, "{text}");
     }
 
     #[test]

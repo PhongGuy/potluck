@@ -226,8 +226,7 @@ impl Provider {
         };
         // A signature failure may mean the IdP rotated its keys: verify against newer keys,
         // never repeating the code exchange. A newer cached copy may predate the rotation, so
-        // when it also fails, refresh once more past it. Only a step that took a cached copy
-        // is followed by another, so at most one fetch is made and three verifications.
+        // when it also fails, refresh once more past it.
         let claims = match verify(&client) {
             Err(ClaimsVerificationError::SignatureVerification(_)) => {
                 let newer = self.forced_refresh(now, generation).await?;

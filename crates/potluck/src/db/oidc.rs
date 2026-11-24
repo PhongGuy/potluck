@@ -1,10 +1,14 @@
 //! The `oidc_links` rows of `server.db`: which IdP subject signs in as which user, at most one
 //! subject per user per issuer. Issuers compare as exact text.
 
+use std::net::IpAddr;
+
 use rusqlite::{OptionalExtension, Row, params};
 
-use super::accounts::{USER_COLUMNS, UserRecord, owner_name, prefixed, user_at};
-use super::audit::{self, AuditAction, AuditCtx, Entry, OidcSubject};
+use super::accounts::{
+    NewUser, USER_COLUMNS, UserRecord, insert_user, owner_name, prefixed, user_at,
+};
+use super::audit::{self, AuditAction, AuditCtx, Entry, OidcSubject, UserCreated};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 
@@ -59,6 +63,22 @@ fn select_link(
         .optional()?)
 }
 
+/// Links `subject` under `issuer` to `user_id`; `Conflict` when the subject is held by another
+/// user.
+fn insert_link(
+    conn: &rusqlite::Connection,
+    issuer: &str,
+    subject: &str,
+    user_id: i64,
+) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO oidc_links (issuer, subject, user_id, linked_at) VALUES (?1, ?2, ?3, ?4)",
+        params![issuer, subject, user_id, clock::now_rfc3339()],
+    )
+    .map_err(|e| conflict_on_unique(e, || "that identity is linked to another user".to_owned()))?;
+    Ok(())
+}
+
 impl Db {
     /// The user linked to `subject` under `issuer`, if any.
     pub async fn user_by_oidc(
@@ -109,14 +129,7 @@ impl Db {
                 "DELETE FROM oidc_links WHERE issuer = ?1 AND user_id = ?2",
                 params![issuer, user_id],
             )?;
-            tx.execute(
-                "INSERT INTO oidc_links (issuer, subject, user_id, linked_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![issuer, subject, user_id, clock::now_rfc3339()],
-            )
-            .map_err(|e| {
-                conflict_on_unique(e, || "that identity is linked to another user".to_owned())
-            })?;
+            insert_link(&tx, &issuer, &subject, user_id)?;
             let link = select_link(&tx, &issuer, user_id)?
                 .ok_or_else(|| DbError::Sqlite("the new link is missing".to_owned()))?;
             let name = owner_name(&tx, user_id)?;
@@ -158,6 +171,46 @@ impl Db {
             audit::insert(&tx, &ctx, &entry)?;
             tx.commit()?;
             Ok(true)
+        })
+        .await
+    }
+
+    /// Creates `user` (no password, not admin), links it to (`issuer`, `subject`) and writes
+    /// `user.create` (`{server_admin: false}`) and `user.oidc_link` (`{subject}`) with the new
+    /// user as actor, all in one transaction. `Conflict` when the username or the subject is
+    /// taken; nothing is written then.
+    pub async fn create_jit_user(
+        &self,
+        user: NewUser,
+        issuer: &str,
+        subject: &str,
+        client_ip: Option<IpAddr>,
+    ) -> Result<UserRecord, DbError> {
+        let (issuer, subject) = (issuer.to_owned(), subject.to_owned());
+        let user = user.without_credentials();
+        // The account acts for itself from its first row, so the actor exists only after the
+        // user insert; any refusal drops `tx` and with it the user, the link and both rows.
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let created = insert_user(&tx, &user)?;
+            let (id, name) = (created.id(), created.username());
+            insert_link(&tx, &issuer, &subject, id)?;
+            let mut ctx = AuditCtx::user(id, name);
+            if let Some(ip) = client_ip {
+                ctx = ctx.with_client_ip(ip);
+            }
+            let create = Entry::new(AuditAction::UserCreate)
+                .target("user", Some(id), Some(name))
+                .detail(&UserCreated {
+                    server_admin: created.server_admin(),
+                })?;
+            audit::insert(&tx, &ctx, &create)?;
+            let link = Entry::new(AuditAction::UserOidcLink)
+                .target("user", Some(id), Some(name))
+                .detail(&OidcSubject { subject: &subject })?;
+            audit::insert(&tx, &ctx, &link)?;
+            tx.commit()?;
+            Ok(created)
         })
         .await
     }

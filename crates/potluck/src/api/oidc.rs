@@ -3,15 +3,41 @@
 
 use std::time::Instant;
 
-use axum::extract::State;
+use axum::Json;
+use axum::extract::{FromRequest, Request, State};
 use axum::http::header::LOCATION;
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use super::AppState;
 use super::client_ip::ClientIp;
+use super::error::{ApiError, ApiResult};
+use super::json::ApiJson;
+use super::objects::{TokenJson, UserJson};
 use super::oidc_pages::{BAD_START, IDP_UNAVAILABLE, START_AGAIN, page, too_many};
+use super::session::SessionResponse;
+use super::{tokens, validate};
+use crate::clock;
+use crate::db::accounts::TokenOrigin;
+use crate::db::audit::AuditCtx;
+use crate::metrics::{SignInMethod, SignInOutcome};
 use crate::oidc::{Loopback, OidcState, PendingSignIn, Taken, random_secret};
+
+/// How long a token minted by an OIDC sign-in lives: seven days.
+const OIDC_TOKEN_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// The redeem body. No `Debug`, so the code and verifier cannot reach a log by formatting.
+#[derive(Deserialize)]
+struct RedeemRequest {
+    code: String,
+    verifier: String,
+    token_name: String,
+}
 
 /// The app's loopback parameters from a start link.
 struct StartParams {
@@ -92,6 +118,74 @@ pub(super) async fn callback(State(state): State<AppState>, uri: Uri) -> Respons
         None => Err("oidc_refused"),
     };
     to_loopback(&entry, outcome)
+}
+
+/// `POST /api/v1/oidc/redeem` `{code, verifier, token_name}`: 404 `not_found` without OIDC; 400
+/// `invalid_request` for a body that does not parse; 422 `token_name`; 429 past the address
+/// budget; 400 `oidc_code_invalid` when the code is unknown, used or late, the verifier's S256
+/// does not match, or the user is gone or disabled; else 201 like `POST /session`, the token
+/// expiring in seven days. The code is burned by its first try, right or wrong.
+pub(super) async fn redeem(
+    State(state): State<AppState>,
+    ip: ClientIp,
+    request: Request,
+) -> ApiResult<(StatusCode, Json<SessionResponse>)> {
+    // Without OIDC the route answers like an unknown path, whatever the body.
+    let Some(oidc) = state.oidc() else {
+        return Err(super::not_found().await);
+    };
+    let ApiJson(body) = ApiJson::<RedeemRequest>::from_request(request, &state).await?;
+    let token_name = validate::token_name("token_name", &body.token_name)?;
+    // Counted as in `POST /session`: the parse failure and the 422 count nothing.
+    let count = |outcome| state.metrics().sign_in(SignInMethod::Oidc, outcome);
+    oidc.redeem_limiter().check(&ip.key()).map_err(|e| {
+        count(SignInOutcome::RateLimitedIp);
+        ApiError::rate_limited(e)
+    })?;
+    let refuse = || {
+        count(SignInOutcome::Failure);
+        ApiError::oidc_code_invalid("the sign-in code is invalid or has expired")
+    };
+
+    let handoff = oidc
+        .handoffs()
+        .take_at(Instant::now(), &body.code)
+        .ok_or_else(refuse)?;
+    let derived = URL_SAFE_NO_PAD.encode(Sha256::digest(body.verifier.as_bytes()));
+    if !bool::from(derived.as_bytes().ct_eq(handoff.challenge.as_bytes())) {
+        return Err(refuse().into());
+    }
+    let user = match state.db().user_by_id(handoff.user_id).await? {
+        Some(user) if !user.disabled() => user,
+        _ => return Err(refuse().into()),
+    };
+
+    // The sign-in is the new token owner's act, not the anonymous request's.
+    let ctx = AuditCtx::user(user.id(), user.username());
+    let ctx = match ip.addr() {
+        Some(addr) => ctx.with_client_ip(addr),
+        None => ctx,
+    };
+    let expires_at = clock::shift_secs(&clock::now_rfc3339(), OIDC_TOKEN_SECS)
+        .ok_or_else(|| ApiError::internal("could not compute the token expiry"))?;
+    let (token, record) = tokens::mint_and_create(
+        &state,
+        user.id(),
+        token_name,
+        Some(expires_at.as_str()),
+        TokenOrigin::Oidc,
+        &ctx,
+    )
+    .await?;
+    count(SignInOutcome::Success);
+    Ok((
+        StatusCode::CREATED,
+        Json(SessionResponse {
+            token,
+            token_meta: TokenJson::from(&record),
+            user: UserJson::from(&user),
+        }),
+    ))
 }
 
 /// Exchanges the IdP code and finds the linked user: a fresh handoff code for that user and the

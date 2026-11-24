@@ -213,6 +213,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/me", get(tokens::me))
         .route("/oidc/start", get(oidc::start))
         .route("/oidc/callback", get(oidc::callback))
+        .route("/oidc/redeem", post(oidc::redeem))
         .route("/teams", get(teams::list).post(teams::create))
         .route(
             "/teams/{team}/members/{username}",

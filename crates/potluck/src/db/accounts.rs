@@ -4,7 +4,9 @@
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 
-use super::audit::{self, AuditAction, AuditCtx, Entry, TokenOwner, UserCreated, UserUpdated};
+use super::audit::{
+    self, AuditAction, AuditCtx, Entry, SignInMethod, TokenOwner, UserCreated, UserUpdated,
+};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 
@@ -281,6 +283,8 @@ impl std::fmt::Debug for NewToken {
 pub enum TokenOrigin {
     /// `POST /session`.
     Session,
+    /// `POST /oidc/redeem`.
+    Oidc,
     /// `POST /tokens` or direct.
     Api,
 }
@@ -480,6 +484,15 @@ impl Db {
         self.call(move |conn| select_user(conn, &username)).await
     }
 
+    /// The user with `id`, if any.
+    pub(crate) async fn user_by_id(&self, id: i64) -> Result<Option<UserRecord>, DbError> {
+        self.call(move |conn| {
+            let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
+            Ok(conn.query_row(&sql, [id], user_from_row).optional()?)
+        })
+        .await
+    }
+
     /// Every user, by username.
     pub async fn list_users(&self) -> Result<Vec<UserRecord>, DbError> {
         self.call(|conn| {
@@ -577,12 +590,13 @@ impl Db {
             let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
             let created = tx.query_row(&sql, [tx.last_insert_rowid()], token_from_row)?;
             let target = Entry::new(match origin {
-                TokenOrigin::Session => AuditAction::SessionCreate,
+                TokenOrigin::Session | TokenOrigin::Oidc => AuditAction::SessionCreate,
                 TokenOrigin::Api => AuditAction::TokenCreate,
             })
             .target("token", Some(created.id), Some(&created.name));
             let entry = match origin {
                 TokenOrigin::Session => target,
+                TokenOrigin::Oidc => target.detail(&SignInMethod { method: "oidc" })?,
                 TokenOrigin::Api => {
                     let owner = owner_name(&tx, created.user_id)?;
                     target.detail(&TokenOwner { user: &owner })?

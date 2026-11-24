@@ -62,6 +62,7 @@ mod oidc_callback;
 mod oidc_http;
 mod oidc_mock_idp;
 mod oidc_provider;
+mod oidc_redeem;
 mod oidc_settings;
 mod oidc_start;
 mod oidc_store;

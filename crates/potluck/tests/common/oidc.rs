@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use super::idp::MockIdp;
-use super::{config_for, fast_passwords, migrated_db};
+use super::{fast_passwords, migrated_db, parse_config};
 
 pub const VERIFIER: &str = "app-verifier-0123456789abcdefghijklmnopqrstuvwxyz";
 pub const APP_STATE: &str = "app-state-0123456789";
@@ -61,7 +61,19 @@ impl OidcApp {
     pub async fn start_with_limits(jit: bool, timings: Timings, per_min: u32) -> OidcApp {
         let idp = MockIdp::start().await;
         let (dir, db) = migrated_db().await;
-        let config = config_for(dir.path());
+        // A metrics listener too, so redeems can be read off the sign-in metric.
+        let data = dir.path().to_str().expect("utf-8 temp path");
+        let config = parse_config(&[
+            "--listen",
+            "127.0.0.1:0",
+            "--metrics-listen",
+            "127.0.0.1:0",
+            "--data",
+            data,
+            "--public-url",
+            "http://127.0.0.1:8080",
+        ])
+        .expect("test config");
         let http = IdpHttp::with_limits(
             false,
             Duration::from_secs(1),

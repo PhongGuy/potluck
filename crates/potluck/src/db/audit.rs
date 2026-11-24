@@ -188,6 +188,12 @@ pub(crate) struct OidcSubject<'a> {
     pub(crate) subject: &'a str,
 }
 
+/// The `session.create` detail of a sign-in by other than a password.
+#[derive(serde::Serialize)]
+pub(crate) struct SignInMethod<'a> {
+    pub(crate) method: &'a str,
+}
+
 /// The `token.create` and `token.revoke` detail: the token owner's username.
 #[derive(serde::Serialize)]
 pub(crate) struct TokenOwner<'a> {

@@ -64,7 +64,6 @@ impl OidcState {
     }
 
     /// The per-address limiter of `/oidc/redeem`.
-    #[allow(dead_code, reason = "read by the OIDC routes")]
     pub(crate) fn redeem_limiter(&self) -> &RateLimiter {
         &self.redeem_limiter
     }

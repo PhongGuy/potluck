@@ -87,6 +87,7 @@ struct Inner {
     discovery_calls: u32,
     jwks_calls: u32,
     token_calls: u32,
+    hold: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 #[derive(Clone)]
@@ -120,6 +121,7 @@ impl MockIdp {
             discovery_calls: 0,
             jwks_calls: 0,
             token_calls: 0,
+            hold: None,
         })));
         let app = Router::new()
             .route("/.well-known/openid-configuration", get(discovery))
@@ -152,6 +154,14 @@ impl MockIdp {
     pub fn rotate_key(&self) {
         let mut inner = self.shared.lock();
         inner.key = 1 - inner.key;
+    }
+
+    /// Holds the next token request after it is counted, until the returned sender fires or
+    /// drops. Its ID token is signed on release, with whichever key is current then.
+    pub fn hold_token(&self) -> tokio::sync::oneshot::Sender<()> {
+        let (release, held) = tokio::sync::oneshot::channel();
+        self.shared.lock().hold = Some(held);
+        release
     }
 
     pub fn discovery_calls(&self) -> u32 {
@@ -331,11 +341,14 @@ async fn token(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let fault = {
+    let (fault, hold) = {
         let mut inner = shared.lock();
         inner.token_calls += 1;
-        inner.fault
+        (inner.fault, inner.hold.take())
     };
+    if let Some(held) = hold {
+        let _ = held.await;
+    }
     if let Some(answer) = transport_fault(fault, &uri).await {
         return answer;
     }

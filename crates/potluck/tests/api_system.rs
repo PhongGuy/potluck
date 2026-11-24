@@ -44,7 +44,7 @@ async fn server_describes_api_1_with_password_auth_only() {
     assert_eq!(status, 200);
     assert_eq!(
         body,
-        json!({"version": env!("CARGO_PKG_VERSION"), "api": 1, "auth": {"password": true, "oidc": false},
+        json!({"version": env!("CARGO_PKG_VERSION"), "api": 1, "auth": {"password": true, "oidc": null},
                "kinds": {"apinata": {"formats": ["1.0.0"]}, "dbento": {"formats": ["1"]}}})
     );
 }

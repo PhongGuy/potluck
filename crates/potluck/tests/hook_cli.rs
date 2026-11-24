@@ -313,3 +313,79 @@ fn the_hook_protects_the_branch_potluck_default_branch_names() {
     let out = run_hook(&s, &admin, &delete("refs/heads/main"));
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
 }
+
+#[test]
+fn a_refusal_writes_the_report_file_and_an_accept_leaves_it_empty() {
+    let s = Scratch::new();
+    s.write(".env", b"x\n");
+    s.write("creds.txt", AWS);
+    let bad = s.stage_commit("bad");
+    let report = s.dir.path().join("report");
+    std::fs::write(&report, b"").unwrap();
+    let path = report.to_str().unwrap();
+    let out = run_hook(&s, &[("POTLUCK_HOOK_REPORT", path)], &line(&bad));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        std::fs::read_to_string(&report).unwrap(),
+        "secret_env_file env_file\nsecret_pattern aws\n"
+    );
+
+    let s2 = Scratch::new();
+    s2.write("README", b"fine\n");
+    let good = s2.stage_commit("good");
+    let empty = s2.dir.path().join("report");
+    std::fs::write(&empty, b"").unwrap();
+    let out = run_hook(
+        &s2,
+        &[("POTLUCK_HOOK_REPORT", empty.to_str().unwrap())],
+        &line(&good),
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read(&empty).unwrap(),
+        b"",
+        "an accept writes nothing"
+    );
+}
+
+#[test]
+fn a_fail_closed_refusal_writes_hook_error() {
+    let s = Scratch::new();
+    let report = s.dir.path().join("report");
+    std::fs::write(&report, b"").unwrap();
+    let out = run_hook(
+        &s,
+        &[("POTLUCK_HOOK_REPORT", report.to_str().unwrap())],
+        "not a ref line\n",
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        stderr(&out).starts_with("potluck-error "),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&report).unwrap(),
+        "hook_error none\n"
+    );
+}
+
+#[test]
+fn the_hook_never_creates_a_missing_report_file() {
+    let s = Scratch::new();
+    s.write(".env", b"x\n");
+    let bad = s.stage_commit("bad");
+    let missing = s.dir.path().join("no-such-report");
+    let out = run_hook(
+        &s,
+        &[("POTLUCK_HOOK_REPORT", missing.to_str().unwrap())],
+        &line(&bad),
+    );
+    assert_eq!(out.status.code(), Some(1), "the refusal stands");
+    assert!(
+        stderr(&out).contains("potluck-reject secret_env_file"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!missing.exists(), "the hook created no file");
+}

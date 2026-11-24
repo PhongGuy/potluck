@@ -13,6 +13,7 @@ use super::objects::{TokenJson, UserJson};
 use super::{tokens, validate};
 use crate::db::accounts::TokenOrigin;
 use crate::db::audit::{AuditCtx, SignInFailure};
+use crate::metrics::{SignInMethod, SignInOutcome};
 
 /// The sign-in body. No `Debug`, so the password cannot reach a log by formatting.
 #[derive(Deserialize)]
@@ -42,14 +43,16 @@ pub(super) async fn create(
     let token_name = validate::token_name("token_name", &body.token_name)?;
     // Only attempts that reach the credential check count, the address before the username.
     let limits = state.session_limits();
-    limits
-        .per_ip()
-        .check(&ip.key())
-        .map_err(ApiError::rate_limited)?;
-    limits
-        .per_username()
-        .check(&body.username)
-        .map_err(ApiError::rate_limited)?;
+    // Each outcome is counted where it is decided; the 422 and an unusable hash count nothing.
+    let count = |outcome| state.metrics().sign_in(SignInMethod::Password, outcome);
+    limits.per_ip().check(&ip.key()).map_err(|e| {
+        count(SignInOutcome::RateLimitedIp);
+        ApiError::rate_limited(e)
+    })?;
+    limits.per_username().check(&body.username).map_err(|e| {
+        count(SignInOutcome::RateLimitedUsername);
+        ApiError::rate_limited(e)
+    })?;
 
     // Every credential failure gets the same refusal, checked in the order of the stored reason.
     let Some(user) = state.db().user_by_username(&body.username).await? else {
@@ -101,6 +104,7 @@ pub(super) async fn create(
         &ctx,
     )
     .await?;
+    count(SignInOutcome::Success);
     Ok((
         StatusCode::CREATED,
         Json(SessionResponse {
@@ -111,8 +115,8 @@ pub(super) async fn create(
     ))
 }
 
-/// Records the refusal and returns the 401. A failed insert is logged and answered the same way,
-/// so the log's health never shows in the response.
+/// Counts and records the refusal and returns the 401. A failed insert is logged and answered the
+/// same way, so the log's health never shows in the response.
 async fn refuse(
     state: &AppState,
     ip: ClientIp,
@@ -121,6 +125,9 @@ async fn refuse(
     reason: SignInFailure,
 ) -> ErrorResponse {
     tracing::debug!(username = %username, "sign-in refused");
+    state
+        .metrics()
+        .sign_in(SignInMethod::Password, SignInOutcome::Failure);
     if let Err(e) = state
         .db()
         .record_failed_sign_in(user, reason, ip.addr())

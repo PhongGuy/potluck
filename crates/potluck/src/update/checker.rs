@@ -1,6 +1,7 @@
 //! The update checker: fetches the signed manifest and its signature from the source, verifies
 //! them, and keeps the newest verified release in memory for the status readers.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use reqwest::StatusCode;
@@ -14,6 +15,7 @@ use super::{
     verify_release,
 };
 use crate::clock;
+use crate::metrics::UpdateCounts;
 
 /// Redirects followed per request; more is refused.
 const MAX_REDIRECTS: usize = 5;
@@ -56,6 +58,10 @@ struct Inner {
     current: Version,
     state: Mutex<UpdateStatus>,
     inflight: SingleFlight<Result<UpdateStatus, UpdateError>>,
+    found: AtomicU64,
+    current_checks: AtomicU64,
+    not_found: AtomicU64,
+    failed: AtomicU64,
 }
 
 impl UpdateChecker {
@@ -76,6 +82,10 @@ impl UpdateChecker {
                 current: version,
                 state: Mutex::new(state),
                 inflight: SingleFlight::new(),
+                found: AtomicU64::new(0),
+                current_checks: AtomicU64::new(0),
+                not_found: AtomicU64::new(0),
+                failed: AtomicU64::new(0),
             }),
         })
     }
@@ -95,6 +105,17 @@ impl UpdateChecker {
         answer.unwrap_or(Err(UpdateError::Interrupted))
     }
 
+    /// Checks run so far, by outcome.
+    pub(crate) fn check_counts(&self) -> UpdateCounts {
+        let i = &self.inner;
+        UpdateCounts {
+            found: i.found.load(Ordering::Relaxed),
+            current: i.current_checks.load(Ordering::Relaxed),
+            not_found: i.not_found.load(Ordering::Relaxed),
+            failed: i.failed.load(Ordering::Relaxed),
+        }
+    }
+
     /// The status as of the last check.
     pub fn status(&self) -> UpdateStatus {
         self.inner.lock().clone()
@@ -107,6 +128,7 @@ async fn check_once(inner: &Inner) -> Result<UpdateStatus, UpdateError> {
     let current = &inner.current;
     match &result {
         Ok((status, _, true)) => {
+            inner.found.fetch_add(1, Ordering::Relaxed);
             if let Some(new) = status.latest() {
                 tracing::info!(
                     "potluck {} is available (running {current}): {}; run `potluck admin update check` for the update steps",
@@ -116,14 +138,19 @@ async fn check_once(inner: &Inner) -> Result<UpdateStatus, UpdateError> {
             }
         }
         Ok((_, version, false)) => {
+            inner.current_checks.fetch_add(1, Ordering::Relaxed);
             tracing::debug!("update check: newest signed release is {version}; running {current}");
         }
         Err(err @ UpdateError::NotFound) => {
+            inner.not_found.fetch_add(1, Ordering::Relaxed);
             tracing::debug!("update check found nothing: {err}");
         }
-        Err(err) => tracing::warn!(
-            "update check failed: {err}; turn the daily check off with --no-update-check or POTLUCK_UPDATE_CHECK=false"
-        ),
+        Err(err) => {
+            inner.failed.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "update check failed: {err}; turn the daily check off with --no-update-check or POTLUCK_UPDATE_CHECK=false"
+            );
+        }
     }
     result.map(|(status, _, _)| status)
 }

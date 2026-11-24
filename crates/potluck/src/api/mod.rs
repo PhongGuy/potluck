@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::db::Db;
 use crate::git::access::{DbAccess, GitAccess};
 use crate::git::{GitEngine, GitLimits, Repos};
+use crate::metrics::Metrics;
 use crate::notices::Notices;
 use crate::oidc::{IdpHttp, OidcState, Provider, Timings};
 use crate::update::UpdateChecker;
@@ -42,8 +43,9 @@ pub use actor::{Actor, AuthUser};
 use error::{ApiError, ErrorResponse};
 
 /// What every handler can reach: the database handle, the validated config, the git access
-/// resolver, the git engine, the password hasher, the sign-in rate limiters, the OIDC state when
-/// a provider is configured and, when a release source is wired, the update checker.
+/// resolver, the git engine, the password hasher, the sign-in rate limiters, the metrics
+/// registry, the OIDC state when a provider is configured and, when a release source is wired,
+/// the update checker.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct AppState {
@@ -56,6 +58,7 @@ pub struct AppState {
     notices: Notices,
     updates: Option<UpdateChecker>,
     oidc: Option<OidcState>,
+    metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -79,6 +82,7 @@ impl AppState {
             notices: Notices::new(),
             updates: None,
             oidc,
+            metrics: Metrics::new(env!("CARGO_PKG_VERSION")),
         }
     }
 
@@ -140,6 +144,11 @@ impl AppState {
     /// The resolver.
     pub(crate) fn git_access(&self) -> &dyn GitAccess {
         &*self.git_access
+    }
+
+    /// The metrics registry, shared by every clone of the state.
+    pub(crate) fn metrics(&self) -> &Arc<Metrics> {
+        &self.metrics
     }
 
     /// The engine.
@@ -239,6 +248,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .merge(crate::git::http::router())
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(state.metrics()),
+            crate::metrics::http::layer,
+        ))
         .with_state(state)
 }
 

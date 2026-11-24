@@ -2,6 +2,7 @@
 //! async request/reply `Db::call`.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -82,6 +83,24 @@ struct Inner {
     // Taking the sender closes the channel; the thread's `for job in rx` then ends.
     tx: Mutex<Option<Sender<Job>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    depth: Arc<AtomicU64>,
+}
+
+/// One unit of queue depth, raised on creation and lowered exactly once on drop, so the
+/// count cannot underflow whether the job runs, is dropped unrun, or is never sent.
+struct Queued(Arc<AtomicU64>);
+
+impl Queued {
+    fn new(depth: &Arc<AtomicU64>) -> Self {
+        depth.fetch_add(1, Ordering::Relaxed);
+        Queued(Arc::clone(depth))
+    }
+}
+
+impl Drop for Queued {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl Inner {
@@ -141,6 +160,7 @@ impl Db {
             inner: Arc::new(Inner {
                 tx: Mutex::new(Some(tx)),
                 thread: Mutex::new(Some(thread)),
+                depth: Arc::new(AtomicU64::new(0)),
             }),
         })
     }
@@ -154,7 +174,11 @@ impl Db {
         T: Send + 'static,
     {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        // The guard rides inside the job: it leaves the count as the job starts, or when the
+        // job is dropped unrun (a failed send, or the thread's queue torn down).
+        let queued = Queued::new(&self.inner.depth);
         let job: Job = Box::new(move |conn| {
+            drop(queued);
             // A dropped receiver means the caller went away; nothing to report.
             let _ = reply_tx.send(f(conn));
         });
@@ -169,6 +193,11 @@ impl Db {
             .send(job)
             .map_err(|_| DbError::Closed)?;
         reply_rx.await.map_err(|_| DbError::Closed)?
+    }
+
+    /// Jobs sent by `call` that have not started running yet.
+    pub(crate) fn queue_depth(&self) -> u64 {
+        self.inner.depth.load(Ordering::Relaxed)
     }
 
     /// `SELECT 1`: proves the thread and the connection answer.
@@ -402,5 +431,82 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, DbError::Sqlite(_)), "{sql}: got {err:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_queue_depth_counts_waiting_jobs_and_returns_to_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+        let blocker = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                db.call(move |_| {
+                    let _ = hold_rx.recv();
+                    Ok(())
+                })
+                .await
+            })
+        };
+        let waiting = {
+            let db = db.clone();
+            tokio::spawn(async move { db.call(|_| Ok(())).await })
+        };
+        for _ in 0..100 {
+            if db.queue_depth() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(db.queue_depth(), 1, "the second job waits behind the first");
+        hold_tx.send(()).unwrap();
+        blocker.await.unwrap().unwrap();
+        waiting.await.unwrap().unwrap();
+        assert_eq!(db.queue_depth(), 0);
+    }
+
+    #[tokio::test]
+    async fn closing_the_db_with_queued_jobs_leaves_no_depth_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+        let first = {
+            let db = db.clone();
+            tokio::spawn(async move {
+                db.call(move |_| {
+                    let _ = hold_rx.recv();
+                    Ok(())
+                })
+                .await
+            })
+        };
+        let queued: Vec<_> = (0..3)
+            .map(|_| {
+                let db = db.clone();
+                tokio::spawn(async move { db.call(|_| Ok(())).await })
+            })
+            .collect();
+        for _ in 0..100 {
+            if db.queue_depth() == 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(db.queue_depth(), 3, "three jobs queued behind the held one");
+        let closer = {
+            let db = db.clone();
+            std::thread::spawn(move || db.close())
+        };
+        hold_tx.send(()).unwrap();
+        closer.join().unwrap();
+        let _ = first.await;
+        for q in queued {
+            let _ = q.await;
+        }
+        assert_eq!(
+            db.queue_depth(),
+            0,
+            "close drains the queue and every job lowered the depth"
+        );
     }
 }

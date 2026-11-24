@@ -176,6 +176,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
 - `digest` 0.11.3: MIT OR Apache-2.0
   - Copyright (c) 2017 Artyom Pavlov
   - Copyright (c) 2017-2025 RustCrypto Developers
+- `dtoa` 1.0.11: MIT OR Apache-2.0
+  - Authors: David Tolnay <dtolnay@gmail.com>
 - `dyn-clone` 1.0.20: MIT OR Apache-2.0
   - Authors: David Tolnay <dtolnay@gmail.com>
 - `ecdsa` 0.17.0: Apache-2.0 OR MIT
@@ -324,6 +326,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyrights in the `linux-raw-sys` project are retained by their contributors.
 - `litemap` 0.8.3: Unicode-3.0
   - Copyright © 2020-2024 Unicode, Inc.
+- `lock_api` 0.4.14: MIT OR Apache-2.0
+  - Copyright (c) 2016 The Rust Project Developers
 - `log` 0.4.35: MIT OR Apache-2.0
   - Copyright (c) 2014 The Rust Project Developers
 - `matchers` 0.2.0: MIT
@@ -372,6 +376,10 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2020-2026 RustCrypto Developers
 - `p384` 0.14.0: Apache-2.0 OR MIT
   - Copyright (c) 2020-2021 RustCrypto Developers
+- `parking_lot_core` 0.9.12: MIT OR Apache-2.0
+  - Copyright (c) 2016 The Rust Project Developers
+- `parking_lot` 0.12.5: MIT OR Apache-2.0
+  - Copyright (c) 2016 The Rust Project Developers
 - `password-hash` 0.6.1: MIT OR Apache-2.0
   - Copyright (c) 2020-2026 RustCrypto Developers
 - `pem-rfc7468` 0.7.0: Apache-2.0 OR MIT
@@ -399,6 +407,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2024-2026 RustCrypto Developers
 - `primeorder` 0.14.0: Apache-2.0 OR MIT
   - Copyright (c) 2020-2023 RustCrypto Developers
+- `prometheus-client` 0.26.0: Apache-2.0 OR MIT
+  - Copyright (c) 2020 Max Inden
 - `rand_chacha` 0.3.1: MIT OR Apache-2.0
   - Copyright (c) 2014 The Rust Project Developers
   - Copyright 2018 Developers of the Rand project
@@ -449,6 +459,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Authors: David Tolnay <dtolnay@gmail.com>
 - `saphyr-parser` 0.3.3: MIT OR Apache-2.0
   - Authors: Ethiraric <ethiraric@gmail.com>, David Aguilar <davvid@gmail.com>, Yuheng Chen <yuhengchen@sensetime.com>
+- `scopeguard` 1.2.0: MIT OR Apache-2.0
+  - Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
 - `sec1` 0.8.1: Apache-2.0 OR MIT
   - Copyright (c) 2021-2026 The RustCrypto Project Developers
 - `semver` 1.0.28: MIT OR Apache-2.0

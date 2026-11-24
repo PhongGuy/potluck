@@ -87,7 +87,8 @@ pub enum ServerError {
 /// `<data>`, `<data>/repos`, `<data>/hooks` and `<data>/tmp`, locks `<data>/server.lock`
 /// for the life of the server, sweeps what killed pushes left in its repositories, installs the
 /// pre-receive hook, opens and migrates the database, binds `config.listen()` and the admin
-/// socket, and serves the API on both. The update endpoints report the check off.
+/// socket, and serves the API on both, plus `/metrics` on `config.metrics_listen()` when set.
+/// The update endpoints report the check off.
 pub async fn start(config: &Config) -> Result<Running, ServerError> {
     start_inner(config, Serve::Fresh(None)).await
 }
@@ -164,14 +165,13 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             (state.db().clone(), None, Some(state))
         }
     };
-    let addr = config.listen();
-    // Keep a duplicate of the listening socket so shutdown can take it out of LISTEN itself.
-    let listen = |source| ServerError::Listen { addr, source };
-    let std_tcp = std::net::TcpListener::bind(addr).map_err(listen)?;
-    std_tcp.set_nonblocking(true).map_err(listen)?;
-    let kept_tcp = std_tcp.try_clone().map_err(listen)?;
-    let tcp = tokio::net::TcpListener::from_std(std_tcp).map_err(listen)?;
-    let http_addr = tcp.local_addr().map_err(listen)?;
+    // Keep a duplicate of each listening socket so shutdown can take it out of LISTEN itself.
+    let Bound {
+        tcp,
+        kept: kept_tcp,
+        addr: http_addr,
+    } = bind_tcp(config.listen())?;
+    let metrics_tcp = config.metrics_listen().map(bind_tcp).transpose()?;
     let admin_socket = config.admin_socket();
     let unix = bind_admin_socket(&admin_socket).map_err(|source| ServerError::AdminSocket {
         path: admin_socket.clone(),
@@ -187,7 +187,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             source,
         })?;
 
-    // One stop flag shared by both listeners, so shutdown drains TCP and the socket together.
+    // One stop flag shared by all three listeners, so shutdown drains them together.
     // TCP carries the peer address for `ClientIp`; the admin socket has none and stays local.
     let (stop, rx) = watch::channel(false);
     let mut state = given.unwrap_or_else(|| AppState::new(db.clone(), config.clone()));
@@ -222,6 +222,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             tracing::error!("cannot set up the update check ({err}); serving without it");
         }
     }
+    let metrics_router = crate::metrics::router(state.clone());
     let router = crate::api::router(state);
     let http = tokio::spawn(
         axum::serve(
@@ -234,18 +235,32 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
     );
     let admin = tokio::spawn(
         axum::serve(unix, with_actor(router, Actor::System))
-            .with_graceful_shutdown(stopped(rx))
+            .with_graceful_shutdown(stopped(rx.clone()))
             .into_future(),
     );
+    let mut tasks = vec![http, admin];
+    let (metrics_addr, metrics_kept) = match metrics_tcp {
+        Some(Bound { tcp, kept, addr }) => {
+            tasks.push(tokio::spawn(
+                axum::serve(tcp, metrics_router)
+                    .with_graceful_shutdown(stopped(rx))
+                    .into_future(),
+            ));
+            (Some(addr), Some(kept))
+        }
+        None => (None, None),
+    };
     Ok(Running {
         http_addr,
+        metrics_addr,
         admin_socket,
         stop,
-        tasks: [http, admin],
+        tasks,
         git_tasks,
         db,
         notices,
         tcp: kept_tcp,
+        metrics_tcp: metrics_kept,
         unix: kept_unix,
         _lock,
     })
@@ -283,6 +298,25 @@ fn lock_refused(err: TryLockError, config: &Config) -> ServerError {
     }
 }
 
+/// A bound TCP listener, the duplicate kept for shutdown, and its resolved address.
+struct Bound {
+    tcp: tokio::net::TcpListener,
+    kept: std::net::TcpListener,
+    addr: SocketAddr,
+}
+
+/// Binds `addr` for tokio and keeps a duplicate of the socket, as the API listener does; any
+/// failure is `ServerError::Listen` naming `addr`.
+fn bind_tcp(addr: SocketAddr) -> Result<Bound, ServerError> {
+    let listen = |source| ServerError::Listen { addr, source };
+    let std_tcp = std::net::TcpListener::bind(addr).map_err(listen)?;
+    std_tcp.set_nonblocking(true).map_err(listen)?;
+    let kept = std_tcp.try_clone().map_err(listen)?;
+    let tcp = tokio::net::TcpListener::from_std(std_tcp).map_err(listen)?;
+    let addr = tcp.local_addr().map_err(listen)?;
+    Ok(Bound { tcp, kept, addr })
+}
+
 /// Resolves once the stop flag changes or its sender is gone.
 async fn stopped(mut rx: watch::Receiver<bool>) {
     let _ = rx.changed().await;
@@ -293,13 +327,15 @@ async fn stopped(mut rx: watch::Receiver<bool>) {
 #[non_exhaustive]
 pub struct Running {
     http_addr: SocketAddr,
+    metrics_addr: Option<SocketAddr>,
     admin_socket: PathBuf,
     stop: watch::Sender<bool>,
-    tasks: [JoinHandle<io::Result<()>>; 2],
+    tasks: Vec<JoinHandle<io::Result<()>>>,
     git_tasks: TaskTracker,
     db: Db,
     notices: Notices,
     tcp: std::net::TcpListener,
+    metrics_tcp: Option<std::net::TcpListener>,
     unix: std::os::unix::net::UnixListener,
     _lock: File,
 }
@@ -308,6 +344,7 @@ impl std::fmt::Debug for Running {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Running")
             .field("http_addr", &self.http_addr)
+            .field("metrics_addr", &self.metrics_addr)
             .field("admin_socket", &self.admin_socket)
             .finish_non_exhaustive()
     }
@@ -317,6 +354,11 @@ impl Running {
     /// The bound TCP address, with the port resolved when `--listen` asked for 0.
     pub fn http_addr(&self) -> SocketAddr {
         self.http_addr
+    }
+
+    /// The bound metrics address, when `--metrics-listen` is set, with a port 0 resolved.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.metrics_addr
     }
 
     /// The admin socket path.
@@ -329,7 +371,7 @@ impl Running {
         &self.db
     }
 
-    /// Stops accepting, waits for in-flight requests, takes both sockets out of LISTEN, then waits
+    /// Stops accepting, waits for in-flight requests, takes every socket out of LISTEN, then waits
     /// for git reapers, push records and workspace creates and deletes, closes the database,
     /// removes the socket file, and releases the lock while leaving `server.lock` in place.
     /// Each git child stops at `--git-max-runtime-secs`, but a request or task runs its children
@@ -355,6 +397,12 @@ impl Running {
         // On macOS and BSD shutdown(2) on a listening socket fails with ENOTCONN, so it only logs.
         if let Err(err) = tcp.shutdown(Shutdown::Both) {
             tracing::error!("cannot shut down the TCP listener: {err}");
+        }
+        if let Some(kept) = self.metrics_tcp {
+            let metrics = std::net::TcpStream::from(OwnedFd::from(kept));
+            if let Err(err) = metrics.shutdown(Shutdown::Both) {
+                tracing::error!("cannot shut down the metrics listener: {err}");
+            }
         }
         let unix = std::os::unix::net::UnixStream::from(OwnedFd::from(self.unix));
         if let Err(err) = unix.shutdown(Shutdown::Both) {

@@ -329,9 +329,12 @@ impl GitEngine {
             None
         };
         let mut cmd = self.command(service, v2, extra_env);
-        if let Some(file) = &report_file {
-            cmd.env(crate::secret_check::REPORT_ENV, file.path());
-        }
+        // The engine is the sole author of the report path: with no file, no inherited or
+        // resolver-supplied value may reach the hook.
+        match &report_file {
+            Some(file) => cmd.env(crate::secret_check::REPORT_ENV, file.path()),
+            None => cmd.env_remove(crate::secret_check::REPORT_ENV),
+        };
         let spawned = cmd
             .arg(repo)
             .stdin(Stdio::from(stdin))
@@ -1365,6 +1368,41 @@ mod tests {
             .unwrap()
             .count();
         assert_eq!(left, 0, "the report file is removed");
+    }
+
+    #[tokio::test]
+    async fn the_hook_report_variable_is_removed_when_no_report_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        std::fs::remove_dir(dir.path().join("tmp").join("hook-reports")).unwrap();
+        let seen = dir.path().join("seen");
+        write_script(
+            &dir.path().join("hooks").join("pre-receive"),
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\nprintf '%s' \"${{POTLUCK_HOOK_REPORT-unset}}\" > '{}'\nexit 0\n",
+                seen.display()
+            ),
+            0o755,
+        );
+        let (body, _tip) = push_body(dir.path());
+        let planted = vec![(
+            crate::secret_check::REPORT_ENV.to_owned(),
+            dir.path().join("planted").display().to_string(),
+        )];
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &planted,
+                Body::from(body),
+                None,
+            )
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        assert_eq!(std::fs::read_to_string(&seen).unwrap(), "unset");
     }
 
     #[tokio::test]

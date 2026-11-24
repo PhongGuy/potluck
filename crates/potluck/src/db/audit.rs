@@ -530,7 +530,8 @@ impl Db {
         .await
     }
 
-    /// Deletes at most `limit` rows of `class` with `at < before`; returns how many went.
+    /// Deletes at most `limit` rows of `class` with `at < before`, oldest (lowest id) first;
+    /// returns how many went.
     pub async fn prune_audit(
         &self,
         class: AuditClass,
@@ -877,6 +878,43 @@ mod tests {
                     "2026-06-01T00:00:00Z".to_owned(),
                     "session.failed".to_owned()
                 ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capped_batch_prunes_the_lowest_ids_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("server.db")).unwrap();
+        db.migrate().await.unwrap();
+        // Stamps run out of id order, so a walk of the `at` index would pick other rows.
+        seed(
+            &db,
+            &[
+                ("2026-01-03T00:00:00Z", "user.create"),
+                ("2026-01-01T00:00:00Z", "user.create"),
+                ("2026-01-05T00:00:00Z", "user.create"),
+                ("2026-01-02T00:00:00Z", "user.create"),
+                ("2026-01-06T00:00:00Z", "user.create"),
+                ("2026-01-04T00:00:00Z", "user.create"),
+                ("2026-06-01T00:00:00Z", "user.create"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            db.prune_audit(AuditClass::Changes, "2026-03-01T00:00:00Z", 3)
+                .await
+                .unwrap(),
+            3
+        );
+        let at: Vec<String> = left(&db).await.into_iter().map(|(at, _)| at).collect();
+        assert_eq!(
+            at,
+            [
+                "2026-01-02T00:00:00Z",
+                "2026-01-06T00:00:00Z",
+                "2026-01-04T00:00:00Z",
+                "2026-06-01T00:00:00Z",
             ]
         );
     }

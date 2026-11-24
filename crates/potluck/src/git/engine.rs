@@ -2585,6 +2585,31 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_override_recheck_logs_a_tag_move() {
+        const WORKSPACE: i64 = 919_201;
+        let logs = global_logs();
+        let dir = tempfile::tempdir().unwrap();
+        // Raw values alone decide, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let line = format!("{} {} refs/tags/v1", "a".repeat(40), "b".repeat(40));
+        let moved = vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
+            .override_id(Some(5))
+            .default_branch("main");
+        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), moved).await;
+        let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        let line = text
+            .lines()
+            .find(|l| {
+                l.contains("tag rewritten") && l.contains(&format!("workspace_id={WORKSPACE}"))
+            })
+            .unwrap_or_else(|| panic!("{text}"));
+        for needle in ["override_id=5", "bob", "refs/tags/v1", "tag_move"] {
+            assert!(line.contains(needle), "{needle} in {line}");
+        }
+    }
+
     use crate::metrics::{Metrics, Snapshot, sample};
 
     fn git_count(m: &Metrics, service: &str, outcome: &str) -> f64 {

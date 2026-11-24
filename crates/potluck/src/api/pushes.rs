@@ -82,8 +82,8 @@ pub(crate) fn ref_updates(moves: &[RefMove]) -> Vec<RefUpdate> {
 
 /// Re-checks an accepted admin or override push on a blocking thread: the safety relaxations
 /// of an admin push without an armed override, in a kind with a rule set, and for both any
-/// rewrite of the default branch and any ref written outside branches and tags. Any other push,
-/// or one with no updates, returns at once.
+/// rewrite of the default branch, any ref written outside branches and tags, and any tag moved
+/// or deleted. Any other push, or one with no updates, returns at once.
 pub(crate) async fn recheck_admin_push(
     state: &AppState,
     push: &PushContext,
@@ -103,10 +103,10 @@ pub(crate) async fn recheck_admin_push(
 }
 
 /// The re-check itself over `repo` on a blocking thread: `log_accepted_relaxations` when `rules`
-/// is given, then `log_default_branch_rewrites` and `log_foreign_refs`, holding one of the
-/// engine's process slots throughout and with each git child under the engine's run limit. It
-/// waits for a slot without a timeout: the push is accepted, so its audit line should not drop
-/// under load. A re-check that cannot finish logs the warn line.
+/// is given, then `log_default_branch_rewrites`, `log_foreign_refs` and `log_tag_rewrites`,
+/// holding one of the engine's process slots throughout and with each git child under the
+/// engine's run limit. It waits for a slot without a timeout: the push is accepted, so its audit
+/// line should not drop under load. A re-check that cannot finish logs the warn line.
 pub(crate) async fn recheck(
     engine: &GitEngine,
     push: &PushContext,
@@ -143,6 +143,7 @@ pub(crate) async fn recheck(
                 &git,
             );
             crate::secret_check::log_foreign_refs(workspace_id, &owned, override_id, &updates);
+            crate::secret_check::log_tag_rewrites(workspace_id, &owned, override_id, &updates);
         })
         .await
         .is_ok(),

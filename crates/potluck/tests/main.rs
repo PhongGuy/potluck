@@ -95,6 +95,7 @@ mod session;
 mod session_proxies;
 mod slug;
 mod sse_reader;
+mod tag_protection;
 mod teams;
 mod test_rules;
 mod third_party_notices;

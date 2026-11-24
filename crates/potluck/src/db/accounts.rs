@@ -60,9 +60,7 @@ impl NewUser {
         self.server_admin = yes;
         self
     }
-}
 
-impl NewUser {
     /// The same user with no password hash and no server admin flag.
     pub(super) fn without_credentials(self) -> Self {
         NewUser {

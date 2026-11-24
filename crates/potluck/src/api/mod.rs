@@ -226,6 +226,10 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/tokens/{id}", delete(tokens::revoke))
         .route("/users", get(users::list).post(users::create))
         .route("/users/{username}", patch(users::patch))
+        .route(
+            "/users/{username}/oidc",
+            put(users::put_oidc).delete(users::delete_oidc),
+        )
         .route("/users/{username}/tokens", get(tokens::list_for_user))
         .route("/workspaces", get(workspaces::list))
         .route(

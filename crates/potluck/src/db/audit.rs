@@ -79,6 +79,8 @@ pub(crate) enum AuditAction {
     TokenRevoke,
     UserCreate,
     UserUpdate,
+    UserOidcLink,
+    UserOidcUnlink,
     TeamCreate,
     TeamMemberAdd,
     TeamMemberRemove,
@@ -101,6 +103,8 @@ impl AuditAction {
             AuditAction::TokenRevoke => "token.revoke",
             AuditAction::UserCreate => "user.create",
             AuditAction::UserUpdate => "user.update",
+            AuditAction::UserOidcLink => "user.oidc_link",
+            AuditAction::UserOidcUnlink => "user.oidc_unlink",
             AuditAction::TeamCreate => "team.create",
             AuditAction::TeamMemberAdd => "team.member_add",
             AuditAction::TeamMemberRemove => "team.member_remove",
@@ -176,6 +180,18 @@ pub(crate) struct UserUpdated {
     pub(crate) server_admin: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disabled: Option<bool>,
+}
+
+/// The `user.oidc_link` and `user.oidc_unlink` detail: the IdP subject linked or unlinked.
+#[derive(serde::Serialize)]
+pub(crate) struct OidcSubject<'a> {
+    pub(crate) subject: &'a str,
+}
+
+/// The `session.create` detail of a sign-in by other than a password.
+#[derive(serde::Serialize)]
+pub(crate) struct SignInMethod<'a> {
+    pub(crate) method: &'a str,
 }
 
 /// The `token.create` and `token.revoke` detail: the token owner's username.
@@ -597,6 +613,8 @@ mod tests {
             (AuditAction::TokenRevoke, "token.revoke"),
             (AuditAction::UserCreate, "user.create"),
             (AuditAction::UserUpdate, "user.update"),
+            (AuditAction::UserOidcLink, "user.oidc_link"),
+            (AuditAction::UserOidcUnlink, "user.oidc_unlink"),
             (AuditAction::TeamCreate, "team.create"),
             (AuditAction::TeamMemberAdd, "team.member_add"),
             (AuditAction::TeamMemberRemove, "team.member_remove"),

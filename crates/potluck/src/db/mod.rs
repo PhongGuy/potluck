@@ -14,9 +14,12 @@ pub mod accounts;
 pub mod audit;
 pub mod grants;
 mod migrations;
+mod oidc;
 pub mod overrides;
 pub mod teams;
 pub mod workspaces;
+
+pub use oidc::OidcLink;
 
 /// A handle to the one connection to `server.db`, owned by a dedicated thread.
 /// Clones share the thread; `close` stops it.

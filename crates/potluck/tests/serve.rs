@@ -37,7 +37,7 @@ async fn start_serves_health_on_loopback_and_prepares_the_data_dir() {
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3, "migrations ran at start");
+    assert_eq!(version, 4, "migrations ran at start");
     running.shutdown().await;
 }
 
@@ -227,7 +227,7 @@ fn serve_on_a_busy_port_prints_the_cause_once() {
 }
 
 #[test]
-fn serve_refuses_oidc_flags_from_the_environment() {
+fn serve_refuses_a_partial_oidc_set_from_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let child = potluck()
         .env("POTLUCK_PUBLIC_URL", "http://127.0.0.1:8080")
@@ -248,6 +248,45 @@ fn serve_refuses_oidc_flags_from_the_environment() {
         !dir.path().join("server.db").exists(),
         "nothing is created before config passes"
     );
+}
+
+#[test]
+fn serve_with_oidc_starts_while_the_idp_is_down_and_logs_the_redirect_uri() {
+    let dir = tempfile::tempdir().unwrap();
+    let secret = dir.path().join("oidc-secret");
+    std::fs::write(&secret, "s3cret-value\n").unwrap();
+    let dead = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let mut child = potluck()
+        .env("POTLUCK_PUBLIC_URL", "http://127.0.0.1:8080")
+        .env("POTLUCK_LISTEN", "127.0.0.1:0")
+        .env("POTLUCK_OIDC_ISSUER", format!("http://{dead}"))
+        .env("POTLUCK_OIDC_CLIENT_ID", "potluck")
+        .env("POTLUCK_OIDC_CLIENT_SECRET_FILE", &secret)
+        .args(["serve", "--data"])
+        .arg(dir.path().join("data"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(3));
+    let still_running = child.try_wait().unwrap().is_none();
+    child.kill().unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(still_running, "serve exited: {stderr}");
+    assert!(
+        stderr.contains("http://127.0.0.1:8080/api/v1/oidc/callback"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("s3cret-value"), "{stderr}");
+    let probe_warns = stderr
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("provider"))
+        .count();
+    assert_eq!(probe_warns, 1, "one warning per failed probe: {stderr}");
 }
 
 /// Waits up to `limit` for `child` to exit, killing and reaping it if it has not, so a serve

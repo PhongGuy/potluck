@@ -1,5 +1,5 @@
-//! The OIDC flags: all or none, the issuer's scheme, the secret file, the name and the refusal
-//! that stands until the sign-in routes exist.
+//! The OIDC flags: all or none, the issuer's scheme, the secret file, the name, and a complete
+//! set reaching the server's `Config`.
 
 use std::path::{Path, PathBuf};
 
@@ -263,28 +263,60 @@ fn serve_refuses_a_partial_set_as_incomplete() {
 }
 
 #[test]
-fn serve_validates_then_still_refuses_a_complete_set() {
+fn a_complete_set_reaches_the_config() {
     let dir = tempfile::tempdir().unwrap();
     let file = secret(dir.path(), "s3cret");
-    let file = file.to_str().unwrap();
-    let base = [
+    let config = parse_config(&[
         "--public-url",
         "https://p.example.com",
+        "--oidc-issuer",
+        "https://idp.example.com",
         "--oidc-client-id",
         "potluck",
         "--oidc-client-secret-file",
-        file,
+        file.to_str().unwrap(),
+        "--oidc-name",
+        "Acme",
+    ])
+    .unwrap();
+    let oidc = config.oidc().unwrap();
+    assert_eq!(
+        (oidc.issuer(), oidc.name()),
+        ("https://idp.example.com", "Acme")
+    );
+    assert!(
+        !format!("{config:?}").contains("s3cret"),
+        "Config's Debug hides the secret"
+    );
+    assert!(
+        parse_config(&["--public-url", "https://p.example.com"])
+            .unwrap()
+            .oidc()
+            .is_none()
+    );
+}
+
+#[test]
+fn serve_passes_insecure_http_through_to_the_issuer_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = secret(dir.path(), "s3cret");
+    let base = [
+        "--public-url",
+        "https://p.example.com",
+        "--oidc-issuer",
+        "http://idp.example.com",
+        "--oidc-client-id",
+        "potluck",
+        "--oidc-client-secret-file",
+        file.to_str().unwrap(),
     ];
-    let mut bad = base.to_vec();
-    bad.extend(["--oidc-issuer", "http://idp.example.com"]);
-    assert!(matches!(
-        parse_config(&bad).unwrap_err(),
-        ConfigError::InsecureOidcIssuer { .. }
-    ));
-    let mut good = base.to_vec();
-    good.extend(["--oidc-issuer", "https://idp.example.com"]);
-    assert!(matches!(
-        parse_config(&good).unwrap_err(),
-        ConfigError::OidcUnsupported
-    ));
+    let mut insecure = base.to_vec();
+    insecure.push("--insecure-http");
+    let config = parse_config(&insecure).unwrap();
+    assert_eq!(config.oidc().unwrap().issuer(), "http://idp.example.com");
+    let err = parse_config(&base).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InsecureOidcIssuer { .. }),
+        "{err:?}"
+    );
 }

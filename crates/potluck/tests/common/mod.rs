@@ -1,5 +1,6 @@
 //! Shared helpers. Every test reaches only 127.0.0.1 or a Unix socket under a temp dir.
 pub mod idp;
+pub mod oidc;
 pub mod release;
 pub mod scratch;
 

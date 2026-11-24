@@ -88,6 +88,7 @@ pub struct Config {
     update_check: bool,
     audit_retention_days: u32,
     audit_failed_retention_days: u32,
+    oidc: Option<crate::oidc::OidcSettings>,
     metrics_listen: Option<SocketAddr>,
 }
 
@@ -120,6 +121,11 @@ impl Config {
     /// How long a git child may run; `--git-max-runtime-secs`.
     pub fn git_max_runtime(&self) -> Duration {
         self.git_max_runtime
+    }
+
+    /// The OIDC sign-in settings, when the `--oidc-*` flags are set.
+    pub fn oidc(&self) -> Option<&crate::oidc::OidcSettings> {
+        self.oidc.as_ref()
     }
 
     /// The tracing filter directive.
@@ -265,11 +271,6 @@ pub enum ConfigError {
         /// The parser's complaint.
         reason: String,
     },
-    /// A complete, valid set of `--oidc-*` flags, and OIDC sign-in is not implemented yet.
-    #[error(
-        "OIDC sign-in is not implemented in this version; unset --oidc-issuer, --oidc-client-id and --oidc-client-secret-file (POTLUCK_OIDC_*)"
-    )]
-    OidcUnsupported,
     /// Some but not all of issuer, client id and secret file are set.
     #[error(
         "OIDC sign-in needs --oidc-issuer, --oidc-client-id and --oidc-client-secret-file together (POTLUCK_OIDC_*); missing: {missing}"
@@ -359,9 +360,6 @@ impl TryFrom<ServeArgs> for Config {
             args.oidc_jit,
             args.insecure_http,
         )?;
-        if oidc.is_some() {
-            return Err(ConfigError::OidcUnsupported);
-        }
         // Port 0 asks the kernel for a fresh port each bind, so two of them never collide.
         if let Some(addr) = args.metrics_listen
             && addr == args.listen
@@ -381,6 +379,7 @@ impl TryFrom<ServeArgs> for Config {
             update_check: args.update_check,
             audit_retention_days: args.audit_retention_days,
             audit_failed_retention_days: args.audit_failed_retention_days,
+            oidc,
             metrics_listen: args.metrics_listen,
         })
     }

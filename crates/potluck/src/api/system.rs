@@ -29,7 +29,13 @@ pub(super) struct ServerInfo {
 #[derive(Serialize)]
 struct AuthMethods {
     password: bool,
-    oidc: bool,
+    oidc: Option<OidcName>,
+}
+
+/// The configured provider as the apps label their sign-in button.
+#[derive(Serialize)]
+struct OidcName {
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -47,14 +53,17 @@ pub(super) async fn health(State(state): State<AppState>) -> ApiResult<Json<Heal
 }
 
 /// `GET /api/v1/server`: the version, the API generation, the sign-in methods offered and
-/// each kind's accepted workspace formats, keyed by kind name in sorted order.
-pub(super) async fn server() -> Json<ServerInfo> {
+/// each kind's accepted workspace formats, keyed by kind name in sorted order. `auth.oidc` is
+/// null unless OIDC sign-in is configured.
+pub(super) async fn server(State(state): State<AppState>) -> Json<ServerInfo> {
     Json(ServerInfo {
         version: VERSION,
         api: 1,
         auth: AuthMethods {
             password: true,
-            oidc: false,
+            oidc: state.oidc().map(|oidc| OidcName {
+                name: oidc.provider().settings().name().to_owned(),
+            }),
         },
         kinds: kinds::all()
             .iter()

@@ -34,13 +34,13 @@ fn table_names(path: &std::path::Path) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_fresh_database_migrates_to_version_3_and_stays_there() {
+async fn a_fresh_database_migrates_to_version_4_and_stays_there() {
     let dir = tempfile::tempdir().unwrap();
     let db = Db::open(&dir.path().join("server.db")).unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 0, "fresh file");
-    assert_eq!(db.migrate().await.unwrap(), 3);
-    assert_eq!(db.migrate().await.unwrap(), 3, "a second run is a no-op");
-    assert_eq!(db.schema_version().await.unwrap(), 3);
+    assert_eq!(db.migrate().await.unwrap(), 4);
+    assert_eq!(db.migrate().await.unwrap(), 4, "a second run is a no-op");
+    assert_eq!(db.schema_version().await.unwrap(), 4);
     db.close();
 }
 
@@ -56,6 +56,7 @@ async fn the_shipped_schema_has_its_tables() {
         [
             "audit",
             "grants",
+            "oidc_links",
             "overrides",
             "team_members",
             "teams",
@@ -81,7 +82,7 @@ async fn a_database_from_a_newer_potluck_is_refused() {
             err,
             DbError::SchemaTooNew {
                 found: 99,
-                supported: 3
+                supported: 4
             }
         ),
         "got {err:?}"
@@ -159,7 +160,7 @@ async fn every_table_is_strict() {
          WHERE schema = 'main' AND type = 'table' AND name NOT LIKE 'sqlite_%' AND strict = 1",
     )
     .await;
-    assert_eq!(strict, ["8"], "all eight tables were checked");
+    assert_eq!(strict, ["9"], "all nine tables were checked");
 }
 
 #[tokio::test]
@@ -178,6 +179,8 @@ async fn the_unique_constraints_conflict_mapping_relies_on_are_pinned() {
         unique,
         [
             "grants|pk|workspace_id,subject_kind,subject_id",
+            "oidc_links|pk|issuer,subject",
+            "oidc_links|u|issuer,user_id",
             "team_members|pk|team_id,user_id",
             "teams|u|slug",
             "tokens|u|digest",

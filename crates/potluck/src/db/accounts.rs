@@ -4,7 +4,9 @@
 use rusqlite::types::Value;
 use rusqlite::{OptionalExtension, Row, params, params_from_iter};
 
-use super::audit::{self, AuditAction, AuditCtx, Entry, TokenOwner, UserCreated, UserUpdated};
+use super::audit::{
+    self, AuditAction, AuditCtx, Entry, SignInMethod, TokenOwner, UserCreated, UserUpdated,
+};
 use super::{Db, DbError, conflict_on_unique};
 use crate::clock;
 
@@ -229,7 +231,7 @@ impl std::fmt::Debug for UserPatch {
     }
 }
 
-const USER_COLUMNS: &str =
+pub(super) const USER_COLUMNS: &str =
     "id, username, display_name, email, password_hash, server_admin, disabled, created_at";
 
 /// What `create_token` inserts; `created_at` is set by the database thread. `Debug` prints the
@@ -281,6 +283,8 @@ impl std::fmt::Debug for NewToken {
 pub enum TokenOrigin {
     /// `POST /session`.
     Session,
+    /// `POST /oidc/redeem`.
+    Oidc,
     /// `POST /tokens` or direct.
     Api,
 }
@@ -386,8 +390,9 @@ fn token_from_row(row: &Row<'_>) -> rusqlite::Result<TokenRecord> {
     })
 }
 
-/// The username of user `id`; a token always has an owner, so a missing one is a storage fault.
-fn owner_name(conn: &rusqlite::Connection, id: i64) -> Result<String, DbError> {
+/// The username of user `id`; a token or link always has its user, so a missing one is a storage
+/// fault.
+pub(super) fn owner_name(conn: &rusqlite::Connection, id: i64) -> Result<String, DbError> {
     Ok(
         conn.query_row("SELECT username FROM users WHERE id = ?1", [id], |row| {
             row.get(0)
@@ -402,7 +407,7 @@ fn select_token(conn: &rusqlite::Connection, id: i64) -> Result<Option<TokenReco
 
 // Qualifies each name in a comma-separated column list with a table alias, so a join can reuse
 // the same constants the single-table queries select.
-fn prefixed(alias: &str, columns: &str) -> String {
+pub(super) fn prefixed(alias: &str, columns: &str) -> String {
     columns
         .split(',')
         .map(|name| format!("{alias}.{}", name.trim()))
@@ -416,7 +421,7 @@ fn user_from_row(row: &Row<'_>) -> rusqlite::Result<UserRecord> {
 
 // Reads the `USER_COLUMNS` that start at column `base`, so a join can carry a user after other
 // columns.
-fn user_at(row: &Row<'_>, base: usize) -> rusqlite::Result<UserRecord> {
+pub(super) fn user_at(row: &Row<'_>, base: usize) -> rusqlite::Result<UserRecord> {
     Ok(UserRecord {
         id: row.get(base)?,
         username: row.get(base + 1)?,
@@ -477,6 +482,15 @@ impl Db {
     pub async fn user_by_username(&self, username: &str) -> Result<Option<UserRecord>, DbError> {
         let username = username.to_owned();
         self.call(move |conn| select_user(conn, &username)).await
+    }
+
+    /// The user with `id`, if any.
+    pub(crate) async fn user_by_id(&self, id: i64) -> Result<Option<UserRecord>, DbError> {
+        self.call(move |conn| {
+            let sql = format!("SELECT {USER_COLUMNS} FROM users WHERE id = ?1");
+            Ok(conn.query_row(&sql, [id], user_from_row).optional()?)
+        })
+        .await
     }
 
     /// Every user, by username.
@@ -576,12 +590,13 @@ impl Db {
             let sql = format!("SELECT {TOKEN_COLUMNS} FROM tokens WHERE id = ?1");
             let created = tx.query_row(&sql, [tx.last_insert_rowid()], token_from_row)?;
             let target = Entry::new(match origin {
-                TokenOrigin::Session => AuditAction::SessionCreate,
+                TokenOrigin::Session | TokenOrigin::Oidc => AuditAction::SessionCreate,
                 TokenOrigin::Api => AuditAction::TokenCreate,
             })
             .target("token", Some(created.id), Some(&created.name));
             let entry = match origin {
                 TokenOrigin::Session => target,
+                TokenOrigin::Oidc => target.detail(&SignInMethod { method: "oidc" })?,
                 TokenOrigin::Api => {
                     let owner = owner_name(&tx, created.user_id)?;
                     target.detail(&TokenOwner { user: &owner })?

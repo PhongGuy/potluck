@@ -27,16 +27,17 @@ impl std::io::Write for ThreadSink {
 // One process-wide subscriber rather than a scoped one: with a single dispatcher, tracing caches
 // each callsite's interest from whichever thread reaches it first, so a concurrent test with no
 // subscriber could silence the events this test reads. The thread-local writer keeps capture
-// per test.
+// per test. `try_init` also bridges the `log` crate, as production's does, so dependencies that
+// log through `log` (reqwest, hyper, openidconnect) land in the capture too.
 fn install_capturing_subscriber() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
-        let subscriber = tracing_subscriber::fmt()
+        tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
             .with_ansi(false)
             .with_writer(|| ThreadSink)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).expect("no other global subscriber");
+            .try_init()
+            .expect("no other global subscriber or logger");
     });
 }
 

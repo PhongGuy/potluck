@@ -194,7 +194,7 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// every created or format-touching update to a commit gets a format pass: its `format_file` must
 /// hold a format the rule set lists, or the ref gets one `format_unsupported` finding, sorted
 /// last. For a non-admin, `default_branch_rewrites` and then `foreign_refs` over each update add
-/// their refusals last.
+/// their refusals last, followed per ref by `default_branch_missing` over the whole push.
 /// A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
@@ -326,9 +326,28 @@ pub fn scan_with(
             }
         }
     }
-    // An admin may rewrite the default branch and write any ref, so neither check is even run
-    // for one.
+    // An admin may rewrite or omit the default branch and write any ref, so none of these
+    // checks is even run for one.
     if role != Role::Admin {
+        // The presence check sees the whole push, since any one update may create the branch;
+        // entry 1 sorts each refusal after that ref's own protection lines.
+        let missing = default_branch_missing(env.default_branch(), updates, git)?;
+        let mut missing = missing.into_iter().peekable();
+        for (ri, update) in updates.iter().enumerate() {
+            if !update.is_delete()
+                && let Some(r) = missing.next_if(|r| r.ref_name == update.name())
+            {
+                hits.push((
+                    HitKey {
+                        ref_index: ri,
+                        pass: 5,
+                        entry: 1,
+                        finding: 0,
+                    },
+                    r,
+                ));
+            }
+        }
         for (ri, update) in updates.iter().enumerate() {
             let one = std::slice::from_ref(update);
             let refused = default_branch_rewrites(env.default_branch(), one, git)?;
@@ -430,6 +449,35 @@ pub fn default_branch_rewrites(
         found.push(rejection(update.name(), b"/", "/", finding));
     }
     Ok(found)
+}
+
+/// The `safety_relaxation` refusals `default_branch_missing` for a push that would leave
+/// `refs/heads/<default_branch>` absent: one at path `/` per non-delete update, in update order,
+/// when the branch is named and non-empty, does not exist before the push, and no update in it
+/// creates or moves the branch. A deletes-only push, or one naming the branch, makes no git call;
+/// a git error fails the whole check.
+pub fn default_branch_missing(
+    default_branch: Option<&str>,
+    updates: &[RefUpdate],
+    git: &Git,
+) -> Result<Vec<Rejection>, ScanError> {
+    let Some(branch) = default_branch.filter(|b| !b.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let full = [b"refs/heads/".as_slice(), branch.as_bytes()].concat();
+    let writes = || updates.iter().filter(|u| !u.is_delete());
+    if writes().next().is_none()
+        || writes().any(|u| u.name() == full.as_slice())
+        || git.ref_exists(&full)?
+    {
+        return Ok(Vec::new());
+    }
+    Ok(writes()
+        .map(|u| {
+            let finding = Finding::new(Code::SafetyRelaxation, "default_branch_missing", "/");
+            rejection(u.name(), b"/", "/", finding)
+        })
+        .collect())
 }
 
 /// The `safety_relaxation` refusals `ref_namespace` at path `/`, in update order, for every

@@ -281,23 +281,38 @@ impl Git {
             OsStr::new(old.as_str()),
             OsStr::new(new.as_str()),
         ];
-        let mut running = self.spawn(SUB, &args, None)?;
+        self.yes_or_no(SUB, &args)
+    }
+
+    /// `show-ref --verify --quiet <name>`: whether the full ref `name` exists. Answered by exit
+    /// code like `is_ancestor`, so a broken lookup is `GitCmdError::Failed`, never "absent".
+    pub fn ref_exists(&self, name: &[u8]) -> Result<bool, GitCmdError> {
+        use std::os::unix::ffi::OsStrExt;
+        let args = [
+            OsStr::new("--verify"),
+            OsStr::new("--quiet"),
+            OsStr::from_bytes(name),
+        ];
+        self.yes_or_no("show-ref", &args)
+    }
+
+    /// Runs a git that answers by exit code: 0 is yes, 1 is no, and any other exit, a signal or
+    /// the run limit is `GitCmdError::Failed`. stdout is drained and dropped.
+    fn yes_or_no(&self, subcommand: &'static str, args: &[&OsStr]) -> Result<bool, GitCmdError> {
+        let mut running = self.spawn(subcommand, args, None)?;
         let read = match running.child.stdout.take() {
             Some(mut stdout) => std::io::copy(&mut stdout, &mut std::io::sink()).map(|_| ()),
             None => Ok(()),
         };
         if let Err(source) = read {
             running.abort();
-            return Err(GitCmdError::Spawn {
-                subcommand: SUB,
-                source,
-            });
+            return Err(GitCmdError::Spawn { subcommand, source });
         }
         let (status, stderr) = running.exit()?;
         match status.code() {
             Some(0) => Ok(true),
             Some(1) => Ok(false),
-            _ => Err(failed(SUB, &stderr)),
+            _ => Err(failed(subcommand, &stderr)),
         }
     }
 

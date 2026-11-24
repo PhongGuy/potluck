@@ -213,6 +213,7 @@ async fn only_server_admins_link() {
             .0,
         401
     );
+    assert_eq!(call(&url, Method::DELETE, None, None).await.0, 401);
 }
 
 #[tokio::test]
@@ -225,6 +226,19 @@ async fn without_oidc_linking_is_a_conflict() {
         Method::PUT,
         Some(&admin),
         Some(json!({"subject": "s"})),
+    )
+    .await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (409, Some("conflict"))
+    );
+    assert!(body["error"]["message"].as_str().unwrap().contains("OIDC"));
+
+    let (status, body) = call(
+        &app.url("/users/ada/oidc"),
+        Method::DELETE,
+        Some(&admin),
+        None,
     )
     .await;
     assert_eq!(

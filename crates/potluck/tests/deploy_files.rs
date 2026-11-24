@@ -556,8 +556,13 @@ fn the_smoke_test_backs_up_restores_and_clones() {
     ] {
         assert!(script.contains(needle), "smoke script lacks {needle:?}");
     }
+    // The call site, not the function body, must come before the first container stops.
+    let call = script
+        .find("backup_round_trip \"$port\"")
+        .expect("smoke() does not call backup_round_trip");
+    let stop = script.find("stop -t 20").expect("no graceful stop");
     assert!(
-        script.find("potluck admin backup") < script.find("stop -t 20"),
+        call < stop,
         "the backup must run while the first container is live"
     );
 }

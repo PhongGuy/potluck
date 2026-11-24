@@ -27,16 +27,59 @@ pub fn run_pre_receive() -> ExitCode {
         Ok(rejections) if rejections.is_empty() => ExitCode::SUCCESS,
         Ok(rejections) => {
             let _ = report(&rejections, &mut err);
+            write_report_file(&report_text(&rejections));
             ExitCode::FAILURE
         }
         Err(Refusal::RefNameNotUtf8) => {
             let _ = writeln!(err, "ref name is not valid UTF-8");
+            write_report_file(HOOK_ERROR_LINE);
             ExitCode::FAILURE
         }
         Err(Refusal::Error(reason)) => {
             let _ = writeln!(err, "potluck-error {reason}");
+            write_report_file(HOOK_ERROR_LINE);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The variable naming the file the hook writes its refusal lines to.
+pub const REPORT_ENV: &str = "POTLUCK_HOOK_REPORT";
+/// At most this many lines are written.
+pub const MAX_REPORT_LINES: usize = 64;
+/// The report-file text for a refusal that carries no rule (bad input, failed scan).
+const HOOK_ERROR_LINE: &str = "hook_error none\n";
+
+/// One `<code> <rule>\n` line per distinct (code, rule), in first-seen order, at most 64.
+pub fn report_text(rejections: &[scan::Rejection]) -> String {
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    for r in rejections {
+        let key = (r.finding().code().as_str(), r.finding().rule());
+        if !seen.contains(&key) {
+            seen.push(key);
+            if seen.len() == MAX_REPORT_LINES {
+                break;
+            }
+        }
+    }
+    seen.iter()
+        .map(|(code, rule)| format!("{code} {rule}\n"))
+        .collect()
+}
+
+/// Overwrites the file `REPORT_ENV` names with `text`. The engine creates that file; the hook
+/// never does, so a stale or wrong path grows nothing. Every failure is ignored: the exit code
+/// alone decides the push.
+fn write_report_file(text: &str) {
+    let Some(path) = std::env::var_os(REPORT_ENV).filter(|p| !p.is_empty()) else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+    {
+        let _ = file.write_all(text.as_bytes());
     }
 }
 
@@ -172,4 +215,42 @@ fn check(env: &HookEnv) -> Result<Vec<scan::Rejection>, Refusal> {
             ScanError::UnsupportedKind => "unsupported kind".to_owned(),
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kinds::{Code, Finding};
+    use crate::secret_check::scan::Rejection;
+
+    fn rej(code: Code, rule: &'static str, path: &str) -> Rejection {
+        Rejection::new(
+            b"refs/heads/main",
+            path.as_bytes(),
+            Finding::new(code, rule, path),
+        )
+    }
+
+    #[test]
+    fn the_report_has_one_line_per_distinct_code_and_rule() {
+        let text = report_text(&[
+            rej(Code::EnvFile, "env_file", ".env"),
+            rej(Code::SecretPattern, "aws", "a.txt"),
+            rej(Code::EnvFile, "env_file", "sub/.env"),
+        ]);
+        assert_eq!(text, "secret_env_file env_file\nsecret_pattern aws\n");
+    }
+
+    #[test]
+    fn the_report_stops_at_64_lines() {
+        let many: Vec<Rejection> = (0..100)
+            .map(|i| {
+                let rule: &'static str = Box::leak(format!("rule_{i}").into_boxed_str());
+                rej(Code::SecretPattern, rule, "f")
+            })
+            .collect();
+        let text = report_text(&many);
+        assert_eq!(text.lines().count(), MAX_REPORT_LINES);
+        assert!(text.starts_with("secret_pattern rule_0\n"), "{text}");
+    }
 }

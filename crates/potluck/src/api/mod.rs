@@ -68,9 +68,11 @@ impl AppState {
     /// the default git limits under the configured run limit and the production hashing cost;
     /// the engine reads its paths and body cap from `config`.
     pub fn new(db: Db, config: Config) -> Self {
+        let metrics = Metrics::new(env!("CARGO_PKG_VERSION"));
         let git = Arc::new(git_engine(
             &config,
             GitLimits::default().with_max_runtime(config.git_max_runtime()),
+            Arc::clone(&metrics),
         ));
         let git_access = Arc::new(DbAccess::new(db.clone()));
         let oidc = oidc_state(&config);
@@ -84,7 +86,7 @@ impl AppState {
             notices: Notices::new(),
             updates: None,
             oidc,
-            metrics: Metrics::new(env!("CARGO_PKG_VERSION")),
+            metrics,
         }
     }
 
@@ -98,7 +100,7 @@ impl AppState {
     /// Rebuilds the engine with `limits`.
     #[must_use]
     pub fn with_git_limits(mut self, limits: GitLimits) -> Self {
-        self.git = Arc::new(git_engine(&self.config, limits));
+        self.git = Arc::new(git_engine(&self.config, limits, Arc::clone(&self.metrics)));
         self
     }
 
@@ -191,7 +193,7 @@ fn oidc_state(config: &Config) -> Option<OidcState> {
     }
 }
 
-fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
+fn git_engine(config: &Config, limits: GitLimits, metrics: Arc<Metrics>) -> GitEngine {
     let repos = Repos::new(config.repos_dir(), config.git().to_path_buf());
     GitEngine::new(
         repos,
@@ -200,6 +202,7 @@ fn git_engine(config: &Config, limits: GitLimits) -> GitEngine {
         config.max_push_bytes(),
         limits,
     )
+    .with_metrics(metrics)
 }
 
 /// Every route under `/api/v1` and the git smart HTTP routes under `/git`; unknown paths and

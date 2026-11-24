@@ -13,7 +13,9 @@ use tokio_util::task::TaskTracker;
 
 use crate::api::error::ApiError;
 use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, parse_commands};
+use crate::git::report::{self, HookReport};
 use crate::git::{Repos, Service, spool, sweep};
+use crate::metrics::{GitOutcome, GitService, Metrics};
 
 /// The default for how long a git child may run from spawn: 30 min.
 pub(crate) const DEFAULT_MAX_RUNTIME_SECS: u64 = 1800;
@@ -64,8 +66,9 @@ impl Default for GitLimits {
 
 /// Told the moves of one receive-pack, once, after git exits with any status: the command list
 /// against the refs before git started and as they stand after it exited (`moved`), an empty
-/// list when nothing moved. Not called only when the refs cannot be read (logged at error).
-pub(crate) type PushObserver = Box<dyn FnOnce(Vec<RefMove>) + Send + 'static>;
+/// list when nothing moved, with the hook's refusal report (the default when there was no report
+/// file). Not called only when the refs cannot be read (logged at error).
+pub(crate) type PushObserver = Box<dyn FnOnce(Vec<RefMove>, HookReport) + Send + 'static>;
 
 /// Spawns git for the smart HTTP routes within the configured limits.
 #[derive(Debug)]
@@ -82,6 +85,7 @@ pub struct GitEngine {
     max_runtime: Duration,
     writers: sweep::Writers,
     tasks: TaskTracker,
+    metrics: Arc<Metrics>,
 }
 
 impl GitEngine {
@@ -107,7 +111,14 @@ impl GitEngine {
             max_runtime: limits.max_runtime,
             writers: sweep::Writers::default(),
             tasks: TaskTracker::new(),
+            metrics: Metrics::new(env!("CARGO_PKG_VERSION")),
         }
+    }
+
+    /// Records request outcomes and slot waits into `metrics` instead of a private registry.
+    pub(crate) fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Git slots held now and the configured limit, as `(in_use, limit)`.
@@ -147,10 +158,30 @@ impl GitEngine {
         repo: &Path,
         v2: bool,
     ) -> Result<Vec<u8>, GitError> {
+        let result = self.advertise_unrecorded(service, repo, v2).await;
+        let outcome = match &result {
+            Ok(_) => Some(GitOutcome::Ok),
+            Err(GitError::Busy) => None,
+            Err(GitError::Overran { .. }) => Some(GitOutcome::Overran),
+            Err(_) => Some(GitOutcome::Failed),
+        };
+        // `acquire` already counted a `Busy`, so each advertisement is counted exactly once.
+        if let Some(outcome) = outcome {
+            self.metrics.git_request(GitService::Advertise, outcome);
+        }
+        result
+    }
+
+    async fn advertise_unrecorded(
+        &self,
+        service: Service,
+        repo: &Path,
+        v2: bool,
+    ) -> Result<Vec<u8>, GitError> {
         if service == Service::ReceivePack {
             self.require_hook()?;
         }
-        let _permit = self.acquire().await?;
+        let _permit = self.acquire(GitService::Advertise).await?;
         let mut child = self
             .command(service, v2, &[])
             .arg("--http-backend-info-refs")
@@ -227,6 +258,31 @@ impl GitEngine {
         body: Body,
         on_push: Option<PushObserver>,
     ) -> Result<Body, GitError> {
+        let result = self
+            .rpc_unrecorded(service, repo, v2, encoding, extra_env, body, on_push)
+            .await;
+        // A request that never reached the reaper is counted here; `acquire` counted a `Busy`,
+        // and the reaper counts every request it took over.
+        match &result {
+            Ok(_) | Err(GitError::Busy) => {}
+            Err(_) => self
+                .metrics
+                .git_request(git_service(service), GitOutcome::Failed),
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn rpc_unrecorded(
+        &self,
+        service: Service,
+        repo: &Path,
+        v2: bool,
+        encoding: Option<&str>,
+        extra_env: &[(String, String)],
+        body: Body,
+        on_push: Option<PushObserver>,
+    ) -> Result<Body, GitError> {
         if service == Service::ReceivePack {
             self.require_hook()?;
         }
@@ -234,7 +290,7 @@ impl GitEngine {
         // upload timeout keeps a trickling client from parking on a slot.
         // The slot comes before the writer gate, so a push refused `Busy` never held the gate and
         // cannot strand a killed push's deferred sweep.
-        let permit = self.acquire().await?;
+        let permit = self.acquire(git_service(service)).await?;
         // Spool before spawning: a 413 can still be answered, and git reads its request from a
         // file, so nothing has to feed stdin while git is already writing progress to stdout.
         let stdin = tokio::time::timeout(
@@ -267,8 +323,16 @@ impl GitEngine {
         };
         let repos = self.repos.clone();
         let repo_path = repo.to_path_buf();
-        let spawned = self
-            .command(service, v2, extra_env)
+        let report_file = if service == Service::ReceivePack {
+            self.report_file()
+        } else {
+            None
+        };
+        let mut cmd = self.command(service, v2, extra_env);
+        if let Some(file) = &report_file {
+            cmd.env(crate::secret_check::REPORT_ENV, file.path());
+        }
+        let spawned = cmd
             .arg(repo)
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::piped())
@@ -294,6 +358,7 @@ impl GitEngine {
         };
         let stderr = child.stderr.take();
         let max_runtime = self.max_runtime;
+        let metrics = Arc::clone(&self.metrics);
         // The reaper owns the child and the slot: the slot returns when git's group is empty or is
         // killed at the run limit, and a non-zero exit is logged with the tail of stderr.
         self.tasks.spawn(async move {
@@ -312,8 +377,8 @@ impl GitEngine {
                 (tail, child.wait().await)
             })
             .await;
-            let killed = match bounded {
-                Ok((_, Ok(status))) if status.success() => false,
+            let outcome = match bounded {
+                Ok((_, Ok(status))) if status.success() => GitOutcome::Ok,
                 Ok((tail, Ok(status))) => {
                     tracing::warn!(
                         service = service.name(),
@@ -321,18 +386,20 @@ impl GitEngine {
                         stderr = %tail,
                         "git exited with an error"
                     );
-                    false
+                    GitOutcome::Failed
                 }
                 Ok((_, Err(err))) => {
                     tracing::warn!(service = service.name(), error = %err, "waiting for git failed");
-                    false
+                    GitOutcome::Failed
                 }
                 Err(_) => {
                     // The cut-off stderr tail is not worth logging.
                     let _ = overran(&mut child, group, service, max_runtime).await;
-                    true
+                    GitOutcome::Overran
                 }
             };
+            metrics.git_request(git_service(service), outcome);
+            let killed = outcome == GitOutcome::Overran;
             // Sweep before the observer hears the moves, so a listener sees a clean repository.
             if let Some(writer) = writer {
                 writer.leave(killed).await;
@@ -340,13 +407,27 @@ impl GitEngine {
             // Whatever the exit status, the refs are the ground truth: a client that hangs up
             // mid-report kills git with SIGPIPE after the refs already moved.
             if let Some((on_push, before)) = watch {
+                let report = read_report(report_file).await;
                 match list_refs(&repos, &repo_path).await {
-                    Ok(after) => on_push(moved(&commands, &before, &after)),
+                    Ok(after) => on_push(moved(&commands, &before, &after), report),
                     Err(err) => tracing::error!(error = %err, "cannot list refs after a push"),
                 }
             }
         });
         Ok(Body::from_stream(tokio_util::io::ReaderStream::new(stdout)))
+    }
+
+    /// A fresh, empty report file under `<tmp_dir>/hook-reports` for one receive-pack's hook, or
+    /// `None` (warned) when it cannot be created; it is removed when dropped.
+    fn report_file(&self) -> Option<tempfile::NamedTempFile> {
+        let dir = self.tmp_dir.join(report::DIR_NAME);
+        match tempfile::Builder::new().prefix("report-").tempfile_in(&dir) {
+            Ok(file) => Some(file),
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot create a hook report file");
+                None
+            }
+        }
     }
 
     /// `Ok` when `<hooks_dir>/pre-receive` is a regular file with any execute bit. git accepts a
@@ -373,12 +454,20 @@ impl GitEngine {
         self.max_runtime
     }
 
-    /// A process slot, or `Busy` once `queue_wait` has passed without one.
-    async fn acquire(&self) -> Result<OwnedSemaphorePermit, GitError> {
-        tokio::time::timeout(self.queue_wait, Arc::clone(&self.permits).acquire_owned())
-            .await
-            .map_err(|_| GitError::Busy)?
-            .map_err(|_| GitError::Busy)
+    /// A process slot, or `Busy` once `queue_wait` has passed without one. The wait is recorded
+    /// either way, and a `Busy` is counted as the outcome of `service`'s request.
+    async fn acquire(&self, service: GitService) -> Result<OwnedSemaphorePermit, GitError> {
+        let started = tokio::time::Instant::now();
+        let permit =
+            tokio::time::timeout(self.queue_wait, Arc::clone(&self.permits).acquire_owned()).await;
+        self.metrics.slot_wait(started.elapsed().as_secs_f64());
+        match permit {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => {
+                self.metrics.git_request(service, GitOutcome::Busy);
+                Err(GitError::Busy)
+            }
+        }
     }
 
     /// git with the hardening flags and a clean environment; the caller appends the
@@ -409,6 +498,32 @@ impl GitEngine {
         cmd.process_group(0);
         cmd.kill_on_drop(true);
         cmd
+    }
+}
+
+/// The hook's report from `file`, which is then removed: at most `MAX_BYTES` are read, through
+/// tokio so the reaper never blocks a worker. No file, or one that cannot be read (warned), is
+/// the default report.
+async fn read_report(file: Option<tempfile::NamedTempFile>) -> HookReport {
+    let Some(file) = file else {
+        return HookReport::default();
+    };
+    let mut bytes = Vec::new();
+    let read = match file.reopen() {
+        Ok(std_file) => tokio::fs::File::from_std(std_file)
+            .take(report::MAX_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map(drop),
+        Err(err) => Err(err),
+    };
+    drop(file);
+    match read {
+        Ok(()) => report::parse(&bytes),
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot read a hook report file");
+            HookReport::default()
+        }
     }
 }
 
@@ -502,6 +617,14 @@ pub(super) async fn kill_and_reap(
 ) {
     kill_group(group);
     let _ = child.wait().await;
+}
+
+/// The metrics label of an RPC to `service`.
+fn git_service(service: Service) -> GitService {
+    match service {
+        Service::UploadPack => GitService::UploadPack,
+        Service::ReceivePack => GitService::ReceivePack,
+    }
 }
 
 /// Kills and reaps git at the run limit, logs the one warning, and returns `Overran`.
@@ -697,7 +820,7 @@ mod tests {
             )
             .await
             .unwrap();
-        std::fs::create_dir_all(dir.join("tmp")).unwrap();
+        std::fs::create_dir_all(dir.join("tmp").join("hook-reports")).unwrap();
         write_stub_hook(&dir.join("hooks"), 0o755);
         (
             GitEngine::new(
@@ -1190,11 +1313,86 @@ mod tests {
     ) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (
-            Box::new(move |moves| {
+            Box::new(move |moves, _report| {
                 let _ = tx.send(moves);
             }),
             rx,
         )
+    }
+
+    #[tokio::test]
+    async fn a_refusing_hook_reaches_the_observer_through_the_report_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        write_script(
+            &dir.path().join("hooks").join("pre-receive"),
+            "#!/bin/sh\ncat >/dev/null\nprintf 'secret_env_file env_file\\n' > \"$POTLUCK_HOOK_REPORT\"\nexit 1\n",
+            0o755,
+        );
+        let (body, _tip) = push_body(dir.path());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let on_push: PushObserver = Box::new(move |moves, report| {
+            let _ = tx.send((moves, report));
+        });
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        let (moves, report) = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(moves.is_empty(), "nothing landed");
+        assert!(report.refused());
+        assert_eq!(
+            report.refusals(),
+            [("secret_env_file", "env_file".to_owned())]
+        );
+        engine.tasks.close();
+        engine.tasks.wait().await;
+        let left = std::fs::read_dir(dir.path().join("tmp").join("hook-reports"))
+            .unwrap()
+            .count();
+        assert_eq!(left, 0, "the report file is removed");
+    }
+
+    #[tokio::test]
+    async fn an_accepting_hook_gives_an_unrefused_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        let (body, _tip) = push_body(dir.path());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let on_push: PushObserver = Box::new(move |moves, report| {
+            let _ = tx.send((moves, report));
+        });
+        let out = engine
+            .rpc(
+                Service::ReceivePack,
+                &repo,
+                false,
+                None,
+                &[],
+                Body::from(body),
+                Some(on_push),
+            )
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        let (moves, report) = tokio::time::timeout(Duration::from_secs(10), rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(moves.len(), 1);
+        assert!(!report.refused());
     }
 
     #[tokio::test]
@@ -2318,5 +2516,122 @@ mod tests {
         for needle in ["override_id=5", "bob", "branch_delete"] {
             assert!(line.contains(needle), "{needle} in {line}");
         }
+    }
+
+    use crate::metrics::{Metrics, Snapshot, sample};
+
+    fn git_count(m: &Metrics, service: &str, outcome: &str) -> f64 {
+        let series =
+            format!("potluck_git_requests_total{{service=\"{service}\",outcome=\"{outcome}\"}}");
+        sample(&m.render(&Snapshot::default()), &series).unwrap_or(0.0)
+    }
+
+    #[tokio::test]
+    async fn advertise_counts_ok_and_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        let m = Metrics::new("t");
+        let engine = engine.with_metrics(Arc::clone(&m));
+        engine
+            .advertise(Service::UploadPack, &repo, false)
+            .await
+            .unwrap();
+        let _ = engine
+            .advertise(Service::UploadPack, &dir.path().join("nope.git"), false)
+            .await
+            .unwrap_err();
+        assert_eq!(git_count(&m, "advertise", "ok"), 1.0);
+        assert_eq!(git_count(&m, "advertise", "failed"), 1.0);
+        let text = m.render(&Snapshot::default());
+        assert_eq!(
+            sample(&text, "potluck_git_slot_wait_seconds_count"),
+            Some(2.0),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_engine_counts_busy_and_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), limits(1, 100)).await;
+        let m = Metrics::new("t");
+        let engine = engine.with_metrics(Arc::clone(&m));
+        let held = Arc::clone(&engine.permits).acquire_owned().await.unwrap();
+        let err = engine
+            .advertise(Service::UploadPack, &repo, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::Busy), "got {err:?}");
+        drop(held);
+        assert_eq!(git_count(&m, "advertise", "busy"), 1.0);
+        assert_eq!(
+            git_count(&m, "advertise", "failed"),
+            0.0,
+            "busy is not also failed"
+        );
+        let text = m.render(&Snapshot::default());
+        let le = "potluck_git_slot_wait_seconds_bucket{le=\"0.01\"}";
+        assert_eq!(
+            sample(&text, le),
+            Some(0.0),
+            "the 100 ms wait is above 10 ms: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_git_past_its_run_limit_counts_overran() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-git");
+        write_script(&fake, "#!/bin/sh\nsleep 30\n", 0o755);
+        std::fs::create_dir_all(dir.path().join("tmp")).unwrap();
+        write_stub_hook(&dir.path().join("hooks"), 0o755);
+        let m = Metrics::new("t");
+        let engine = GitEngine::new(
+            Repos::new(dir.path().join("repos"), fake),
+            dir.path().join("hooks"),
+            dir.path().join("tmp"),
+            1024,
+            limits(1, 100).with_max_runtime(Duration::from_secs(1)),
+        )
+        .with_metrics(Arc::clone(&m));
+        let err = engine
+            .advertise(
+                Service::UploadPack,
+                &dir.path().join("repos").join("x.git"),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::Overran { .. }), "got {err:?}");
+        assert_eq!(git_count(&m, "advertise", "overran"), 1.0);
+        assert_eq!(git_count(&m, "advertise", "failed"), 0.0);
+    }
+
+    #[tokio::test]
+    async fn an_rpc_counts_once_when_its_reaper_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        let m = Metrics::new("t");
+        let engine = engine.with_metrics(Arc::clone(&m));
+        seed_commit(&repo, dir.path());
+        let body = Body::from("0014command=ls-refs\n0000");
+        let out = engine
+            .rpc(Service::UploadPack, &repo, true, None, &[], body, None)
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        engine.tasks.close();
+        engine.tasks.wait().await;
+        assert_eq!(git_count(&m, "upload_pack", "ok"), 1.0);
+        let too_big = Body::from(vec![b'x'; 2 * 1024 * 1024]);
+        let _ = engine
+            .rpc(Service::UploadPack, &repo, true, None, &[], too_big, None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            git_count(&m, "upload_pack", "failed"),
+            1.0,
+            "a refused body is failed"
+        );
     }
 }

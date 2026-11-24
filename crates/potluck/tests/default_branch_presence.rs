@@ -8,6 +8,10 @@ use potluck::secret_check::git::{Git, RefUpdate};
 use potluck::secret_check::scan::{HookEnv, Rejection, default_branch_missing, report, scan};
 
 use crate::common::scratch::Scratch;
+use crate::common::{
+    APINATA_FORMAT, FullServer, api_admin, api_team, api_user, api_workspace, call, failed,
+    full_server, git, ok, work_tree, write_script,
+};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 const MISSING: &str = "safety_relaxation default_branch_missing";
@@ -157,4 +161,86 @@ fn a_failing_ref_lookup_fails_closed() {
     // `scan` would fail earlier on its own peel, so the check is asked directly.
     assert!(default_branch_missing(Some("main"), &push, &broken).is_err());
     assert!(scan(&writer(), &push, &broken).is_err());
+}
+
+/// A full server whose import workspace `core/api` (default branch `main`, not seeded) runs the
+/// real secret check, and a writer's token on it; returns the server, the token and a home.
+async fn import_server() -> (FullServer, String, PathBuf) {
+    let server = full_server().await;
+    write_script(
+        &server.hooks_dir().join("pre-receive"),
+        &potluck::hooks::script(
+            std::path::Path::new(env!("CARGO_BIN_EXE_potluck")),
+            std::path::Path::new("git"),
+        )
+        .unwrap(),
+    );
+    let root = api_admin(server.db()).await;
+    let (_, bob) = api_user(server.db(), "bob").await;
+    api_team(&server.api(""), &root, "core").await;
+    api_workspace(&server.api(""), &root, "core", "api", false).await;
+    let (status, _) = call(
+        &server.api("/workspaces/core/api/grants/user/bob"),
+        reqwest::Method::PUT,
+        Some(&root),
+        Some(serde_json::json!({"role": "write"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let home = server.dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    (server, bob, home)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_import_without_the_default_branch_is_refused_and_one_with_it_clones() {
+    let (server, bob, home) = import_server().await;
+    let work = work_tree(&home, "upstream");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    ok(git(&home, Some(&work), None, &["add", "-A"]));
+    ok(git(
+        &home,
+        Some(&work),
+        None,
+        &["commit", "-q", "-m", "format"],
+    ));
+    let url = server.git_url("core", "api");
+    let out = failed(git(
+        &home,
+        Some(&work),
+        Some(&bob),
+        &["push", "--porcelain", &url, "main:refs/heads/feature"],
+    ));
+    assert!(
+        out.contains(
+            "potluck-reject safety_relaxation refs/heads/feature / default_branch_missing"
+        ),
+        "{out}"
+    );
+    ok(git(
+        &home,
+        Some(&work),
+        Some(&bob),
+        &[
+            "push",
+            "-q",
+            &url,
+            "main:refs/heads/feature",
+            "main:refs/heads/main",
+        ],
+    ));
+    ok(git(
+        &home,
+        Some(&home),
+        Some(&bob),
+        &["clone", "-q", &url, "clone"],
+    ));
+    let clone = home.join("clone");
+    assert!(clone.join("README").is_file(), "the clone checked out main");
+    ok(git(
+        &home,
+        Some(&clone),
+        None,
+        &["rev-parse", "--verify", "HEAD"],
+    ));
 }

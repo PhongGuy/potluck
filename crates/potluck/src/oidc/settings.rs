@@ -1,5 +1,6 @@
 //! The validated `--oidc-*` flags and the client secret read from its file.
 
+use std::io::Read;
 use std::path::Path;
 
 use url::Url;
@@ -8,6 +9,9 @@ use crate::config::{ConfigError, SchemeCheck, check_scheme, redact_userinfo};
 
 /// The longest `--oidc-name`, in characters.
 const MAX_NAME_CHARS: usize = 64;
+
+/// The largest client secret file read, in bytes; real secrets are a few hundred at most.
+const MAX_SECRET_BYTES: u64 = 4096;
 
 /// The OIDC client secret; its `Debug` never shows the value.
 #[derive(Clone)]
@@ -144,13 +148,22 @@ fn validate_issuer(raw: &str, insecure_http: bool) -> Result<String, ConfigError
 }
 
 /// Reads the secret, dropping one trailing `\n` and then one `\r` before it. The error's
-/// reason is "is empty" or the io error kind, never anything read from the file.
+/// reason is a fixed phrase or the io error kind, never anything read from the file.
 fn read_secret(path: &Path) -> Result<ClientSecret, ConfigError> {
     let refuse = |reason: String| ConfigError::OidcSecretFile {
         path: path.to_owned(),
         reason,
     };
-    let text = std::fs::read_to_string(path).map_err(|e| refuse(e.kind().to_string()))?;
+    // Read one byte past the cap so an oversized or endless file is refused without loading it.
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_SECRET_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|e| refuse(e.kind().to_string()))?;
+    if bytes.len() as u64 > MAX_SECRET_BYTES {
+        return Err(refuse(format!("is larger than {MAX_SECRET_BYTES} bytes")));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| refuse(std::io::ErrorKind::InvalidData.to_string()))?;
     let text = match text.strip_suffix('\n') {
         Some(line) => line.strip_suffix('\r').unwrap_or(line),
         None => &text,

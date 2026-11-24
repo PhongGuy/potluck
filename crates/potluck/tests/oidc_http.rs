@@ -14,6 +14,9 @@ async fn serve(router: Router) -> String {
     format!("http://{addr}")
 }
 
+// The small body cap the boundary test reads against.
+const CAP: usize = 64;
+
 fn routes() -> Router {
     Router::new()
         .route("/ok", get(|| async { "hello" }))
@@ -23,6 +26,8 @@ fn routes() -> Router {
             get(|| async { (StatusCode::FOUND, [(header::LOCATION, "/ok")]) }),
         )
         .route("/big", get(|| async { vec![b'x'; 2 * 1024 * 1024] }))
+        .route("/cap", get(|| async { vec![b'x'; CAP] }))
+        .route("/cap-plus-one", get(|| async { vec![b'x'; CAP + 1] }))
         .route(
             "/hang",
             get(|| async {
@@ -72,6 +77,26 @@ async fn refuses_a_body_over_the_cap() {
     let err = http().get(&format!("{base}/big")).await.unwrap_err();
     assert_eq!(err, IdpHttpError::TooLarge);
     assert_no_url(err);
+}
+
+#[tokio::test]
+async fn the_body_cap_admits_exactly_the_cap_and_refuses_one_byte_more() {
+    let base = serve(routes()).await;
+    let http = IdpHttp::with_limits(
+        false,
+        Duration::from_secs(1),
+        Duration::from_millis(500),
+        CAP,
+    )
+    .unwrap();
+    assert_eq!(
+        http.get(&format!("{base}/cap")).await.unwrap(),
+        (200, vec![b'x'; CAP])
+    );
+    assert_eq!(
+        http.get(&format!("{base}/cap-plus-one")).await.unwrap_err(),
+        IdpHttpError::TooLarge
+    );
 }
 
 #[tokio::test]

@@ -187,6 +187,43 @@ fn an_empty_or_unreadable_secret_file_is_refused_naming_only_the_path() {
 }
 
 #[test]
+fn an_oversized_secret_file_is_refused_without_its_content() {
+    let dir = tempfile::tempdir().unwrap();
+    // Exactly at the cap is accepted; one byte over is refused.
+    let at_cap = "a".repeat(4096);
+    let file = secret(dir.path(), &at_cap);
+    let settings = full("https://idp.example.com", &file, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(settings.client_secret().expose(), at_cap);
+    let over = format!("{}Z", "b".repeat(4096));
+    let file = secret(dir.path(), &over);
+    let err = full("https://idp.example.com", &file, false).unwrap_err();
+    assert!(matches!(err, ConfigError::OidcSecretFile { .. }), "{err:?}");
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains("bbbb"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_endless_secret_file_is_refused() {
+    let err = full("https://idp.example.com", Path::new("/dev/zero"), false).unwrap_err();
+    assert!(matches!(err, ConfigError::OidcSecretFile { .. }), "{err:?}");
+    assert!(err.to_string().contains("/dev/zero"), "{err}");
+}
+
+#[test]
+fn a_secret_file_that_is_not_utf8_is_refused_without_its_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("client-secret");
+    std::fs::write(&file, b"s3cr\xffet-leaked").unwrap();
+    let err = full("https://idp.example.com", &file, false).unwrap_err();
+    assert!(matches!(err, ConfigError::OidcSecretFile { .. }), "{err:?}");
+    let text = format!("{err} {err:?}");
+    assert!(!text.contains("leaked") && !text.contains("s3cr"), "{text}");
+}
+
+#[test]
 fn the_name_defaults_to_the_issuer_host_and_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
     let file = secret(dir.path(), "s3cret");

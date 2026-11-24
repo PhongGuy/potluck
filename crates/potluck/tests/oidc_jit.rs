@@ -61,10 +61,8 @@ fn jit_is_off_by_default() {
         .lines()
         .find(|l| l.contains("linked to no account"))
         .unwrap_or_else(|| panic!("the account_not_linked info line: {text}"));
-    assert!(
-        line.contains("sub-grace") && line.contains("grace"),
-        "{line}"
-    );
+    assert!(line.contains(r#"subject="sub-grace""#), "{line}");
+    assert!(line.contains(r#"preferred_username="grace""#), "{line}");
 }
 
 #[tokio::test]
@@ -79,10 +77,25 @@ async fn jit_never_takes_over_an_existing_user() {
         )
         .await
         .unwrap();
+    let issuer = app.idp.issuer();
+    let creates = || app.db.audit(AuditFilter::new().action("user.create"));
+    let creates_before = creates().await.unwrap().len();
     app.idp.set_identity(who("sub-evil", Some("ada"), None));
     assert_eq!(
         param(&app.sign_in_to_loopback().await, "error").as_deref(),
         Some("account_not_linked")
+    );
+    assert!(
+        app.db
+            .user_by_oidc(&issuer, "sub-evil")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        creates().await.unwrap().len(),
+        creates_before,
+        "nothing was created"
     );
     app.idp.set_identity(who(
         "sub-evil",
@@ -90,10 +103,27 @@ async fn jit_never_takes_over_an_existing_user() {
         Some("ada@example.com"),
     ));
     let to = app.sign_in_to_loopback().await;
-    assert!(param(&to, "code").is_some(), "a new account, not ada's");
+    let code = param(&to, "code").expect("a new account, not ada's");
+    let linked = app.db.user_by_oidc(&issuer, "sub-evil").await.unwrap();
+    assert_eq!(
+        linked.map(|u| u.username().to_owned()).as_deref(),
+        Some("someone-new")
+    );
+    let (status, body) = call(
+        &app.api("/oidc/redeem"),
+        Method::POST,
+        None,
+        Some(json!({"code": code, "verifier": VERIFIER, "token_name": "t"})),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(
+        body["user"]["username"], "someone-new",
+        "signed in as the new user, not ada"
+    );
     assert!(
         app.db
-            .oidc_link_of(&app.idp.issuer(), ada.id())
+            .oidc_link_of(&issuer, ada.id())
             .await
             .unwrap()
             .is_none()

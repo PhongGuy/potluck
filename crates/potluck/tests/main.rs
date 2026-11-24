@@ -53,6 +53,7 @@ mod kinds_generic;
 mod kinds_rule_set;
 mod logs;
 mod measurements;
+mod metrics;
 mod name_checks;
 mod notices;
 mod objects;

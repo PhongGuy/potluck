@@ -68,6 +68,9 @@ pub struct ServeArgs {
         default_value_t = 30
     )]
     audit_failed_retention_days: u32,
+    /// TCP address of the Prometheus `/metrics` listener; off when unset.
+    #[arg(long, env = "POTLUCK_METRICS_LISTEN")]
+    metrics_listen: Option<SocketAddr>,
 }
 
 /// Validated server configuration. Built with `Config::try_from(ServeArgs)`.
@@ -85,6 +88,7 @@ pub struct Config {
     update_check: bool,
     audit_retention_days: u32,
     audit_failed_retention_days: u32,
+    metrics_listen: Option<SocketAddr>,
 }
 
 impl Config {
@@ -136,6 +140,11 @@ impl Config {
     /// Days a `session.failed` audit row is kept; 0 keeps those rows forever.
     pub fn audit_failed_retention_days(&self) -> u32 {
         self.audit_failed_retention_days
+    }
+
+    /// The address of the metrics listener, when `--metrics-listen` is set.
+    pub fn metrics_listen(&self) -> Option<SocketAddr> {
+        self.metrics_listen
     }
 
     /// Whether `ip` is inside one of `--trusted-proxies`; an IPv4-mapped IPv6 address is tested
@@ -303,6 +312,12 @@ pub enum ConfigError {
         /// The longest accepted length in bytes (103 on Linux).
         max: usize,
     },
+    /// `--metrics-listen` names the `--listen` address with a fixed port.
+    #[error("--metrics-listen {addr} is the --listen address; give metrics its own port")]
+    MetricsListenClash {
+        /// The address both flags name.
+        addr: SocketAddr,
+    },
 }
 
 /// Size of `sockaddr_un.sun_path` on Linux (`UNIX_PATH_MAX` in `linux/un.h`).
@@ -342,6 +357,13 @@ impl TryFrom<ServeArgs> for Config {
         if oidc.is_some() {
             return Err(ConfigError::OidcUnsupported);
         }
+        // Port 0 asks the kernel for a fresh port each bind, so two of them never collide.
+        if let Some(addr) = args.metrics_listen
+            && addr == args.listen
+            && addr.port() != 0
+        {
+            return Err(ConfigError::MetricsListenClash { addr });
+        }
         Ok(Self {
             listen: args.listen,
             data,
@@ -354,6 +376,7 @@ impl TryFrom<ServeArgs> for Config {
             update_check: args.update_check,
             audit_retention_days: args.audit_retention_days,
             audit_failed_retention_days: args.audit_failed_retention_days,
+            metrics_listen: args.metrics_listen,
         })
     }
 }

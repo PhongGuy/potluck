@@ -11,6 +11,8 @@ pub mod git;
 pub mod health_check;
 pub mod hooks;
 pub mod kinds;
+#[allow(dead_code)]
+mod metrics;
 pub mod notices;
 pub mod oidc;
 pub(crate) mod retention;

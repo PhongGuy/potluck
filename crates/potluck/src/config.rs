@@ -295,12 +295,12 @@ pub enum ConfigError {
         /// The issuer as given, credentials redacted.
         url: String,
     },
-    /// The client secret file is unreadable or empty.
+    /// The client secret file is unreadable, empty or too large.
     #[error("--oidc-client-secret-file {path}: {reason}")]
     OidcSecretFile {
         /// The file as given.
         path: PathBuf,
-        /// "is empty" or the io error kind; never the file's content.
+        /// "is empty", the size refusal or the io error kind; never the file's content.
         reason: String,
     },
     /// `--oidc-name` is blank or longer than 64 characters once trimmed.

@@ -4,6 +4,7 @@ pub mod access;
 pub mod engine;
 pub(crate) mod http;
 pub mod push;
+pub(crate) mod report;
 pub mod repos;
 mod spool;
 mod sweep;

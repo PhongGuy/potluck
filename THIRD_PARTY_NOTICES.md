@@ -204,6 +204,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Authors: Stjepan Glavina <stjepang@gmail.com>
 - `ff` 0.14.0: MIT/Apache-2.0
   - Copyright (c) 2017 Sean Bowe
+- `filetime` 0.2.30: MIT/Apache-2.0
+  - Copyright (c) 2014 Alex Crichton
 - `flate2` 1.1.11: MIT OR Apache-2.0
   - Copyright (c) 2014-2026 Alex Crichton
 - `foldhash` 0.2.0: Zlib
@@ -524,6 +526,8 @@ The `potluck` binary links the Rust crates below, each under the licence shown. 
   - Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved.
 - `sync_wrapper` 1.0.2: Apache-2.0
   - Authors: Actyx AG <developer@actyx.io>
+- `tar` 0.4.46: MIT OR Apache-2.0
+  - Copyright (c) The tar-rs Project Contributors
 - `tempfile` 3.27.0: MIT OR Apache-2.0
   - Copyright (c) 2015 Steven Allen
 - `thiserror` 1.0.69: MIT OR Apache-2.0

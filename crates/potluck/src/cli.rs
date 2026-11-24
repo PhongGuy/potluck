@@ -72,6 +72,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Admin(args) => {
+            // Checked before the data directory is read, so a forgotten redirect costs nothing.
+            if args.is_backup() && std::io::stdout().is_terminal() {
+                return Err(crate::backup::BackupError::Terminal.into());
+            }
             let mut stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
             crate::admin::run(*args, &mut stdin, &mut stdout).await?;

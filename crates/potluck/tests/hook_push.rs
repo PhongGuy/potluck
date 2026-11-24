@@ -660,3 +660,63 @@ async fn a_writer_cannot_push_a_notes_ref_over_http_but_an_admin_can() {
     ));
     assert!(notes(&server, &home), "the admin's ref landed");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_writer_can_create_a_tag_but_not_move_or_delete_it_over_http() {
+    let tag = |server: &GitServer, home: &Path| {
+        let out = git(
+            home,
+            Some(home),
+            None,
+            &[
+                "--git-dir",
+                repo(server).to_str().unwrap(),
+                "rev-parse",
+                "-q",
+                "--verify",
+                "refs/tags/v1",
+            ],
+        );
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    let (server, home, url) = apinata_server(&[("POTLUCK_DEFAULT_BRANCH", "main")]).await;
+    let work = work_tree(&home, "work");
+    std::fs::write(work.join("opencollection.yml"), APINATA_FORMAT).unwrap();
+    commit_all(&home, &work, "format");
+    ok(git(&home, Some(&work), None, &["tag", "v1"]));
+    ok(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "-q", &url, "main", "refs/tags/v1"],
+    ));
+    let landed = work_head(&home, &work);
+    assert_eq!(tag(&server, &home), Some(landed.clone()));
+    std::fs::write(work.join("notes.md"), b"more\n").unwrap();
+    commit_all(&home, &work, "more");
+    ok(git(&home, Some(&work), None, &["tag", "-f", "v1"]));
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", "--force", &url, "refs/tags/v1"],
+    ));
+    assert!(
+        output.contains("remote: potluck-reject safety_relaxation refs/tags/v1 / tag_move"),
+        "{output}"
+    );
+    assert_eq!(tag(&server, &home), Some(landed.clone()));
+    let output = failed(git(
+        &home,
+        Some(&work),
+        Some(TOKEN),
+        &["push", "--porcelain", "--delete", &url, "refs/tags/v1"],
+    ));
+    assert!(
+        output.contains("remote: potluck-reject safety_relaxation refs/tags/v1 / tag_delete"),
+        "{output}"
+    );
+    assert_eq!(tag(&server, &home), Some(landed));
+}

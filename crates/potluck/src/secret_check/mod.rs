@@ -10,6 +10,7 @@ use crate::kinds::RuleSet;
 use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
 use crate::secret_check::scan::{
     HookEnv, ScanError, accepted_relaxations, default_branch_rewrites, foreign_refs, report, scan,
+    tag_rewrites,
 };
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
@@ -166,6 +167,28 @@ pub fn log_foreign_refs(
             override_id,
             "ref" = %ref_name,
             "ref outside heads and tags written"
+        );
+    }
+}
+
+/// Logs one info line `tag rewritten` (`workspace_id`, `pusher`, `override_id`, `ref`, `rule`)
+/// per tag move or delete in an accepted push that `tag_rewrites` names. Raw values alone
+/// decide, so it makes no git call and never fails.
+pub fn log_tag_rewrites(
+    workspace_id: i64,
+    pusher: &str,
+    override_id: Option<i64>,
+    updates: &[RefUpdate],
+) {
+    for r in tag_rewrites(updates) {
+        let ref_name = String::from_utf8_lossy(r.ref_name());
+        tracing::info!(
+            workspace_id,
+            pusher,
+            override_id,
+            "ref" = %ref_name,
+            rule = r.finding().rule(),
+            "tag rewritten"
         );
     }
 }

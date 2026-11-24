@@ -201,10 +201,9 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             redirect_uri = %format_args!("{}/api/v1/oidc/callback", config.public_url()),
             "OIDC sign-in configured"
         );
+        // A failed probe is already logged once by the provider, so its result is not needed here.
         tokio::spawn(async move {
-            if let Err(err) = oidc.provider().warm().await {
-                tracing::warn!("the OIDC provider did not answer at startup ({err})");
-            }
+            let _ = oidc.provider().warm().await;
         });
     }
     // The pruner and the daily loop ride the git tracker and the stop flag, so shutdown ends them

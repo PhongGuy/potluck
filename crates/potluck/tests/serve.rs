@@ -227,7 +227,7 @@ fn serve_on_a_busy_port_prints_the_cause_once() {
 }
 
 #[test]
-fn serve_refuses_oidc_flags_from_the_environment() {
+fn serve_refuses_a_partial_oidc_set_from_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let child = potluck()
         .env("POTLUCK_PUBLIC_URL", "http://127.0.0.1:8080")
@@ -282,6 +282,11 @@ fn serve_with_oidc_starts_while_the_idp_is_down_and_logs_the_redirect_uri() {
         "{stderr}"
     );
     assert!(!stderr.contains("s3cret-value"), "{stderr}");
+    let probe_warns = stderr
+        .lines()
+        .filter(|line| line.contains("WARN") && line.contains("provider"))
+        .count();
+    assert_eq!(probe_warns, 1, "one warning per failed probe: {stderr}");
 }
 
 /// Waits up to `limit` for `child` to exit, killing and reaping it if it has not, so a serve

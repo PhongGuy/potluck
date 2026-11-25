@@ -285,6 +285,8 @@ podman volume import potluck-data potluck-data.tar
 systemctl --user start potluck
 ```
 
+After a restore or any manual change to the volume, the server logs a warning at startup for each workspace that has no repository under `/data/repos` and each repository there that has no workspace. It repairs nothing, so fix or remove what it names by hand.
+
 ## Verifying the image
 
 Each release's notes give the image's digest (`sha256:...`). Pin that digest to know exactly what you run, with podman:

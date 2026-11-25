@@ -193,8 +193,9 @@ pub fn scan(env: &HookEnv, updates: &[RefUpdate], git: &Git) -> Result<Vec<Rejec
 /// earlier hit has the same ref, path and rule. When `env` names a kind and a rule set is given,
 /// every created or format-touching update to a commit gets a format pass: its `format_file` must
 /// hold a format the rule set lists, or the ref gets one `format_unsupported` finding, sorted
-/// last. For a non-admin, `default_branch_rewrites` and then `foreign_refs` over each update add
-/// their refusals last, followed per ref by `default_branch_missing` over the whole push.
+/// last. For a non-admin, `default_branch_rewrites`, `foreign_refs` and `tag_rewrites` over each
+/// update add their refusals last, followed per ref by `default_branch_missing` over the whole
+/// push.
 /// A `safety_relaxation` finding is dropped for an admin pusher.
 pub fn scan_with(
     env: &HookEnv,
@@ -351,7 +352,11 @@ pub fn scan_with(
         for (ri, update) in updates.iter().enumerate() {
             let one = std::slice::from_ref(update);
             let refused = default_branch_rewrites(env.default_branch(), one, git)?;
-            for r in refused.into_iter().chain(foreign_refs(one)) {
+            for r in refused
+                .into_iter()
+                .chain(foreign_refs(one))
+                .chain(tag_rewrites(one))
+            {
                 hits.push((
                     HitKey {
                         ref_index: ri,
@@ -490,6 +495,27 @@ pub fn foreign_refs(updates: &[RefUpdate]) -> Vec<Rejection> {
         .map(|u| {
             let finding = Finding::new(Code::SafetyRelaxation, "ref_namespace", "/");
             rejection(u.name(), b"/", "/", finding)
+        })
+        .collect()
+}
+
+/// The `safety_relaxation` refusals for `updates` that delete or move a tag, at path `/`, in
+/// update order: `tag_delete` when the new value is zero, `tag_move` when the old value is
+/// non-zero and differs from the new one. Raw values decide, never peeled, so no git call is made.
+pub fn tag_rewrites(updates: &[RefUpdate]) -> Vec<Rejection> {
+    updates
+        .iter()
+        .filter(|u| u.name().starts_with(b"refs/tags/"))
+        .filter_map(|u| {
+            let rule = if u.is_delete() {
+                "tag_delete"
+            } else if !u.old().is_zero() && u.old() != u.new() {
+                "tag_move"
+            } else {
+                return None;
+            };
+            let finding = Finding::new(Code::SafetyRelaxation, rule, "/");
+            Some(rejection(u.name(), b"/", "/", finding))
         })
         .collect()
 }

@@ -165,7 +165,7 @@ fn a_force_push_or_delete_of_another_ref_passes() {
     let s = Scratch::new();
     let (old, new) = rewritten(&s);
     let git = git_for(&s);
-    for name in ["refs/heads/feat", "refs/heads/mainline", "refs/tags/main"] {
+    for name in ["refs/heads/feat", "refs/heads/mainline"] {
         assert!(
             scan_rows(&writer(), moved(&old, &new, name), &git).is_empty(),
             "{name}"
@@ -175,6 +175,15 @@ fn a_force_push_or_delete_of_another_ref_passes() {
             "{name}"
         );
     }
+    // A tag named like the default branch gets tag protection, never a branch rule.
+    assert_eq!(
+        scan_rows(&writer(), moved(&old, &new, "refs/tags/main"), &git),
+        ["refs/tags/main / safety_relaxation tag_move"]
+    );
+    assert_eq!(
+        scan_rows(&writer(), moved(&old, ZERO, "refs/tags/main"), &git),
+        ["refs/tags/main / safety_relaxation tag_delete"]
+    );
 }
 
 #[test]
@@ -194,7 +203,11 @@ fn an_unset_or_empty_default_branch_protects_every_branch_but_no_tag() {
             scan_rows(&unset, moved(&old, ZERO, "refs/heads/feat"), &git),
             ["refs/heads/feat / safety_relaxation branch_delete"]
         );
-        assert!(scan_rows(&unset, moved(&old, ZERO, "refs/tags/v1"), &git).is_empty());
+        // A tag never gets a branch rule; its delete is refused by tag protection instead.
+        assert_eq!(
+            scan_rows(&unset, moved(&old, ZERO, "refs/tags/v1"), &git),
+            ["refs/tags/v1 / safety_relaxation tag_delete"]
+        );
     }
 }
 

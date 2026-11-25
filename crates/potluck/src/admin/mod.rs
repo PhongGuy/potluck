@@ -16,6 +16,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
 use self::client::{AdminClient, ApiResponse, Verb};
+use self::output::{escape, json_inert};
 use crate::backup::{BackupError, BackupOptions, Written, write_backup};
 use crate::slug::{Slug, SlugError};
 
@@ -106,7 +107,8 @@ pub enum AdminError {
         source: io::Error,
     },
     /// The server refused; the error body as the API answered it.
-    #[error("{code}: {message}{}", field_note(.field.as_deref()))]
+    // Every part is server text, so it is escaped like a table cell before reaching a terminal.
+    #[error("{}: {}{}", escape(.code), escape(.message), field_note(.field.as_deref()))]
     Api {
         /// The HTTP status.
         status: u16,
@@ -198,7 +200,9 @@ fn summary(written: &Written) -> String {
 }
 
 fn field_note(field: Option<&str>) -> String {
-    field.map(|f| format!(" (field {f})")).unwrap_or_default()
+    field
+        .map(|f| format!(" (field {})", escape(f)))
+        .unwrap_or_default()
 }
 
 /// Runs one command: reads `stdin` only when a verb asks for it, writes results to `stdout`,
@@ -371,10 +375,12 @@ pub(crate) fn segment(arg: &'static str, value: &str) -> Result<Slug, AdminError
     })
 }
 
-/// `value` as pretty JSON with a final newline.
+/// `value` as pretty JSON with a final newline, with characters that could steer a terminal
+/// written as `\uXXXX` escapes; a JSON parser reads back the same value.
 pub(crate) fn pretty(value: &Value) -> Result<String, AdminError> {
-    let mut text =
+    let text =
         serde_json::to_string_pretty(value).map_err(|e| AdminError::Output(io::Error::other(e)))?;
+    let mut text = json_inert(&text);
     text.push('\n');
     Ok(text)
 }
@@ -456,4 +462,35 @@ pub(crate) fn expect(response: ApiResponse, ok: &[u16]) -> Result<Option<Value>,
             })
         });
     Err(error.unwrap_or(AdminError::Malformed { status }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AdminError, segment};
+
+    #[test]
+    fn an_api_error_escapes_the_server_text_it_prints() {
+        let err = AdminError::Api {
+            status: 400,
+            code: "bad\u{1b}[0m".to_owned(),
+            message: "\u{1b}[31mred\u{202E}txt".to_owned(),
+            field: Some("na\u{1b}me\u{202E}".to_owned()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "bad\\u{1b}[0m: \\u{1b}[31mred\\u{202e}txt (field na\\u{1b}me\\u{202e})"
+        );
+    }
+
+    #[test]
+    fn a_bad_name_error_escapes_the_value_it_prints() {
+        let err = segment("team", "ev\u{202e}e\u{1b}").unwrap_err();
+        assert!(matches!(err, AdminError::BadName { .. }), "got {err:?}");
+        let text = err.to_string();
+        assert!(
+            !text.contains('\u{202e}') && !text.contains('\u{1b}'),
+            "{text:?}"
+        );
+        assert!(text.contains("ev\\u{202e}e\\u{1b}"), "{text}");
+    }
 }

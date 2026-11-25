@@ -9,8 +9,8 @@ use std::process::ExitCode;
 use crate::kinds::RuleSet;
 use crate::secret_check::git::{Git, GitCmdError, RefUpdate};
 use crate::secret_check::scan::{
-    HookEnv, ScanError, accepted_relaxations, default_branch_rewrites, foreign_refs, report, scan,
-    tag_rewrites,
+    HookEnv, Rejection, ScanError, accepted_relaxations, default_branch_rewrites, foreign_refs,
+    report, scan, tag_rewrites,
 };
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
@@ -117,8 +117,9 @@ pub fn log_accepted_relaxations(
 }
 
 /// Logs one info line `default branch rewritten` (`workspace_id`, `pusher`, `override_id`,
-/// `ref`, `rule`) per force-push or delete of the protected branch in an accepted push; `None`
-/// protects every branch. A failed check logs one warn line naming only the push. Never panics.
+/// `ref`, `rule`) per force-push or delete of the protected branch in an accepted push, and
+/// returns those findings; `None` protects every branch. A failed check logs one warn line
+/// naming only the push and returns none. Never panics.
 pub fn log_default_branch_rewrites(
     workspace_id: i64,
     pusher: &str,
@@ -126,10 +127,10 @@ pub fn log_default_branch_rewrites(
     default_branch: Option<&str>,
     updates: &[RefUpdate],
     git: &Git,
-) {
+) -> Vec<Rejection> {
     match default_branch_rewrites(default_branch, updates, git) {
         Ok(found) => {
-            for r in found {
+            for r in &found {
                 let ref_name = String::from_utf8_lossy(r.ref_name());
                 tracing::info!(
                     workspace_id,
@@ -140,26 +141,31 @@ pub fn log_default_branch_rewrites(
                     "default branch rewritten"
                 );
             }
+            found
         }
         // The error text may carry git's output, so only the push is named.
-        Err(_) => tracing::warn!(
-            workspace_id,
-            pusher,
-            "could not re-check an accepted admin push"
-        ),
+        Err(_) => {
+            tracing::warn!(
+                workspace_id,
+                pusher,
+                "could not re-check an accepted admin push"
+            );
+            Vec::new()
+        }
     }
 }
 
 /// Logs one info line `ref outside heads and tags written` (`workspace_id`, `pusher`,
-/// `override_id`, `ref`) per update in an accepted push that `foreign_refs` names. Names alone
-/// decide, so it makes no git call and never fails.
+/// `override_id`, `ref`) per update in an accepted push that `foreign_refs` names, and returns
+/// those findings. Names alone decide, so it makes no git call and never fails.
 pub fn log_foreign_refs(
     workspace_id: i64,
     pusher: &str,
     override_id: Option<i64>,
     updates: &[RefUpdate],
-) {
-    for r in foreign_refs(updates) {
+) -> Vec<Rejection> {
+    let found = foreign_refs(updates);
+    for r in &found {
         let ref_name = String::from_utf8_lossy(r.ref_name());
         tracing::info!(
             workspace_id,
@@ -169,18 +175,20 @@ pub fn log_foreign_refs(
             "ref outside heads and tags written"
         );
     }
+    found
 }
 
 /// Logs one info line `tag rewritten` (`workspace_id`, `pusher`, `override_id`, `ref`, `rule`)
-/// per tag move or delete in an accepted push that `tag_rewrites` names. Raw values alone
-/// decide, so it makes no git call and never fails.
+/// per tag move or delete in an accepted push that `tag_rewrites` names, and returns those
+/// findings. Raw values alone decide, so it makes no git call and never fails.
 pub fn log_tag_rewrites(
     workspace_id: i64,
     pusher: &str,
     override_id: Option<i64>,
     updates: &[RefUpdate],
-) {
-    for r in tag_rewrites(updates) {
+) -> Vec<Rejection> {
+    let found = tag_rewrites(updates);
+    for r in &found {
         let ref_name = String::from_utf8_lossy(r.ref_name());
         tracing::info!(
             workspace_id,
@@ -191,6 +199,7 @@ pub fn log_tag_rewrites(
             "tag rewritten"
         );
     }
+    found
 }
 
 /// Installs a panic hook that prints nothing, so a rule set's panic message never reaches the

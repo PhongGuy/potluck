@@ -12,6 +12,7 @@ use potluck_kind::{Code, Role};
 use crate::kinds::{self, Blob, Change, Finding, RULES_ABI, RuleSet, generic};
 use crate::role::Role as AccessRole;
 use crate::secret_check::git::{Entry, Git, GitCmdError, ObjectType, RefUpdate, Sha, TipEntry};
+use crate::unicode::is_format;
 
 /// What the server told the hook through its environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -910,8 +911,9 @@ pub const MAX_DETAIL_BYTES: usize = 200;
 
 /// `potluck-reject <code> <ref> <path> <rule>\n` for the first `MAX_LINES` rejections, then
 /// `potluck-reject-more <n>\n` when `n` remain. The path and the ref are percent-encoded:
-/// `%`, space, bytes below 0x20, 0x7f and every byte of an invalid UTF-8 sequence become
-/// `%XX` (upper-case hex); every other byte is written as is. The line splits on spaces into
+/// `%`, space, every byte of a control character (C0, DEL, C1), of a format character
+/// (category Cf), of U+2028 and U+2029, and of an invalid UTF-8 sequence become `%XX`
+/// (upper-case hex); every other byte is written as is. The line splits on spaces into
 /// exactly five fields. A finding without a tree path (a commit or tag message, or a tag whose
 /// target is a blob) carries the path `/`, which the encoding leaves as is and which no git
 /// tree path can start with. A finding with a non-empty detail is followed by
@@ -947,12 +949,16 @@ pub fn report(rejections: &[Rejection], out: &mut impl Write) -> std::io::Result
 /// The encoding `report` applies to one field.
 pub fn percent_encode(raw: &[u8]) -> String {
     let mut out = String::with_capacity(raw.len());
-    // Valid UTF-8 stays readable except for the bytes that would break the line's fields;
-    // each byte of an invalid sequence is escaped so the client can restore the exact path.
+    // Valid UTF-8 stays readable except for characters that would break the line's fields or
+    // hide or reorder text in a terminal; each byte of an invalid sequence is escaped so the
+    // client can restore the exact path.
     for chunk in raw.utf8_chunks() {
         for c in chunk.valid().chars() {
-            if c == '%' || c == ' ' || c < ' ' || c == '\x7f' {
-                push_escape(&mut out, c as u8);
+            let separator = matches!(c, '\u{2028}' | '\u{2029}');
+            if c == '%' || c == ' ' || c.is_control() || is_format(c) || separator {
+                for &b in c.encode_utf8(&mut [0; 4]).as_bytes() {
+                    push_escape(&mut out, b);
+                }
             } else {
                 out.push(c);
             }

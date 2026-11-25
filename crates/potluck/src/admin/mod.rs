@@ -133,7 +133,7 @@ pub enum AdminError {
     #[error("cannot read the password from stdin")]
     Stdin(#[source] io::Error),
     /// An argument that goes into the request path is not a valid name.
-    #[error("invalid {arg} {value:?}: {reason}")]
+    #[error("invalid {arg} {value:?}")]
     BadName {
         /// Which argument.
         arg: &'static str,

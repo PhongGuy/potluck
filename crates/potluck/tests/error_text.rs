@@ -4,11 +4,13 @@
 use std::io;
 use std::path::PathBuf;
 
+use potluck::admin::AdminError;
 use potluck::git::GitError;
 use potluck::git::RepoError;
 use potluck::git::push::CommandError;
 use potluck::secret_check::git::GitCmdError;
 use potluck::server::ServerError;
+use potluck::slug::SlugError;
 
 const CAUSE: &str = "the distinctive io cause";
 
@@ -55,4 +57,16 @@ fn command_list_io_error_names_its_cause_once() {
 fn git_body_and_spawn_errors_name_their_cause_once() {
     assert_cause_once(GitError::Body(cause()));
     assert_cause_once(GitError::Spawn(cause()));
+}
+
+#[test]
+fn bad_name_error_names_its_reason_once() {
+    let err = AdminError::BadName {
+        arg: "team",
+        value: "X".to_owned(),
+        reason: SlugError::Length,
+    };
+    let text = format!("{:#}", anyhow::Error::new(err));
+    let reason = SlugError::Length.to_string();
+    assert_eq!(text.matches(&reason).count(), 1, "{text}");
 }

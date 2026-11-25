@@ -91,6 +91,7 @@ pub(crate) enum AuditAction {
     OverrideArm,
     OverrideDisarm,
     OverrideUse,
+    PushRelaxation,
 }
 
 impl AuditAction {
@@ -115,6 +116,7 @@ impl AuditAction {
             AuditAction::OverrideArm => "override.arm",
             AuditAction::OverrideDisarm => "override.disarm",
             AuditAction::OverrideUse => "override.use",
+            AuditAction::PushRelaxation => "push.relaxation",
         }
     }
 }
@@ -226,6 +228,19 @@ pub(crate) struct GrantChange<'a> {
 #[derive(serde::Serialize)]
 pub(crate) struct OverrideUsed {
     pub(crate) refs: usize,
+}
+
+/// The `push.relaxation` detail: the ref, the shas it moved between, the relaxed rule, and the
+/// override the push ran under, null for an admin push without one.
+#[derive(serde::Serialize)]
+pub(crate) struct PushRelaxed<'a> {
+    #[serde(rename = "ref")]
+    pub(crate) ref_name: &'a str,
+    pub(crate) old: &'a str,
+    pub(crate) new: &'a str,
+    pub(crate) rule: &'a str,
+    #[serde(rename = "override")]
+    pub(crate) override_id: Option<i64>,
 }
 
 /// Why a sign-in was refused; stored snake_case as the `session.failed` detail's `reason`.
@@ -626,6 +641,7 @@ mod tests {
             (AuditAction::OverrideArm, "override.arm"),
             (AuditAction::OverrideDisarm, "override.disarm"),
             (AuditAction::OverrideUse, "override.use"),
+            (AuditAction::PushRelaxation, "push.relaxation"),
         ];
         for (action, name) in names {
             assert_eq!(action.as_str(), name);

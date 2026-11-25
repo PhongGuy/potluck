@@ -2466,6 +2466,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_admin_recheck_waits_for_a_process_slot() {
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), 1).await;
         let ran = dir.path().join("ran.log");
         let body = format!("echo \"$1\" >> '{}'\nexit 128\n", ran.display());
         let engine = Arc::new(recheck_engine(dir.path(), limits(1, 100), &body));
@@ -2477,6 +2478,7 @@ mod tests {
             tokio::spawn(async move {
                 crate::api::pushes::recheck(
                     &engine,
+                    &db,
                     &crate::git::access::PushContext::new(1, "admin"),
                     Some(rules),
                     repo,
@@ -2500,6 +2502,7 @@ mod tests {
         const WORKSPACE: i64 = 919_198;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         let short = limits(1, 100).with_max_runtime(Duration::from_secs(1));
         let engine = recheck_engine(dir.path(), short, "exec sleep 30\n");
         let rules = crate::kinds::by_name("apinata").unwrap();
@@ -2509,6 +2512,7 @@ mod tests {
             Duration::from_secs(20),
             crate::api::pushes::recheck(
                 &engine,
+                &db,
                 &crate::git::access::PushContext::new(WORKSPACE, "admin"),
                 Some(rules),
                 repo,
@@ -2536,6 +2540,7 @@ mod tests {
         const WORKSPACE: i64 = 919_199;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         // A delete needs no git call, so a git that always fails proves none ran.
         let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
         let line = format!("{} {} refs/heads/main", "b".repeat(40), "0".repeat(40));
@@ -2544,7 +2549,8 @@ mod tests {
         let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
             .override_id(Some(5))
             .default_branch("main");
-        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), delete).await;
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), delete)
+            .await;
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         let line = text
             .lines()
@@ -2563,6 +2569,7 @@ mod tests {
         const WORKSPACE: i64 = 919_200;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         // Ref names alone decide, so a git that always fails proves none ran.
         let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
         let line = format!("{} {} refs/notes/x", "0".repeat(40), "b".repeat(40));
@@ -2571,7 +2578,8 @@ mod tests {
         let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
             .override_id(Some(5))
             .default_branch("main");
-        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), create).await;
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), create)
+            .await;
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         let line = text
             .lines()
@@ -2590,6 +2598,7 @@ mod tests {
         const WORKSPACE: i64 = 919_201;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         // Raw values alone decide, so a git that always fails proves none ran.
         let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
         let line = format!("{} {} refs/tags/v1", "a".repeat(40), "b".repeat(40));
@@ -2597,7 +2606,8 @@ mod tests {
         let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
             .override_id(Some(5))
             .default_branch("main");
-        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), moved).await;
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), moved)
+            .await;
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         let line = text
             .lines()
@@ -2608,6 +2618,83 @@ mod tests {
         for needle in ["override_id=5", "bob", "refs/tags/v1", "tag_move"] {
             assert!(line.contains(needle), "{needle} in {line}");
         }
+    }
+
+    /// A migrated database with user `bob`, workspace `workspace` as `core/api`, and override 5
+    /// for bob on it.
+    async fn relaxation_db(dir: &Path, workspace: i64) -> crate::db::Db {
+        let db = crate::db::Db::open(&dir.join("server.db")).unwrap();
+        db.migrate().await.unwrap();
+        db.call(move |c| {
+            c.execute_batch(&format!(
+                "INSERT INTO users (id, username, display_name, created_at) VALUES (1, 'bob', 'Bob', '2026-01-01T00:00:00Z');
+                 INSERT INTO teams (id, slug, name) VALUES (1, 'core', 'Core');
+                 INSERT INTO workspaces (id, team_id, slug, name, kind, default_branch, import_pending, created_at)
+                     VALUES ({workspace}, 1, 'api', 'API', 'apinata', 'main', 0, '2026-01-01T00:00:00Z');
+                 INSERT INTO overrides (id, workspace_id, for_user_id, reason, armed_by, armed_at)
+                     VALUES (5, {workspace}, 1, 'fix', 'system', '2026-01-01T00:00:00Z');"
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db
+    }
+
+    /// The `push.relaxation` details, oldest first.
+    async fn relaxation_details(db: &crate::db::Db) -> Vec<serde_json::Value> {
+        let filter = crate::db::audit::AuditFilter::new().action("push.relaxation");
+        let mut rows = db.audit(filter).await.unwrap();
+        rows.reverse();
+        rows.iter()
+            .map(|r| serde_json::from_str(r.detail().unwrap()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_override_recheck_records_a_default_branch_delete_naming_the_override() {
+        const WORKSPACE: i64 = 919_202;
+        let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
+        // A delete needs no git call, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let (b, zero) = ("b".repeat(40), "0".repeat(40));
+        let line = format!("{b} {zero} refs/heads/main");
+        let delete =
+            vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
+            .override_id(Some(5))
+            .default_branch("main");
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), delete)
+            .await;
+        assert_eq!(
+            relaxation_details(&db).await,
+            [serde_json::json!({
+                "ref": "refs/heads/main", "old": b, "new": zero, "rule": "branch_delete", "override": 5
+            })]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_admin_recheck_records_a_foreign_ref_with_no_override() {
+        const WORKSPACE: i64 = 919_203;
+        let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
+        // Ref names alone decide, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let (b, zero) = ("b".repeat(40), "0".repeat(40));
+        let line = format!("{zero} {b} refs/notes/x");
+        let create =
+            vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob").default_branch("main");
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), create)
+            .await;
+        assert_eq!(
+            relaxation_details(&db).await,
+            [serde_json::json!({
+                "ref": "refs/notes/x", "old": zero, "new": b, "rule": "ref_namespace", "override": null
+            })]
+        );
     }
 
     use crate::metrics::{Metrics, Snapshot, sample};

@@ -78,6 +78,7 @@ mod password;
 mod public_api;
 mod push_bookkeeping;
 mod push_refs;
+mod push_relaxations;
 mod rate_limit;
 mod ref_namespaces;
 mod reject_golden;

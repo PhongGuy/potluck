@@ -11,7 +11,7 @@ use reqwest::Method;
 use serde_json::Value;
 
 use crate::common::release::{ReleaseServer, Reply, TestKey, manifest};
-use crate::common::{api_admin, call, config_for, potluck, unix_get};
+use crate::common::{api_admin, call, config_for, parse_config, potluck, unix_get};
 
 async fn update_json(socket: &Path) -> Value {
     let (status, body) = unix_get(socket, "/api/v1/update").await;
@@ -83,6 +83,53 @@ async fn shutdown_returns_promptly_while_the_first_check_waits() {
         0,
         "the first check waits five minutes"
     );
+}
+
+/// A server on `dir` with its update source on `server` and no wait before the first daily
+/// check; `flags` go to the config.
+async fn start_checking_at_once(
+    dir: &Path,
+    server: &ReleaseServer,
+    key: &TestKey,
+    flags: &[&str],
+) -> potluck::server::Running {
+    let data = dir.to_str().unwrap();
+    let mut args = vec![
+        "--listen",
+        "127.0.0.1:0",
+        "--data",
+        data,
+        "--public-url",
+        "http://127.0.0.1:8080",
+    ];
+    args.extend_from_slice(flags);
+    let source = server.source(key).with_first_check(Duration::ZERO);
+    start_with_updates(&parse_config(&args).unwrap(), source)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn turning_the_check_off_stops_the_daily_request() {
+    let key = TestKey::new();
+    let (on_source, off_source) = (ReleaseServer::start().await, ReleaseServer::start().await);
+    on_source.publish(&key, &manifest("9.0.0"));
+    off_source.publish(&key, &manifest("9.0.0"));
+    let (on_dir, off_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let off =
+        start_checking_at_once(off_dir.path(), &off_source, &key, &["--no-update-check"]).await;
+    let on = start_checking_at_once(on_dir.path(), &on_source, &key, &[]).await;
+
+    // The server left on proves the first check has had its chance before the other is read.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while on_source.manifest_hits() == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(on_source.manifest_hits(), 1, "the check on fetches once");
+    assert_eq!(off_source.manifest_hits(), 0, "the check off never fetches");
+    on.shutdown().await;
+    off.shutdown().await;
 }
 
 #[tokio::test]

@@ -162,7 +162,7 @@ async fn audit_repos(db: &Db, repos: std::path::PathBuf) {
         match tokio::task::spawn_blocking(move || crate::git::audit_repos(&repos, &rows)).await {
             Ok(found) => found,
             Err(err) => {
-                tracing::warn!(error = %err, "startup repository check failed");
+                tracing::warn!(panicked = err.is_panic(), "startup repository check failed");
                 return;
             }
         };

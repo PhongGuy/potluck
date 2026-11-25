@@ -242,7 +242,11 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert!(long.chars().count() <= 90, "cut short: {long}");
+        assert_eq!(
+            long.chars().count(),
+            "core/".len() + MAX_SHOWN,
+            "cut short: {long}"
+        );
     }
 
     #[test]

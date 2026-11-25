@@ -11,10 +11,12 @@ use axum::{Extension, Router};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
+use tracing::Level;
 
 use crate::api::{Actor, AppState};
 use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
+use crate::join_failure::log_join_failure;
 use crate::notices::Notices;
 use crate::update::{UpdateChecker, UpdateSource, schedule};
 
@@ -162,7 +164,7 @@ async fn audit_repos(db: &Db, repos: std::path::PathBuf) {
         match tokio::task::spawn_blocking(move || crate::git::audit_repos(&repos, &rows)).await {
             Ok(found) => found,
             Err(err) => {
-                warn_join_failure(&err, "startup repository check failed");
+                log_join_failure(&err, Level::WARN, "startup repository check failed");
                 return;
             }
         };
@@ -193,12 +195,6 @@ async fn audit_repos(db: &Db, repos: std::path::PathBuf) {
     }
 }
 
-/// Logs a blocking startup task that did not finish, with `message` and whether it panicked.
-/// The join error itself is never logged: a panic payload is arbitrary text and can name paths.
-fn warn_join_failure(err: &tokio::task::JoinError, message: &str) {
-    tracing::warn!(panicked = err.is_panic(), "{message}");
-}
-
 async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerError> {
     config.check_admin_socket()?;
     for path in [
@@ -227,7 +223,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             swept.deferred
         }
         Err(err) => {
-            warn_join_failure(&err, "startup sweep task failed");
+            log_join_failure(&err, Level::WARN, "startup sweep task failed");
             Vec::new()
         }
     };
@@ -472,7 +468,7 @@ impl Running {
             match task.await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => tracing::error!("listener failed: {err}"),
-                Err(err) => tracing::error!("listener task failed: {err}"),
+                Err(err) => log_join_failure(&err, Level::ERROR, "listener task failed"),
             }
         }
         // Closing our fds is not enough: shutdown(2) acts on the shared socket, so a forked
@@ -548,42 +544,6 @@ mod tests {
 
     use super::*;
     use crate::admin::client::{AdminClient, Verb};
-
-    /// Captures what `warn_join_failure` logs for a task that panicked with `payload`.
-    async fn join_failure_log(payload: &'static str) -> String {
-        use std::sync::{Arc, Mutex};
-        struct Sink(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Sink {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let err = tokio::task::spawn_blocking(move || std::panic::panic_any(payload))
-            .await
-            .unwrap_err();
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&logs);
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || Sink(Arc::clone(&sink)))
-            .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            warn_join_failure(&err, "startup sweep task failed");
-        });
-        String::from_utf8(logs.lock().unwrap().clone()).unwrap()
-    }
-
-    #[tokio::test]
-    async fn a_panicked_startup_task_logs_only_that_it_panicked() {
-        let line = join_failure_log("/srv/secret/path in the payload").await;
-        assert!(line.contains("startup sweep task failed"), "{line}");
-        assert!(line.contains("panicked=true"), "{line}");
-        assert!(!line.contains("/srv/secret/path"), "payload leaked: {line}");
-    }
 
     fn actor_route() -> Router {
         Router::new().route(

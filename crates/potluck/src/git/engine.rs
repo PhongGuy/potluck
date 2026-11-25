@@ -704,7 +704,17 @@ async fn read_commands(
         file.rewind().map(|()| (file, parsed))
     })
     .await
-    .map_err(|err| GitError::Spawn(std::io::Error::other(err)))?
+    // The join error is never carried on: a panic payload is arbitrary text and can name paths.
+    .map_err(|err| {
+        let what = if err.is_panic() {
+            "panicked"
+        } else {
+            "was cancelled"
+        };
+        GitError::Spawn(std::io::Error::other(format!(
+            "parsing the command list {what}"
+        )))
+    })?
     .map_err(GitError::Spawn)?;
     match parsed {
         Ok(commands) => Ok((file, commands)),

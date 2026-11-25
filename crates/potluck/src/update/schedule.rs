@@ -8,7 +8,7 @@ use tokio_util::task::TaskTracker;
 
 use super::UpdateChecker;
 
-/// The wait before the first check after start.
+/// The default wait before the first check after start; a source may set its own.
 pub(crate) const FIRST_CHECK: Duration = Duration::from_secs(5 * 60);
 /// The base wait between checks.
 pub(crate) const PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
@@ -52,7 +52,8 @@ pub(crate) fn spawn_daily(
 ) {
     // An RNG failure falls back to no jitter rather than skipping the check.
     let next = || jittered(PERIOD, JITTER_MAX, getrandom::u64().unwrap_or(0));
-    tracker.spawn(run_daily(FIRST_CHECK, next, stop, move || {
+    let first = checker.source().first_check;
+    tracker.spawn(run_daily(first, next, stop, move || {
         let checker = checker.clone();
         async move {
             // `check` logs its own outcome.

@@ -149,8 +149,8 @@ fn key_id(pub_text: &str) -> Option<String> {
     )
 }
 
-/// Where signed releases are fetched from, the keys they must verify against, and the
-/// per-request timeouts.
+/// Where signed releases are fetched from, the keys they must verify against, the per-request
+/// timeouts, and the wait before a started server's first daily check.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct UpdateSource {
@@ -158,6 +158,7 @@ pub struct UpdateSource {
     keys: TrustedKeys,
     connect: Duration,
     total: Duration,
+    first_check: Duration,
 }
 
 impl UpdateSource {
@@ -193,6 +194,7 @@ impl UpdateSource {
             keys,
             connect: DEFAULT_CONNECT,
             total: DEFAULT_TOTAL,
+            first_check: schedule::FIRST_CHECK,
         })
     }
 
@@ -207,6 +209,16 @@ impl UpdateSource {
         UpdateSource {
             connect,
             total,
+            ..self
+        }
+    }
+
+    /// Replaces the wait between a server's start and its first daily check (default five
+    /// minutes).
+    #[must_use]
+    pub fn with_first_check(self, wait: Duration) -> UpdateSource {
+        UpdateSource {
+            first_check: wait,
             ..self
         }
     }

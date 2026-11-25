@@ -414,10 +414,10 @@ impl GitEngine {
                 let report = read_report(report_file).await;
                 match list_refs(&repos, &repo_path).await {
                     Ok(after) => on_push(moved(&commands, &before, &after), report),
-                    Err(err) => {
-                        let error = inert(&err.to_string()).into_owned();
-                        tracing::error!(%error, "cannot list refs after a push")
-                    }
+                    Err(err) => tracing::error!(
+                        error = %inert(&err.to_string()),
+                        "cannot list refs after a push"
+                    ),
                 }
             }
         });

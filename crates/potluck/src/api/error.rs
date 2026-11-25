@@ -7,6 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::db::DbError;
+use crate::unicode::inert;
 
 /// Stable error codes of the JSON error model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +214,7 @@ impl From<DbError> for ApiError {
                 ApiError::unavailable("database unavailable")
             }
             err @ (DbError::Sqlite(_) | DbError::SchemaTooNew { .. }) => {
-                tracing::error!(error = %err, "database error");
+                tracing::error!(error = %inert(&err.to_string()), "database error");
                 ApiError::internal("database error")
             }
         }
@@ -313,5 +314,39 @@ mod tests {
         assert_eq!(status, 503);
         assert_eq!(body["error"]["code"], "unavailable");
         assert_eq!(ErrorCode::Unavailable.as_str(), "unavailable");
+    }
+
+    #[test]
+    fn sqlite_text_in_the_error_log_line_is_escaped() {
+        use std::sync::{Arc, Mutex};
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let writer = Arc::clone(&sink);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || Sink(Arc::clone(&writer)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let _ = ApiError::from(DbError::Sqlite("no such row 'eve\u{202E}gnp'".to_owned()));
+        });
+        let text = String::from_utf8(sink.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("database error"), "logged: {text}");
+        assert!(!text.contains('\u{202E}'), "raw override in: {text:?}");
+        assert!(
+            text.contains(r"eve\u{202e}gnp"),
+            "escaped form in: {text:?}"
+        );
+    }
+
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

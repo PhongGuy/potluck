@@ -14,6 +14,7 @@ use super::{tokens, validate};
 use crate::db::accounts::TokenOrigin;
 use crate::db::audit::{AuditCtx, SignInFailure};
 use crate::metrics::{SignInMethod, SignInOutcome};
+use crate::unicode::inert;
 
 /// The sign-in body. No `Debug`, so the password cannot reach a log by formatting.
 #[derive(Deserialize)]
@@ -84,7 +85,7 @@ pub(super) async fn create(
             .await);
         }
         Err(_) => {
-            tracing::error!(username = %body.username, "stored password hash is unusable");
+            tracing::error!(username = %inert(&body.username), "stored password hash is unusable");
             return Err(ApiError::internal("password check failed").into());
         }
     }
@@ -124,7 +125,7 @@ async fn refuse(
     user: Option<(i64, &str)>,
     reason: SignInFailure,
 ) -> ErrorResponse {
-    tracing::debug!(username = %username, "sign-in refused");
+    tracing::debug!(username = %inert(username), "sign-in refused");
     state
         .metrics()
         .sign_in(SignInMethod::Password, SignInOutcome::Failure);

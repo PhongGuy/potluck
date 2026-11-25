@@ -12,6 +12,7 @@ use crate::kinds::{self, RuleSet};
 use crate::role::Role;
 use crate::secret_check::git::{Git, RefUpdate};
 use crate::secret_check::scan::Rejection;
+use crate::unicode::inert;
 
 /// Records `moves` for `push`: `Db::record_push`, one info line (`workspace_id`, `pusher`,
 /// `override_id`, `override_consumed`, `import_cleared`, `refs` as `ref old..new` joined by
@@ -61,7 +62,7 @@ pub(crate) async fn record(state: AppState, push: PushContext, moves: Vec<RefMov
             pusher,
             override_id,
             refs,
-            error = %err,
+            error = %inert(&err.to_string()),
             "could not record an accepted push"
         ),
     }
@@ -195,7 +196,7 @@ pub(crate) async fn recheck(
                     pusher,
                     "ref" = r.ref_name(),
                     rule = r.rule(),
-                    error = %err,
+                    error = %inert(&err.to_string()),
                     "could not record a safety relaxation"
                 );
             }

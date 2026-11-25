@@ -56,6 +56,7 @@ mod hook_push;
 mod hooks;
 mod kinds_generic;
 mod kinds_rule_set;
+mod log_escaping;
 mod logs;
 mod measurements;
 mod metrics;

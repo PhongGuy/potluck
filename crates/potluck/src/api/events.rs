@@ -17,6 +17,7 @@ use crate::clock;
 use crate::db::accounts::UserRecord;
 use crate::git::push::list_refs;
 use crate::slug::Slug;
+use crate::unicode::inert_chain;
 
 // Auth judges expiry on the wall clock, the timer is monotonic: close just past the instant.
 const EXPIRY_MARGIN: Duration = Duration::from_millis(50);
@@ -47,7 +48,7 @@ pub(super) async fn stream(
         .map_err(|err| {
             tracing::error!(
                 id = ws.id(),
-                error = &err as &dyn std::error::Error,
+                error = %inert_chain(&err),
                 "listing a workspace's refs failed"
             );
             ApiError::internal("events could not be opened")

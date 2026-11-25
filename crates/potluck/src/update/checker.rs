@@ -16,6 +16,7 @@ use super::{
 };
 use crate::clock;
 use crate::metrics::UpdateCounts;
+use crate::unicode::inert;
 
 /// Redirects followed per request; more is refused.
 const MAX_REDIRECTS: usize = 5;
@@ -138,7 +139,7 @@ async fn check_once(inner: &Inner) -> Result<UpdateStatus, UpdateError> {
                 tracing::info!(
                     "potluck {} is available (running {current}): {}; run `potluck admin update check` for the update steps",
                     new.version(),
-                    new.notes_url()
+                    inert(new.notes_url())
                 );
             }
         }

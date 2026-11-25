@@ -12,6 +12,8 @@ use tracing::Level;
 
 use crate::join_failure::log_join_failure;
 
+use crate::unicode::inert;
+
 /// The receive-packs in flight per repository. Only the last one out of a repository that a
 /// killed push left dirty sweeps it, so a sweep never touches a live push's files.
 #[derive(Debug)]
@@ -315,7 +317,11 @@ fn remove(path: &Path, tree: bool) -> usize {
 /// A path that is already gone is what the sweep wants; anything else is worth a warning.
 fn warn_unless_gone(path: &Path, err: &std::io::Error) {
     if err.kind() != ErrorKind::NotFound {
-        tracing::warn!(path = %path.display(), error = %err, "sweep skipped an entry");
+        tracing::warn!(
+            path = %inert(&path.display().to_string()),
+            error = %err,
+            "sweep skipped an entry"
+        );
     }
 }
 

@@ -23,6 +23,7 @@ use crate::join_failure::log_join_failure;
 use crate::kinds;
 use crate::role::Role;
 use crate::slug::Slug;
+use crate::unicode::inert_chain;
 
 /// The `POST /teams/{team}/workspaces` body; `seed` absent means `true`.
 #[derive(Debug, Deserialize)]
@@ -230,7 +231,7 @@ pub(super) async fn delete(
         if let Err(err) = repos.remove(&team_slug, &slug).await {
             tracing::error!(
                 id = ws.id(),
-                error = &err as &dyn std::error::Error,
+                error = %inert_chain(&err),
                 "removing a deleted workspace's repository failed"
             );
             return Err(ApiError::internal("repository could not be removed"));
@@ -344,7 +345,7 @@ fn repo_error(err: RepoError) -> ApiError {
             path.display()
         )),
         err => {
-            tracing::error!(error = &err as &dyn std::error::Error, "repository error");
+            tracing::error!(error = %inert_chain(&err), "repository error");
             ApiError::internal("repository error")
         }
     }

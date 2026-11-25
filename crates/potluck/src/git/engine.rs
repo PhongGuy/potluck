@@ -561,7 +561,7 @@ fn leader_pidfd(child: &tokio::process::Child) -> Option<std::os::fd::OwnedFd> {
 }
 
 /// The pidfd, or `None` after a failure; the first failure seen through `warned` logs one
-/// warning with the errno kind, since without a pidfd the run limit stops at the git leader.
+/// warning with the errno kind, since without a pidfd the reaper cannot wait out stray hooks.
 fn pidfd_or_warn(
     pidfd: Result<std::os::fd::OwnedFd, rustix::io::Errno>,
     warned: &std::sync::Once,
@@ -2504,10 +2504,8 @@ mod tests {
     #[test]
     fn a_taken_pidfd_passes_through_without_a_warning() {
         let warned = std::sync::Once::new();
-        let fd = rustix::process::pidfd_open(
-            rustix::process::getpid(),
-            rustix::process::PidfdFlags::empty(),
-        );
+        // Any open fd stands in for a pidfd, so the test holds on hosts without pidfd_open.
+        let fd = Ok(std::fs::File::open("/dev/null").unwrap().into());
         let logs = thread_logs(|| {
             assert!(pidfd_or_warn(fd, &warned).is_some());
         });

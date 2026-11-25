@@ -564,8 +564,32 @@ pub(super) fn process_group(child: &tokio::process::Child) -> Option<rustix::pro
 /// A pidfd for `child`, taken while it is unreaped so it names this process for good; `None`
 /// when the kernel cannot give one.
 fn leader_pidfd(child: &tokio::process::Child) -> Option<std::os::fd::OwnedFd> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
     let pid = process_group(child)?;
-    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+    pidfd_or_warn(
+        rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()),
+        &WARNED,
+    )
+}
+
+/// The pidfd, or `None` after a failure; the first failure seen through `warned` logs one
+/// warning with the errno kind, since without a pidfd the reaper cannot wait out stray hooks.
+fn pidfd_or_warn(
+    pidfd: Result<std::os::fd::OwnedFd, rustix::io::Errno>,
+    warned: &std::sync::Once,
+) -> Option<std::os::fd::OwnedFd> {
+    pidfd
+        .inspect_err(|errno| {
+            warned.call_once(|| {
+                let error = std::io::Error::from(*errno);
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    %error,
+                    "cannot take a pidfd for git, so the run limit cannot track stray hook processes on this host"
+                );
+            });
+        })
+        .ok()
 }
 
 /// Waits until the process behind `pidfd` exits, without reaping it.
@@ -2627,6 +2651,51 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// The lines logged on this thread while `f` runs.
+    fn thread_logs(f: impl FnOnce()) -> String {
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || SharedSink(std::sync::Arc::clone(&sink)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(logs.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_missing_pidfd_warns_once_with_its_errno_kind() {
+        let warned = std::sync::Once::new();
+        let first = thread_logs(|| {
+            let fd = pidfd_or_warn(Err(rustix::io::Errno::NOSYS), &warned);
+            assert!(fd.is_none());
+        });
+        assert!(first.contains("WARN"), "{first}");
+        assert!(
+            first.contains("cannot track stray hook processes"),
+            "{first}"
+        );
+        assert!(first.contains("Unsupported"), "no errno kind: {first}");
+        assert!(!first.contains('/'), "a path leaked: {first}");
+
+        let second = thread_logs(|| {
+            assert!(pidfd_or_warn(Err(rustix::io::Errno::PERM), &warned).is_none());
+        });
+        assert!(second.is_empty(), "warned twice: {second}");
+    }
+
+    #[test]
+    fn a_taken_pidfd_passes_through_without_a_warning() {
+        let warned = std::sync::Once::new();
+        // Any open fd stands in for a pidfd, so the test holds on hosts without pidfd_open.
+        let fd = Ok(std::fs::File::open("/dev/null").unwrap().into());
+        let logs = thread_logs(|| {
+            assert!(pidfd_or_warn(fd, &warned).is_some());
+        });
+        assert!(logs.is_empty(), "{logs}");
+        assert!(!warned.is_completed(), "a success spent the one warning");
     }
 
     /// An engine whose git is the script `body` and whose limits are `limits`; no repository.

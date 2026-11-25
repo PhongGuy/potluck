@@ -143,6 +143,56 @@ fn empty_hook_reports(dir: &std::path::Path) {
     }
 }
 
+/// Warns about each workspace row without a repository and each repository without a row.
+/// Nothing serves yet, so no create or delete races the walk; nothing is repaired, and no
+/// failure stops the start. Logged here, on the start thread, naming only `team/ws`.
+async fn audit_repos(db: &Db, repos: std::path::PathBuf) {
+    use crate::git::Mismatch;
+    let rows = match db.list_workspaces().await {
+        Ok(rows) => rows
+            .iter()
+            .map(|row| (row.team_slug().to_owned(), row.slug().to_owned()))
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            tracing::warn!(error = %err, "could not list workspaces to check their repositories");
+            return;
+        }
+    };
+    let found =
+        match tokio::task::spawn_blocking(move || crate::git::audit_repos(&repos, &rows)).await {
+            Ok(found) => found,
+            Err(err) => {
+                tracing::warn!(panicked = err.is_panic(), "startup repository check failed");
+                return;
+            }
+        };
+    for mismatch in &found {
+        match mismatch {
+            Mismatch::Missing(name) => {
+                tracing::warn!(workspace = %name, "workspace has no repository");
+            }
+            Mismatch::NotDirectory(name) => {
+                tracing::warn!(workspace = %name, "workspace repository is not a directory");
+            }
+            Mismatch::Orphan(name) => {
+                tracing::warn!(repository = %name, "repository has no workspace");
+            }
+            Mismatch::Unexpected(name) => {
+                tracing::warn!(entry = %name, "unexpected entry under repos");
+            }
+            Mismatch::CouldNotCheck(name) => {
+                tracing::warn!(entry = %name, "could not check a repository path");
+            }
+        }
+    }
+    if !found.is_empty() {
+        tracing::warn!(
+            count = found.len(),
+            "workspaces and repositories disagree; nothing was repaired"
+        );
+    }
+}
+
 async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerError> {
     config.check_admin_socket()?;
     for path in [
@@ -194,6 +244,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             (state.db().clone(), None, Some(state))
         }
     };
+    audit_repos(&db, config.repos_dir()).await;
     // Keep a duplicate of each listening socket so shutdown can take it out of LISTEN itself.
     let Bound {
         tcp,

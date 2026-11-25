@@ -767,3 +767,47 @@ async fn a_start_empties_hook_reports_and_leaves_the_rest_of_tmp() {
     assert!(config.hook_reports_dir().is_dir());
     running.shutdown().await;
 }
+
+// A row whose repository went missing and a repository with no row are both named at startup,
+// by `team/ws` only, so the log never carries the data dir's absolute path.
+#[test]
+fn a_start_warns_about_rows_and_repositories_that_disagree() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_for(dir.path());
+    // Current-thread, so the server's own events land in this thread's capture.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let first = start(&config).await.unwrap();
+        let root = api_admin(first.db()).await;
+        let api = format!("http://{}/api/v1", first.http_addr());
+        api_team(&api, &root, "core").await;
+        api_workspace(&api, &root, "core", "gone", false).await;
+        first.shutdown().await;
+    });
+    std::fs::remove_dir_all(repo_path(dir.path(), "core", "gone")).unwrap();
+    std::fs::create_dir_all(repo_path(dir.path(), "core", "stray")).unwrap();
+
+    let text = crate::logs::captured_logs(|| {
+        rt.block_on(async {
+            let again = start(&config).await.unwrap();
+            again.shutdown().await;
+        });
+    });
+    let warns: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains(" WARN "))
+        .collect();
+    assert!(
+        warns.iter().any(|line| line.contains("core/gone")),
+        "the row without a repository is named: {text}"
+    );
+    assert!(
+        warns.iter().any(|line| line.contains("core/stray")),
+        "the repository without a row is named: {text}"
+    );
+    let data = dir.path().to_str().unwrap();
+    assert!(!text.contains(data), "no absolute path is logged: {text}");
+}

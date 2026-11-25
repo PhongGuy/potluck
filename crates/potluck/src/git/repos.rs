@@ -310,7 +310,7 @@ pub enum RepoError {
         path: PathBuf,
     },
     /// A filesystem step on the repository, or spawning or feeding git, failed.
-    #[error("i/o on repository {path} failed: {source}")]
+    #[error("i/o on repository {path} failed")]
     Io {
         /// The repository path.
         path: PathBuf,

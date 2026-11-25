@@ -247,6 +247,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_unreadable_git_body_tells_the_client_why() {
+        let err = crate::git::GitError::Body(std::io::Error::other("corrupt deflate stream"));
+        let (status, _, body) = render(ApiError::from(err)).await;
+        assert_eq!(status, 400);
+        assert_eq!(
+            body["error"]["message"],
+            "request body could not be read: corrupt deflate stream"
+        );
+    }
+
+    #[tokio::test]
     async fn every_constructor_maps_to_its_status_and_code() {
         let cases: Vec<(ApiError, u16, &str)> = vec![
             (ApiError::unauthenticated("x"), 401, "unauthenticated"),

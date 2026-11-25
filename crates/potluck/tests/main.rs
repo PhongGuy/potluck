@@ -42,6 +42,7 @@ mod db_workspaces;
 mod dbento_golden;
 mod default_branch_presence;
 mod deploy_files;
+mod error_text;
 mod events;
 mod git_access_db;
 mod git_denials;

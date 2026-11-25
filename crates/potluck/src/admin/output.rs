@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::unicode::is_format;
+use crate::unicode::{inert, is_format};
 
 /// A text table: `headers` then `rows`, every cell escaped (control and Unicode format
 /// characters in their `\u{..}` form, a backslash doubled) and padded to its column's widest
@@ -229,20 +229,10 @@ pub(crate) fn audit(items: &[Value]) -> String {
     )
 }
 
-// Table cells carry names other people chose, so a control character or an invisible format
-// character (bidi override, zero-width) is shown in its escaped form rather than reaching the
-// terminal as a command or a reordering of the line. A backslash is doubled so a name that
-// literally reads `\u{1b}` prints differently from an escaped ESC.
+// Table cells carry names other people chose, so they print with controls, invisible format
+// characters and line separators escaped rather than steering the terminal or the layout.
 pub(crate) fn escape(cell: &str) -> String {
-    cell.chars()
-        .map(|c| {
-            if c == '\\' || c.is_control() || is_format(c) {
-                c.escape_default().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    inert(cell).into_owned()
 }
 
 /// `serialized` with every non-ASCII control, format character and line or paragraph
@@ -312,6 +302,14 @@ mod tests {
             "{out}"
         );
         assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), v);
+    }
+
+    #[test]
+    fn every_risky_character_is_escaped_in_a_table_cell() {
+        for c in risky() {
+            let cell = super::escape(&format!("a{c}b"));
+            assert!(!cell.contains(c), "U+{:04X} raw in {cell:?}", c as u32);
+        }
     }
 
     #[test]

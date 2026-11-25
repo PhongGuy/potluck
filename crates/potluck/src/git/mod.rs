@@ -1,6 +1,7 @@
 //! Git smart HTTP: the bare repositories and the git processes that serve them.
 
 pub mod access;
+mod audit;
 pub mod engine;
 pub(crate) mod http;
 pub mod push;
@@ -9,6 +10,7 @@ pub mod repos;
 mod spool;
 mod sweep;
 
+pub(crate) use audit::{Mismatch, audit_repos};
 pub use engine::{GitEngine, GitError, GitLimits};
 pub use push::RefMove;
 pub use repos::{RepoError, Repos};

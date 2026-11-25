@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use crate::unicode::is_format;
+
 /// A text table: `headers` then `rows`, every cell escaped (control and Unicode format
 /// characters in their `\u{..}` form, a backslash doubled) and padded to its column's widest
 /// escaped cell (by `chars().count()`), two spaces between columns, no trailing spaces, every
@@ -243,30 +245,91 @@ pub(crate) fn escape(cell: &str) -> String {
         .collect()
 }
 
-/// Whether `c` is in Unicode general category Cf (format).
-fn is_format(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00AD}'
-            | '\u{0600}'..='\u{0605}'
-            | '\u{061C}'
-            | '\u{06DD}'
-            | '\u{070F}'
-            | '\u{0890}'..='\u{0891}'
-            | '\u{08E2}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{110BD}'
-            | '\u{110CD}'
-            | '\u{13430}'..='\u{1343F}'
-            | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0001}'
-            | '\u{E0020}'..='\u{E007F}'
-    )
+/// `serialized` with every non-ASCII control, format character and line or paragraph
+/// separator rewritten as a `\uXXXX` escape, so it decodes to the same value but cannot steer
+/// a terminal. The input must be serde_json output: then every char at or above U+007F is
+/// inside a string literal, where the escape is valid.
+pub(crate) fn json_inert(serialized: &str) -> String {
+    let mut out = String::with_capacity(serialized.len());
+    for c in serialized.chars() {
+        // ASCII controls are left alone: outside strings they are the layout's newlines, and
+        // inside strings serde_json has already escaped them.
+        let separator = matches!(c, '\u{2028}' | '\u{2029}');
+        if (c.is_control() && c >= '\u{7f}') || is_format(c) || separator {
+            for unit in c.encode_utf16(&mut [0; 2]) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_inert;
+    use crate::unicode::is_format;
+    use serde_json::{Value, json};
+
+    /// One sample from every range of `is_format`, both ends of each, plus DEL, C1 and the
+    /// line and paragraph separators.
+    fn risky() -> Vec<char> {
+        let mut chars: Vec<char> = [
+            0xAD, 0x600, 0x605, 0x61C, 0x6DD, 0x70F, 0x890, 0x891, 0x8E2, 0x180E, 0x200B, 0x200F,
+            0x202A, 0x202E, 0x2060, 0x2064, 0x2066, 0x206F, 0xFEFF, 0xFFF9, 0xFFFB, 0x110BD,
+            0x110CD, 0x13430, 0x1343F, 0x1BCA0, 0x1BCA3, 0x1D173, 0x1D17A, 0xE0001, 0xE0020,
+            0xE007F,
+        ]
+        .into_iter()
+        .map(|n| char::from_u32(n).unwrap())
+        .collect();
+        assert!(chars.iter().all(|&c| is_format(c)));
+        chars.extend([
+            '\u{7f}', '\u{80}', '\u{9b}', '\u{9f}', '\u{2028}', '\u{2029}',
+        ]);
+        chars
+    }
+
+    #[test]
+    fn printable_text_passes_through_byte_identical() {
+        let v = json!({"name": "Søren é \\ \"q\"", "list": [1, "a\tb", null], "x": {}});
+        let pretty = serde_json::to_string_pretty(&v).unwrap();
+        assert_eq!(json_inert(&pretty), pretty);
+    }
+
+    #[test]
+    fn risky_characters_are_escaped_and_decode_to_the_same_value() {
+        let chars = risky();
+        let text: String = chars.iter().flat_map(|&c| [c, 'x']).collect();
+        let v = json!({"name": text, "nested": [{"k": text}]});
+        let out = json_inert(&serde_json::to_string_pretty(&v).unwrap());
+        for c in &chars {
+            assert!(!out.contains(*c), "raw {c:?} survived: {out:?}");
+        }
+        assert!(
+            out.contains("\\u202e") && out.contains("\\udb40\\udc01"),
+            "{out}"
+        );
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), v);
+    }
+
+    #[test]
+    fn layout_is_kept() {
+        let v = json!({"a": ["\u{202e}", 1], "b": {"c": "\u{2028}"}});
+        let out = json_inert(&serde_json::to_string_pretty(&v).unwrap());
+        assert_eq!(
+            out,
+            "{\n  \"a\": [\n    \"\\u202e\",\n    1\n  ],\n  \"b\": {\n    \"c\": \"\\u2028\"\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn a_literal_backslash_u_stays_distinct_from_an_escape() {
+        let v = json!(["\\u202e", "\u{202e}"]);
+        let out = json_inert(&serde_json::to_string_pretty(&v).unwrap());
+        let back: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(back, v);
+        assert_ne!(back[0], back[1]);
+    }
 }

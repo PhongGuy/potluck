@@ -16,7 +16,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 
 use self::client::{AdminClient, ApiResponse, Verb};
-use self::output::escape;
+use self::output::{escape, json_inert};
 use crate::backup::{BackupError, BackupOptions, Written, write_backup};
 use crate::slug::{Slug, SlugError};
 
@@ -375,10 +375,12 @@ pub(crate) fn segment(arg: &'static str, value: &str) -> Result<Slug, AdminError
     })
 }
 
-/// `value` as pretty JSON with a final newline.
+/// `value` as pretty JSON with a final newline, with characters that could steer a terminal
+/// written as `\uXXXX` escapes; a JSON parser reads back the same value.
 pub(crate) fn pretty(value: &Value) -> Result<String, AdminError> {
-    let mut text =
+    let text =
         serde_json::to_string_pretty(value).map_err(|e| AdminError::Output(io::Error::other(e)))?;
+    let mut text = json_inert(&text);
     text.push('\n');
     Ok(text)
 }
@@ -464,7 +466,7 @@ pub(crate) fn expect(response: ApiResponse, ok: &[u16]) -> Result<Option<Value>,
 
 #[cfg(test)]
 mod tests {
-    use super::AdminError;
+    use super::{AdminError, segment};
 
     #[test]
     fn an_api_error_escapes_the_server_text_it_prints() {
@@ -478,5 +480,17 @@ mod tests {
             err.to_string(),
             "bad\\u{1b}[0m: \\u{1b}[31mred\\u{202e}txt (field na\\u{1b}me\\u{202e})"
         );
+    }
+
+    #[test]
+    fn a_bad_name_error_escapes_the_value_it_prints() {
+        let err = segment("team", "ev\u{202e}e\u{1b}").unwrap_err();
+        assert!(matches!(err, AdminError::BadName { .. }), "got {err:?}");
+        let text = err.to_string();
+        assert!(
+            !text.contains('\u{202e}') && !text.contains('\u{1b}'),
+            "{text:?}"
+        );
+        assert!(text.contains("ev\\u{202e}e\\u{1b}"), "{text}");
     }
 }

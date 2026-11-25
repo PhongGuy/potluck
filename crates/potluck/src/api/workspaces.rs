@@ -5,6 +5,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
+use tracing::Level;
 
 use super::audit;
 use super::auth::{Authenticated, token_required};
@@ -18,6 +19,7 @@ use super::{Actor, AppState};
 use crate::db::workspaces::{NewWorkspace, WorkspaceRecord};
 use crate::db::{Db, DbError};
 use crate::git::{RepoError, Repos};
+use crate::join_failure::log_join_failure;
 use crate::kinds;
 use crate::role::Role;
 use crate::slug::Slug;
@@ -103,7 +105,7 @@ pub(super) async fn create(
         .await
     });
     let record = task.await.map_err(|err| {
-        tracing::error!(error = %err, "workspace creation task failed");
+        log_join_failure(&err, Level::ERROR, "workspace creation task failed");
         ApiError::internal("workspace creation failed")
     })??;
     Ok((
@@ -232,7 +234,7 @@ pub(super) async fn delete(
         Ok(StatusCode::NO_CONTENT)
     });
     let status = task.await.map_err(|err| {
-        tracing::error!(error = %err, "workspace deletion task failed");
+        log_join_failure(&err, Level::ERROR, "workspace deletion task failed");
         ApiError::internal("workspace deletion failed")
     })??;
     Ok(status)

@@ -113,6 +113,8 @@ pub(crate) enum GitOutcome {
     Busy,
     Overran,
     Failed,
+    /// The client went away before the engine recorded any other outcome for the request.
+    Cancelled,
 }
 
 impl GitOutcome {
@@ -122,6 +124,7 @@ impl GitOutcome {
             Self::Busy => "busy",
             Self::Overran => "overran",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -534,6 +537,7 @@ mod tests {
         m.sign_in(SignInMethod::Password, SignInOutcome::RateLimitedUsername);
         m.auth_failure(AuthScheme::Basic);
         m.git_request(GitService::UploadPack, GitOutcome::Busy);
+        m.git_request(GitService::ReceivePack, GitOutcome::Cancelled);
         m.push(PushOutcome::Refused);
         m.refusal("secret_env_file", "env_file", "apinata");
         let text = m.render(&Snapshot::default());
@@ -541,6 +545,7 @@ mod tests {
             "potluck_sign_ins_total{method=\"password\",outcome=\"rate_limited_username\"}",
             "potluck_auth_failures_total{scheme=\"basic\"}",
             "potluck_git_requests_total{service=\"upload_pack\",outcome=\"busy\"}",
+            "potluck_git_requests_total{service=\"receive_pack\",outcome=\"cancelled\"}",
             "potluck_pushes_total{outcome=\"refused\"}",
             "potluck_push_refusals_total{code=\"secret_env_file\",rule=\"env_file\",kind=\"apinata\"}",
         ] {

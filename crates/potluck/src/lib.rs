@@ -11,6 +11,7 @@ pub mod db;
 pub mod git;
 pub mod health_check;
 pub mod hooks;
+mod join_failure;
 pub mod kinds;
 mod metrics;
 pub mod notices;

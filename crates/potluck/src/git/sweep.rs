@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use tokio::sync::{OwnedRwLockReadGuard, RwLock};
+use tracing::Level;
+
+use crate::join_failure::log_join_failure;
 
 /// The receive-packs in flight per repository. Only the last one out of a repository that a
 /// killed push left dirty sweeps it, so a sweep never touches a live push's files.
@@ -103,7 +106,8 @@ impl Writer {
             }
         });
         if let Err(err) = swept.await {
-            tracing::warn!(repo = %entry.repo.display(), error = %err, "sweep task failed");
+            let _repo = tracing::warn_span!("sweep", repo = %entry.repo.display()).entered();
+            log_join_failure(&err, Level::WARN, "sweep task failed");
         }
         true
     }
@@ -512,6 +516,29 @@ mod tests {
         let _ = std::fs::read(&stall);
         let _ = std::fs::remove_file(&stall);
         sweep(repo)
+    }
+
+    fn panicking_sweep(_repo: &Path) -> Swept {
+        std::panic::panic_any("/srv/secret/path in the payload")
+    }
+
+    #[tokio::test]
+    async fn a_panicked_sweep_logs_its_repository_but_not_the_panic_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("team/ws.git");
+        let writers = Writers {
+            entries: Mutex::default(),
+            sweep: panicking_sweep,
+        };
+        let (logs, subscriber) = crate::join_failure::capturing();
+        let _default = tracing::subscriber::set_default(subscriber);
+        let killed = writers.enter(&repo).await;
+        assert!(killed.leave(true).await, "the dirty repository is swept");
+        let line = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(line.contains("sweep task failed"), "{line}");
+        assert!(line.contains("panicked=true"), "{line}");
+        assert!(line.contains("team/ws.git"), "{line}");
+        assert!(!line.contains("/srv/secret/path"), "payload leaked: {line}");
     }
 
     #[tokio::test]

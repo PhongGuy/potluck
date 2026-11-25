@@ -413,7 +413,7 @@ impl GitEngine {
                 let report = read_report(report_file).await;
                 match list_refs(&repos, &repo_path).await {
                     Ok(after) => on_push(moved(&commands, &before, &after), report),
-                    Err(err) => tracing::error!(error = %err, "cannot list refs after a push"),
+                    Err(err) => tracing::error!(error = &err as &dyn std::error::Error, "cannot list refs after a push"),
                 }
             }
         });
@@ -696,7 +696,10 @@ async fn read_commands(
         Ok(commands) => Ok((file, commands)),
         Err(CommandError::TooMany { limit }) => Err(GitError::TooManyCommands { limit }),
         Err(err) => {
-            tracing::warn!(error = %err, "cannot parse the receive-pack command list");
+            tracing::warn!(
+                error = &err as &dyn std::error::Error,
+                "cannot parse the receive-pack command list"
+            );
             Ok((file, Vec::new()))
         }
     }
@@ -744,10 +747,10 @@ pub enum GitError {
     #[error("request body did not complete within {0:?}")]
     SlowBody(Duration),
     /// The body could not be read or inflated: 400 `invalid_request`.
-    #[error("request body could not be read: {0}")]
+    #[error("request body could not be read")]
     Body(#[source] std::io::Error),
     /// The spool file or the child could not be set up: 500 `internal`.
-    #[error("cannot run git: {0}")]
+    #[error("cannot run git")]
     Spawn(#[source] std::io::Error),
     /// git exited non-zero before any output was sent (advertisement only): 500 `internal`.
     #[error("git failed: {stderr}")]
@@ -785,15 +788,16 @@ impl From<GitError> for ApiError {
         match err {
             GitError::Busy => ApiError::unavailable("git is busy; retry shortly"),
             GitError::TooLarge { .. } => ApiError::payload_too_large(err.to_string()),
-            GitError::BadEncoding(_)
-            | GitError::SlowBody(_)
-            | GitError::Body(_)
-            | GitError::TooManyCommands { .. } => ApiError::invalid_request(err.to_string()),
+            // The read error is the useful part for the client, and the variant's own text omits it.
+            GitError::Body(ref source) => ApiError::invalid_request(format!("{err}: {source}")),
+            GitError::BadEncoding(_) | GitError::SlowBody(_) | GitError::TooManyCommands { .. } => {
+                ApiError::invalid_request(err.to_string())
+            }
             GitError::Spawn(_)
             | GitError::Failed { .. }
             | GitError::HookMissing { .. }
             | GitError::Overran { .. } => {
-                tracing::error!(error = %err, "git error");
+                tracing::error!(error = &err as &dyn std::error::Error, "git error");
                 ApiError::internal("git failed")
             }
         }
@@ -2505,6 +2509,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(ran.exists(), "git runs once the slot frees");
+    }
+
+    #[test]
+    fn a_git_server_fault_logs_its_cause() {
+        let logs = global_logs();
+        let _ = ApiError::from(GitError::Spawn(std::io::Error::other("spool-cause-5306")));
+        let text = String::from_utf8_lossy(&logs.lock().unwrap()).into_owned();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("git error") && l.contains("spool-cause-5306")),
+            "{text}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -69,7 +69,7 @@ pub enum ServerError {
         source: io::Error,
     },
     /// The pre-receive hook could not be written.
-    #[error("cannot write the pre-receive hook under {path}: {source}")]
+    #[error("cannot write the pre-receive hook under {path}")]
     Hooks {
         /// The hooks directory under `--data`.
         path: PathBuf,

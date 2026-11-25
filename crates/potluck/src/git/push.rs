@@ -109,7 +109,7 @@ pub enum CommandError {
         limit: usize,
     },
     /// Reading the body failed.
-    #[error("cannot read the receive-pack body: {0}")]
+    #[error("cannot read the receive-pack body")]
     Io(#[source] std::io::Error),
 }
 

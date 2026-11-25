@@ -21,6 +21,7 @@ use crate::git::{RepoError, Repos};
 use crate::kinds;
 use crate::role::Role;
 use crate::slug::Slug;
+use crate::unicode::inert;
 
 /// The `POST /teams/{team}/workspaces` body; `seed` absent means `true`.
 #[derive(Debug, Deserialize)]
@@ -226,7 +227,11 @@ pub(super) async fn delete(
         // The rows are gone, so the streams go now, even if removing the repository fails.
         notices.close_workspace(ws.id());
         if let Err(err) = repos.remove(&team_slug, &slug).await {
-            tracing::error!(id = ws.id(), error = %err, "removing a deleted workspace's repository failed");
+            tracing::error!(
+                id = ws.id(),
+                error = %inert(&err.to_string()),
+                "removing a deleted workspace's repository failed"
+            );
             return Err(ApiError::internal("repository could not be removed"));
         }
         Ok(StatusCode::NO_CONTENT)
@@ -338,7 +343,7 @@ fn repo_error(err: RepoError) -> ApiError {
             path.display()
         )),
         err => {
-            tracing::error!(error = %err, "repository error");
+            tracing::error!(error = %inert(&err.to_string()), "repository error");
             ApiError::internal("repository error")
         }
     }

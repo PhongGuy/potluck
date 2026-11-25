@@ -12,6 +12,7 @@ use crate::secret_check::scan::{
     HookEnv, ScanError, accepted_relaxations, default_branch_rewrites, foreign_refs, report, scan,
     tag_rewrites,
 };
+use crate::unicode::inert;
 
 /// Reads stdin to EOF, parses every non-empty line, scans with `HookEnv::from_env()` and
 /// `Git::from_env()`, writes the report to stderr. Exit 0 accepts; exit 1 refuses. A ref name
@@ -101,7 +102,7 @@ pub fn log_accepted_relaxations(
                 tracing::info!(
                     workspace_id,
                     pusher,
-                    "ref" = %ref_name,
+                    "ref" = %inert(&ref_name),
                     rule = r.finding().rule(),
                     "safety relaxation accepted"
                 );
@@ -135,7 +136,7 @@ pub fn log_default_branch_rewrites(
                     workspace_id,
                     pusher,
                     override_id,
-                    "ref" = %ref_name,
+                    "ref" = %inert(&ref_name),
                     rule = r.finding().rule(),
                     "default branch rewritten"
                 );
@@ -165,7 +166,7 @@ pub fn log_foreign_refs(
             workspace_id,
             pusher,
             override_id,
-            "ref" = %ref_name,
+            "ref" = %inert(&ref_name),
             "ref outside heads and tags written"
         );
     }
@@ -186,7 +187,7 @@ pub fn log_tag_rewrites(
             workspace_id,
             pusher,
             override_id,
-            "ref" = %ref_name,
+            "ref" = %inert(&ref_name),
             rule = r.finding().rule(),
             "tag rewritten"
         );

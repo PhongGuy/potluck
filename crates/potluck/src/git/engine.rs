@@ -16,6 +16,7 @@ use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, pars
 use crate::git::report::{self, HookReport};
 use crate::git::{Repos, Service, spool, sweep};
 use crate::metrics::{GitOutcome, GitService, Metrics};
+use crate::unicode::inert;
 
 /// The default for how long a git child may run from spawn: 30 min.
 pub(crate) const DEFAULT_MAX_RUNTIME_SECS: u64 = 1800;
@@ -386,7 +387,7 @@ impl GitEngine {
                     tracing::warn!(
                         service = service.name(),
                         %status,
-                        stderr = %tail,
+                        stderr = %inert(&tail),
                         "git exited with an error"
                     );
                     GitOutcome::Failed
@@ -413,7 +414,10 @@ impl GitEngine {
                 let report = read_report(report_file).await;
                 match list_refs(&repos, &repo_path).await {
                     Ok(after) => on_push(moved(&commands, &before, &after), report),
-                    Err(err) => tracing::error!(error = %err, "cannot list refs after a push"),
+                    Err(err) => {
+                        let error = inert(&err.to_string()).into_owned();
+                        tracing::error!(%error, "cannot list refs after a push")
+                    }
                 }
             }
         });
@@ -783,7 +787,7 @@ impl From<GitError> for ApiError {
             | GitError::Failed { .. }
             | GitError::HookMissing { .. }
             | GitError::Overran { .. } => {
-                tracing::error!(error = %err, "git error");
+                tracing::error!(error = %inert(&err.to_string()), "git error");
                 ApiError::internal("git failed")
             }
         }

@@ -98,18 +98,38 @@ impl Arena {
         rows
     }
 
-    /// The rows once at least `n` have landed (the recheck runs after git exits), after a
-    /// further pause that lets a stray extra row land too.
-    async fn rows_after(&self, n: usize) -> Vec<AuditRecord> {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while self.rows().await.len() < n {
+    /// The rows written before a sentinel: root then moves tag `sentinel` in a clone of its
+    /// own, and once that `tag_move` row lands it must be the last row; the rows before it are
+    /// returned. Each push's bookkeeping is spawned as that push ends, so an earlier push's row
+    /// is due before the sentinel's, and the wait is for an event rather than a fixed pause.
+    async fn rows_before_sentinel(&self) -> Vec<AuditRecord> {
+        let work = self.clone("sentinel", &self.root);
+        ok(self.git(&work, &self.root, &["tag", "sentinel"]));
+        ok(self.git(&work, &self.root, &["push", "-q", "origin", "sentinel"]));
+        self.commit(&work, "sentinel\n", false);
+        ok(self.git(&work, &self.root, &["tag", "-f", "sentinel"]));
+        ok(self.git(
+            &work,
+            &self.root,
+            &["push", "-q", "--force", "origin", "refs/tags/sentinel"],
+        ));
+        let is_sentinel = |r: &AuditRecord| detail(r)["ref"] == "refs/tags/sentinel";
+        let mut rows = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let rows = self.rows().await;
+                if rows.iter().any(is_sentinel) {
+                    return rows;
+                }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("the relaxation rows land within 10 s");
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        self.rows().await
+        .expect("the sentinel row lands within 10 s");
+        let last = rows.pop().expect("the sentinel row");
+        assert!(is_sentinel(&last), "the sentinel row comes last");
+        assert_eq!(detail(&last)["rule"], "tag_move");
+        assert!(!rows.iter().any(is_sentinel), "one sentinel row");
+        rows
     }
 }
 
@@ -125,7 +145,7 @@ async fn an_admin_force_push_to_main_writes_one_row_with_the_old_sha() {
     ok(a.git(&work, &a.root, &["push", "-q", "origin", "main"]));
     let new = a.commit(&work, "two, rewritten\n", true);
     ok(a.git(&work, &a.root, &["push", "-q", "--force", "origin", "main"]));
-    let rows = a.rows_after(1).await;
+    let rows = a.rows_before_sentinel().await;
     assert_eq!(rows.len(), 1, "only the rewrite is a relaxation");
     let row = &rows[0];
     assert_eq!(
@@ -160,7 +180,7 @@ async fn an_override_backed_force_push_names_the_override() {
     let id = ov["id"].as_i64().unwrap();
     let new = a.commit(&work, "two, rewritten\n", true);
     ok(a.git(&work, &a.bob, &["push", "-q", "--force", "origin", "main"]));
-    let rows = a.rows_after(1).await;
+    let rows = a.rows_before_sentinel().await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].actor_name(), Some("bob"));
     assert_eq!(
@@ -183,7 +203,7 @@ async fn an_admin_tag_move_writes_a_tag_move_row() {
         &a.root,
         &["push", "-q", "--force", "origin", "refs/tags/v1"],
     ));
-    let rows = a.rows_after(1).await;
+    let rows = a.rows_before_sentinel().await;
     assert_eq!(rows.len(), 1);
     assert_eq!(
         detail(&rows[0]),
@@ -200,7 +220,5 @@ async fn a_writer_fast_forward_and_a_refused_force_push_write_no_row() {
     a.commit(&work, "two, rewritten\n", true);
     let out = failed(a.git(&work, &a.bob, &["push", "--force", "origin", "main"]));
     assert!(out.contains("force_push"), "{out}");
-    // Neither push may write a row, so give a stray one time to land before looking.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(a.rows().await.is_empty());
+    assert!(a.rows_before_sentinel().await.is_empty());
 }

@@ -468,7 +468,7 @@ impl Running {
             match task.await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => tracing::error!("listener failed: {err}"),
-                Err(err) => tracing::error!("listener task failed: {err}"),
+                Err(err) => log_join_failure(&err, Level::ERROR, "listener task failed"),
             }
         }
         // Closing our fds is not enough: shutdown(2) acts on the shared socket, so a forked

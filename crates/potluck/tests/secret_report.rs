@@ -229,3 +229,68 @@ fn detail_lines_do_not_count_toward_twenty() {
     );
     assert_eq!(out.lines().last(), Some("potluck-reject-more 2"));
 }
+
+#[test]
+fn percent_encode_escapes_format_characters() {
+    assert_eq!(percent_encode("a\u{202E}b".as_bytes()), "a%E2%80%AEb");
+    assert_eq!(percent_encode("a\u{200B}b".as_bytes()), "a%E2%80%8Bb");
+    assert_eq!(percent_encode("\u{FEFF}x".as_bytes()), "%EF%BB%BFx");
+}
+
+#[test]
+fn percent_encode_escapes_c1_controls() {
+    assert_eq!(percent_encode("a\u{0085}b".as_bytes()), "a%C2%85b");
+    assert_eq!(percent_encode("\u{0080}".as_bytes()), "%C2%80");
+    assert_eq!(percent_encode("\u{009F}".as_bytes()), "%C2%9F");
+}
+
+#[test]
+fn percent_encode_escapes_line_and_paragraph_separators() {
+    assert_eq!(percent_encode("a\u{2028}b".as_bytes()), "a%E2%80%A8b");
+    assert_eq!(percent_encode("a\u{2029}b".as_bytes()), "a%E2%80%A9b");
+}
+
+#[test]
+fn percent_encode_leaves_ordinary_non_ascii_raw() {
+    for raw in [
+        "\u{e6}\u{f8}\u{e5}",
+        "\u{6f22}\u{5b57}",
+        "\u{1F600}",
+        "a\u{00A0}b",
+    ] {
+        assert_eq!(percent_encode(raw.as_bytes()), raw);
+    }
+}
+
+/// The client's side: each `%XX` back to its byte, every other byte as is.
+fn percent_decode(encoded: &str) -> Vec<u8> {
+    let bytes = encoded.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+#[test]
+fn percent_decode_of_percent_encode_restores_the_bytes() {
+    let mut raw = Vec::new();
+    raw.extend_from_slice("a %\t\x7f\u{202E}\u{200B}\u{FEFF}".as_bytes());
+    raw.extend_from_slice("\u{0080}\u{0085}\u{009F}\u{2028}\u{2029}".as_bytes());
+    raw.extend_from_slice("\u{e6}\u{f8}\u{e5}\u{6f22}\u{1F600}\u{00A0}".as_bytes());
+    raw.extend_from_slice(b"\xff\xe2\x80 \xc3");
+    let encoded = percent_encode(&raw);
+    assert!(
+        !encoded.contains(['\u{202E}', '\u{0085}', '\u{2028}']),
+        "{encoded}"
+    );
+    assert_eq!(percent_decode(&encoded), raw);
+}

@@ -2,6 +2,8 @@
 
 use serde_json::Value;
 
+use crate::unicode::is_format;
+
 /// A text table: `headers` then `rows`, every cell escaped (control and Unicode format
 /// characters in their `\u{..}` form, a backslash doubled) and padded to its column's widest
 /// escaped cell (by `chars().count()`), two spaces between columns, no trailing spaces, every
@@ -243,34 +245,6 @@ pub(crate) fn escape(cell: &str) -> String {
         .collect()
 }
 
-/// Whether `c` is in Unicode general category Cf (format).
-pub(crate) fn is_format(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00AD}'
-            | '\u{0600}'..='\u{0605}'
-            | '\u{061C}'
-            | '\u{06DD}'
-            | '\u{070F}'
-            | '\u{0890}'..='\u{0891}'
-            | '\u{08E2}'
-            | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{2064}'
-            | '\u{2066}'..='\u{206F}'
-            | '\u{FEFF}'
-            | '\u{FFF9}'..='\u{FFFB}'
-            | '\u{110BD}'
-            | '\u{110CD}'
-            | '\u{13430}'..='\u{1343F}'
-            | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0001}'
-            | '\u{E0020}'..='\u{E007F}'
-    )
-}
-
 /// `serialized` with every non-ASCII control, format character and line or paragraph
 /// separator rewritten as a `\uXXXX` escape, so it decodes to the same value but cannot steer
 /// a terminal. The input must be serde_json output: then every char at or above U+007F is
@@ -294,7 +268,8 @@ pub(crate) fn json_inert(serialized: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_format, json_inert};
+    use super::json_inert;
+    use crate::unicode::is_format;
     use serde_json::{Value, json};
 
     /// One sample from every range of `is_format`, both ends of each, plus DEL, C1 and the

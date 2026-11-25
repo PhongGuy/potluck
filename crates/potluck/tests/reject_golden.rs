@@ -83,6 +83,30 @@ fn todays_findings_print_exactly_these_bytes() {
     );
 }
 
+/// A ref and a path carrying a bidi override, a C1 control and a line separator: each byte of
+/// those characters is escaped so the line reads the same in any terminal or log.
+#[test]
+fn invisible_characters_print_escaped() {
+    let s = Scratch::new();
+    s.write("opencollection.yml", SEED_COLLECTION);
+    s.commit("seed");
+    s.publish("main");
+    s.branch("rtl\u{202E}\u{0085}\u{2028}x");
+    s.write("bidi\u{202E}txt.\u{0085}\u{2028}.txt", AWS);
+    s.commit("invisible");
+    let tip = s.stage("rtl\u{202E}\u{0085}\u{2028}x");
+    let stdin = format!("{ZERO} {tip} refs/heads/rtl\u{202E}\u{0085}\u{2028}x\n");
+    let out = run_hook(&s, &stdin);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8(out.stderr).unwrap(),
+        concat!(
+            "potluck-reject secret_pattern refs/heads/rtl%E2%80%AE%C2%85%E2%80%A8x ",
+            "bidi%E2%80%AEtxt.%C2%85%E2%80%A8.txt aws\n",
+        )
+    );
+}
+
 /// Verdicts `apinata-rules` moved from Potluck's own parser: an empty environment file and one
 /// with a local tag are now unparsable, each with its fixed detail.
 #[test]

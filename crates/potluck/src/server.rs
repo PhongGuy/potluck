@@ -11,10 +11,12 @@ use axum::{Extension, Router};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::task::TaskTracker;
+use tracing::Level;
 
 use crate::api::{Actor, AppState};
 use crate::config::{Config, ConfigError};
 use crate::db::{Db, DbError};
+use crate::join_failure::log_join_failure;
 use crate::notices::Notices;
 use crate::update::{UpdateChecker, UpdateSource, schedule};
 
@@ -67,7 +69,7 @@ pub enum ServerError {
         source: io::Error,
     },
     /// The pre-receive hook could not be written.
-    #[error("cannot write the pre-receive hook under {path}: {source}")]
+    #[error("cannot write the pre-receive hook under {path}")]
     Hooks {
         /// The hooks directory under `--data`.
         path: PathBuf,
@@ -162,7 +164,7 @@ async fn audit_repos(db: &Db, repos: std::path::PathBuf) {
         match tokio::task::spawn_blocking(move || crate::git::audit_repos(&repos, &rows)).await {
             Ok(found) => found,
             Err(err) => {
-                tracing::warn!(panicked = err.is_panic(), "startup repository check failed");
+                log_join_failure(&err, Level::WARN, "startup repository check failed");
                 return;
             }
         };
@@ -221,7 +223,7 @@ async fn start_inner(config: &Config, serve: Serve) -> Result<Running, ServerErr
             swept.deferred
         }
         Err(err) => {
-            tracing::warn!(error = %err, "startup sweep task failed");
+            log_join_failure(&err, Level::WARN, "startup sweep task failed");
             Vec::new()
         }
     };
@@ -466,7 +468,7 @@ impl Running {
             match task.await {
                 Ok(Ok(())) => {}
                 Ok(Err(err)) => tracing::error!("listener failed: {err}"),
-                Err(err) => tracing::error!("listener task failed: {err}"),
+                Err(err) => log_join_failure(&err, Level::ERROR, "listener task failed"),
             }
         }
         // Closing our fds is not enough: shutdown(2) acts on the shared socket, so a forked

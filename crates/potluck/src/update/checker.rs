@@ -106,6 +106,11 @@ impl UpdateChecker {
         answer.unwrap_or(Err(UpdateError::Interrupted))
     }
 
+    /// The source this checker fetches from.
+    pub(crate) fn source(&self) -> &UpdateSource {
+        &self.inner.source
+    }
+
     /// Checks run so far, by outcome.
     pub(crate) fn check_counts(&self) -> UpdateCounts {
         let i = &self.inner;

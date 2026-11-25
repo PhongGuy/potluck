@@ -5,6 +5,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, RawQuery, State};
 use axum::http::StatusCode;
 use serde::Deserialize;
+use tracing::Level;
 
 use super::audit;
 use super::auth::{Authenticated, token_required};
@@ -18,10 +19,11 @@ use super::{Actor, AppState};
 use crate::db::workspaces::{NewWorkspace, WorkspaceRecord};
 use crate::db::{Db, DbError};
 use crate::git::{RepoError, Repos};
+use crate::join_failure::log_join_failure;
 use crate::kinds;
 use crate::role::Role;
 use crate::slug::Slug;
-use crate::unicode::inert;
+use crate::unicode::inert_chain;
 
 /// The `POST /teams/{team}/workspaces` body; `seed` absent means `true`.
 #[derive(Debug, Deserialize)]
@@ -104,7 +106,7 @@ pub(super) async fn create(
         .await
     });
     let record = task.await.map_err(|err| {
-        tracing::error!(error = %err, "workspace creation task failed");
+        log_join_failure(&err, Level::ERROR, "workspace creation task failed");
         ApiError::internal("workspace creation failed")
     })??;
     Ok((
@@ -229,7 +231,7 @@ pub(super) async fn delete(
         if let Err(err) = repos.remove(&team_slug, &slug).await {
             tracing::error!(
                 id = ws.id(),
-                error = %inert(&err.to_string()),
+                error = %inert_chain(&err),
                 "removing a deleted workspace's repository failed"
             );
             return Err(ApiError::internal("repository could not be removed"));
@@ -237,7 +239,7 @@ pub(super) async fn delete(
         Ok(StatusCode::NO_CONTENT)
     });
     let status = task.await.map_err(|err| {
-        tracing::error!(error = %err, "workspace deletion task failed");
+        log_join_failure(&err, Level::ERROR, "workspace deletion task failed");
         ApiError::internal("workspace deletion failed")
     })??;
     Ok(status)
@@ -343,7 +345,7 @@ fn repo_error(err: RepoError) -> ApiError {
             path.display()
         )),
         err => {
-            tracing::error!(error = %inert(&err.to_string()), "repository error");
+            tracing::error!(error = %inert_chain(&err), "repository error");
             ApiError::internal("repository error")
         }
     }

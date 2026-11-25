@@ -3,12 +3,16 @@
 use std::path::PathBuf;
 
 use crate::api::AppState;
+use crate::db::Db;
+use crate::db::overrides::Relaxation;
 use crate::git::GitEngine;
 use crate::git::access::PushContext;
 use crate::git::push::RefMove;
 use crate::kinds::{self, RuleSet};
 use crate::role::Role;
 use crate::secret_check::git::{Git, RefUpdate};
+use crate::secret_check::scan::Rejection;
+use crate::unicode::inert;
 
 /// Records `moves` for `push`: `Db::record_push`, one info line (`workspace_id`, `pusher`,
 /// `override_id`, `override_consumed`, `import_cleared`, `refs` as `ref old..new` joined by
@@ -58,7 +62,7 @@ pub(crate) async fn record(state: AppState, push: PushContext, moves: Vec<RefMov
             pusher,
             override_id,
             refs,
-            error = %err,
+            error = %inert(&err.to_string()),
             "could not record an accepted push"
         ),
     }
@@ -99,16 +103,19 @@ pub(crate) async fn recheck_admin_push(
         .workspace_kind()
         .and_then(kinds::by_name)
         .filter(|_| role == Role::Admin && !armed);
-    recheck(state.git(), push, rules, repo, updates).await;
+    recheck(state.git(), state.db(), push, rules, repo, updates).await;
 }
 
 /// The re-check itself over `repo` on a blocking thread: `log_accepted_relaxations` when `rules`
 /// is given, then `log_default_branch_rewrites`, `log_foreign_refs` and `log_tag_rewrites`,
 /// holding one of the engine's process slots throughout and with each git child under the
 /// engine's run limit. It waits for a slot without a timeout: the push is accepted, so its audit
-/// line should not drop under load. A re-check that cannot finish logs the warn line.
+/// line should not drop under load. A re-check that cannot finish logs the warn line. The
+/// findings of the last three then go to `Db::record_relaxations` in one call; a failed write
+/// logs at error and a workspace already gone logs at warn, and neither fails anything.
 pub(crate) async fn recheck(
     engine: &GitEngine,
+    db: &Db,
     push: &PushContext,
     rules: Option<&'static dyn RuleSet>,
     repo: PathBuf,
@@ -134,7 +141,7 @@ pub(crate) async fn recheck(
                     &git,
                 );
             }
-            crate::secret_check::log_default_branch_rewrites(
+            let mut found = crate::secret_check::log_default_branch_rewrites(
                 workspace_id,
                 &owned,
                 override_id,
@@ -142,18 +149,74 @@ pub(crate) async fn recheck(
                 &updates,
                 &git,
             );
-            crate::secret_check::log_foreign_refs(workspace_id, &owned, override_id, &updates);
-            crate::secret_check::log_tag_rewrites(workspace_id, &owned, override_id, &updates);
+            found.extend(crate::secret_check::log_foreign_refs(
+                workspace_id,
+                &owned,
+                override_id,
+                &updates,
+            ));
+            found.extend(crate::secret_check::log_tag_rewrites(
+                workspace_id,
+                &owned,
+                override_id,
+                &updates,
+            ));
+            relaxations(&found, &updates)
         })
         .await
-        .is_ok(),
-        None => false,
+        .ok(),
+        None => None,
     };
-    if !done {
+    let Some(found) = done else {
         tracing::warn!(
             workspace_id,
             pusher,
             "could not re-check an accepted admin push"
         );
+        return;
+    };
+    if found.is_empty() {
+        return;
     }
+    match db
+        .record_relaxations(workspace_id, pusher, override_id, &found)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            workspace_id,
+            pusher,
+            "workspace gone before its relaxations were recorded"
+        ),
+        // The info lines above stay the record; each failed row is named here.
+        Err(err) => {
+            for r in &found {
+                tracing::error!(
+                    workspace_id,
+                    pusher,
+                    "ref" = r.ref_name(),
+                    rule = r.rule(),
+                    error = %inert(&err.to_string()),
+                    "could not record a safety relaxation"
+                );
+            }
+        }
+    }
+}
+
+/// Pairs each finding with the update for its ref, so the row carries the shas it moved
+/// between. Ref names were checked as UTF-8 before the push ran.
+fn relaxations(found: &[Rejection], updates: &[RefUpdate]) -> Vec<Relaxation> {
+    found
+        .iter()
+        .filter_map(|r| {
+            let update = updates.iter().find(|u| u.name() == r.ref_name())?;
+            Some(Relaxation::new(
+                &String::from_utf8_lossy(r.ref_name()),
+                update.old().as_str(),
+                update.new().as_str(),
+                r.finding().rule(),
+            ))
+        })
+        .collect()
 }

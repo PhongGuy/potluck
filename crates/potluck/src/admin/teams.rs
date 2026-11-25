@@ -26,13 +26,17 @@ impl FromStr for WorkspaceRef {
             .filter(|(team, ws)| !team.is_empty() && !ws.is_empty() && !ws.contains('/'))
             .ok_or_else(|| "expected {team}/{ws}".to_owned())?;
         Ok(WorkspaceRef {
-            team: segment("team", team)
-                .map_err(|e| e.to_string())?
-                .to_string(),
-            ws: segment("workspace", ws)
-                .map_err(|e| e.to_string())?
-                .to_string(),
+            team: segment("team", team).map_err(with_reason)?.to_string(),
+            ws: segment("workspace", ws).map_err(with_reason)?.to_string(),
         })
+    }
+}
+
+/// clap shows only this string, so the name rule the error carries as its source goes in too.
+fn with_reason(err: AdminError) -> String {
+    match &err {
+        AdminError::BadName { reason, .. } => format!("{err}: {reason}"),
+        _ => err.to_string(),
     }
 }
 
@@ -198,4 +202,16 @@ fn one_team(team: &Value) -> String {
 
 fn one_workspace(workspace: &Value) -> String {
     output::workspaces(std::slice::from_ref(workspace))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slug::SlugError;
+
+    #[test]
+    fn a_bad_workspace_ref_says_which_rule_it_breaks() {
+        let err = "Team/ws".parse::<WorkspaceRef>().unwrap_err();
+        assert!(err.contains(&SlugError::Charset.to_string()), "{err}");
+    }
 }

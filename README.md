@@ -196,7 +196,7 @@ These families record today:
 - `potluck_git_slots_in_use` and `potluck_git_slots_limit`: git slots held now and configured.
 - `potluck_db_queue_depth`: database jobs waiting to run.
 - `potluck_update_available` and `potluck_update_checks_total`: whether a newer release was found, and update checks by outcome.
-- `potluck_git_requests_total`: git requests that reached the git engine, by service (`advertise`, `upload_pack`, `receive_pack`) and outcome (`ok`, `busy`, `overran`, `failed`).
+- `potluck_git_requests_total`: git requests that reached the git engine, by service (`advertise`, `upload_pack`, `receive_pack`) and outcome (`ok`, `busy`, `overran`, `failed`, and `cancelled` when the client hung up before any other outcome).
 - `potluck_git_slot_wait_seconds`: a histogram of how long each git request waited for a slot, whether or not it got one.
 - `potluck_pushes_total`: pushes by outcome (`accepted`, `refused`).
 - `potluck_push_refusals_total`: refusal findings from the push check, by code, rule and workspace kind. Past 128 distinct rules, new ones record as `other`; a rule literally named `other` records as `rule:other`. A rule literally named `unknown` records as `rule:unknown`, so `rule="unknown"` with `code="unknown"` counts only reports with no valid line.

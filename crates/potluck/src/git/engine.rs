@@ -16,7 +16,7 @@ use crate::git::push::{CommandError, RefCommand, RefMove, list_refs, moved, pars
 use crate::git::report::{self, HookReport};
 use crate::git::{Repos, Service, spool, sweep};
 use crate::metrics::{GitOutcome, GitService, Metrics};
-use crate::unicode::inert;
+use crate::unicode::{inert, inert_chain};
 
 /// The default for how long a git child may run from spawn: 30 min.
 pub(crate) const DEFAULT_MAX_RUNTIME_SECS: u64 = 1800;
@@ -159,7 +159,11 @@ impl GitEngine {
         repo: &Path,
         v2: bool,
     ) -> Result<Vec<u8>, GitError> {
+        // Until the inner future completes, a drop means the client went away; after it, the
+        // match below or `acquire`'s `Busy` owns the count.
+        let cancelled = CancelGuard::new(&self.metrics, GitService::Advertise);
         let result = self.advertise_unrecorded(service, repo, v2).await;
+        cancelled.disarm();
         let outcome = match &result {
             Ok(_) => Some(GitOutcome::Ok),
             Err(GitError::Busy) => None,
@@ -259,9 +263,13 @@ impl GitEngine {
         body: Body,
         on_push: Option<PushObserver>,
     ) -> Result<Body, GitError> {
+        // A drop before the inner future completes is a client that went away. Once it completes
+        // nothing awaits again, so the reaper, `acquire` or the match below owns the count.
+        let cancelled = CancelGuard::new(&self.metrics, git_service(service));
         let result = self
             .rpc_unrecorded(service, repo, v2, encoding, extra_env, body, on_push)
             .await;
+        cancelled.disarm();
         // A request that never reached the reaper is counted here; `acquire` counted a `Busy`,
         // and the reaper counts every request it took over.
         match &result {
@@ -415,7 +423,7 @@ impl GitEngine {
                 match list_refs(&repos, &repo_path).await {
                     Ok(after) => on_push(moved(&commands, &before, &after), report),
                     Err(err) => tracing::error!(
-                        error = %inert(&err.to_string()),
+                        error = %inert_chain(&err),
                         "cannot list refs after a push"
                     ),
                 }
@@ -462,12 +470,16 @@ impl GitEngine {
     }
 
     /// A process slot, or `Busy` once `queue_wait` has passed without one. The wait is recorded
-    /// either way, and a `Busy` is counted as the outcome of `service`'s request.
+    /// once on every path, a dropped wait included, and a `Busy` is counted as the outcome of
+    /// `service`'s request.
     async fn acquire(&self, service: GitService) -> Result<OwnedSemaphorePermit, GitError> {
-        let started = tokio::time::Instant::now();
+        let waited = SlotWait {
+            metrics: &self.metrics,
+            started: tokio::time::Instant::now(),
+        };
         let permit =
             tokio::time::timeout(self.queue_wait, Arc::clone(&self.permits).acquire_owned()).await;
-        self.metrics.slot_wait(started.elapsed().as_secs_f64());
+        drop(waited);
         match permit {
             Ok(Ok(permit)) => Ok(permit),
             _ => {
@@ -556,8 +568,32 @@ pub(super) fn process_group(child: &tokio::process::Child) -> Option<rustix::pro
 /// A pidfd for `child`, taken while it is unreaped so it names this process for good; `None`
 /// when the kernel cannot give one.
 fn leader_pidfd(child: &tokio::process::Child) -> Option<std::os::fd::OwnedFd> {
+    static WARNED: std::sync::Once = std::sync::Once::new();
     let pid = process_group(child)?;
-    rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()).ok()
+    pidfd_or_warn(
+        rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty()),
+        &WARNED,
+    )
+}
+
+/// The pidfd, or `None` after a failure; the first failure seen through `warned` logs one
+/// warning with the errno kind, since without a pidfd the reaper cannot wait out stray hooks.
+fn pidfd_or_warn(
+    pidfd: Result<std::os::fd::OwnedFd, rustix::io::Errno>,
+    warned: &std::sync::Once,
+) -> Option<std::os::fd::OwnedFd> {
+    pidfd
+        .inspect_err(|errno| {
+            warned.call_once(|| {
+                let error = std::io::Error::from(*errno);
+                tracing::warn!(
+                    kind = ?error.kind(),
+                    %error,
+                    "cannot take a pidfd for git, so the run limit cannot track stray hook processes on this host"
+                );
+            });
+        })
+        .ok()
 }
 
 /// Waits until the process behind `pidfd` exits, without reaping it.
@@ -636,6 +672,48 @@ fn git_service(service: Service) -> GitService {
     }
 }
 
+/// Records one slot wait when dropped, so a wait the client abandons is recorded like one that
+/// got a slot or ran out of time.
+struct SlotWait<'a> {
+    metrics: &'a Metrics,
+    started: tokio::time::Instant,
+}
+
+impl Drop for SlotWait<'_> {
+    fn drop(&mut self) {
+        self.metrics.slot_wait(self.started.elapsed().as_secs_f64());
+    }
+}
+
+/// Counts a `Cancelled` request for `service` when dropped unless disarmed: the request's future
+/// was dropped before the engine recorded any other outcome for it.
+struct CancelGuard<'a> {
+    metrics: &'a Metrics,
+    service: Option<GitService>,
+}
+
+impl<'a> CancelGuard<'a> {
+    fn new(metrics: &'a Metrics, service: GitService) -> Self {
+        Self {
+            metrics,
+            service: Some(service),
+        }
+    }
+
+    /// Hands the count to whoever records the request's real outcome.
+    fn disarm(mut self) {
+        self.service = None;
+    }
+}
+
+impl Drop for CancelGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(service) = self.service {
+            self.metrics.git_request(service, GitOutcome::Cancelled);
+        }
+    }
+}
+
 /// Kills and reaps git at the run limit, logs the one warning, and returns `Overran`.
 async fn overran(
     child: &mut tokio::process::Child,
@@ -684,13 +762,26 @@ async fn read_commands(
         file.rewind().map(|()| (file, parsed))
     })
     .await
-    .map_err(|err| GitError::Spawn(std::io::Error::other(err)))?
+    // The join error is never carried on: a panic payload is arbitrary text and can name paths.
+    .map_err(|err| {
+        let what = if err.is_panic() {
+            "panicked"
+        } else {
+            "was cancelled"
+        };
+        GitError::Spawn(std::io::Error::other(format!(
+            "parsing the command list {what}"
+        )))
+    })?
     .map_err(GitError::Spawn)?;
     match parsed {
         Ok(commands) => Ok((file, commands)),
         Err(CommandError::TooMany { limit }) => Err(GitError::TooManyCommands { limit }),
         Err(err) => {
-            tracing::warn!(error = %err, "cannot parse the receive-pack command list");
+            tracing::warn!(
+                error = &err as &dyn std::error::Error,
+                "cannot parse the receive-pack command list"
+            );
             Ok((file, Vec::new()))
         }
     }
@@ -738,10 +829,10 @@ pub enum GitError {
     #[error("request body did not complete within {0:?}")]
     SlowBody(Duration),
     /// The body could not be read or inflated: 400 `invalid_request`.
-    #[error("request body could not be read: {0}")]
+    #[error("request body could not be read")]
     Body(#[source] std::io::Error),
     /// The spool file or the child could not be set up: 500 `internal`.
-    #[error("cannot run git: {0}")]
+    #[error("cannot run git")]
     Spawn(#[source] std::io::Error),
     /// git exited non-zero before any output was sent (advertisement only): 500 `internal`.
     #[error("git failed: {stderr}")]
@@ -779,15 +870,16 @@ impl From<GitError> for ApiError {
         match err {
             GitError::Busy => ApiError::unavailable("git is busy; retry shortly"),
             GitError::TooLarge { .. } => ApiError::payload_too_large(err.to_string()),
-            GitError::BadEncoding(_)
-            | GitError::SlowBody(_)
-            | GitError::Body(_)
-            | GitError::TooManyCommands { .. } => ApiError::invalid_request(err.to_string()),
+            // The read error is the useful part for the client, and the variant's own text omits it.
+            GitError::Body(ref source) => ApiError::invalid_request(format!("{err}: {source}")),
+            GitError::BadEncoding(_) | GitError::SlowBody(_) | GitError::TooManyCommands { .. } => {
+                ApiError::invalid_request(err.to_string())
+            }
             GitError::Spawn(_)
             | GitError::Failed { .. }
             | GitError::HookMissing { .. }
             | GitError::Overran { .. } => {
-                tracing::error!(error = %inert(&err.to_string()), "git error");
+                tracing::error!(error = %inert_chain(&err), "git error");
                 ApiError::internal("git failed")
             }
         }
@@ -1054,6 +1146,127 @@ mod tests {
             .advertise(Service::UploadPack, &repo, false)
             .await
             .unwrap();
+    }
+
+    /// The value of `series` in the engine's metrics exposition, 0 when absent.
+    fn metric(engine: &GitEngine, series: &str) -> f64 {
+        let text = engine.metrics.render(&crate::metrics::Snapshot::default());
+        crate::metrics::sample(&text, series).unwrap_or(0.0)
+    }
+
+    fn requests(engine: &GitEngine, service: &str, outcome: &str) -> f64 {
+        metric(
+            engine,
+            &format!("potluck_git_requests_total{{service=\"{service}\",outcome=\"{outcome}\"}}"),
+        )
+    }
+
+    fn slot_waits(engine: &GitEngine) -> f64 {
+        metric(engine, "potluck_git_slot_wait_seconds_count")
+    }
+
+    #[tokio::test]
+    async fn an_advertisement_dropped_while_waiting_for_a_slot_is_counted_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), limits(1, 30_000)).await;
+        let held = engine.slot().await.unwrap();
+        let mut fut = Box::pin(engine.advertise(Service::UploadPack, &repo, false));
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut fut).await;
+        assert!(waited.is_err(), "the request is still waiting for the slot");
+        drop(fut);
+        assert_eq!(slot_waits(&engine), 1.0, "the abandoned wait is recorded");
+        assert_eq!(requests(&engine, "advertise", "cancelled"), 1.0);
+        assert_eq!(requests(&engine, "advertise", "busy"), 0.0);
+        assert_eq!(requests(&engine, "advertise", "failed"), 0.0);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn an_rpc_dropped_while_waiting_for_a_slot_is_counted_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), limits(1, 30_000)).await;
+        let held = engine.slot().await.unwrap();
+        let body = Body::from("0014command=ls-refs\n0000");
+        let mut fut = Box::pin(engine.rpc(Service::UploadPack, &repo, true, None, &[], body, None));
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut fut).await;
+        assert!(waited.is_err(), "the request is still waiting for the slot");
+        drop(fut);
+        assert_eq!(slot_waits(&engine), 1.0, "the abandoned wait is recorded");
+        assert_eq!(requests(&engine, "upload_pack", "cancelled"), 1.0);
+        assert_eq!(requests(&engine, "upload_pack", "failed"), 0.0);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn an_rpc_dropped_mid_spool_is_counted_cancelled_and_frees_the_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), limits(1, 30_000)).await;
+        let stalled = Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >());
+        let mut fut =
+            Box::pin(engine.rpc(Service::UploadPack, &repo, true, None, &[], stalled, None));
+        let waited = tokio::time::timeout(Duration::from_millis(50), &mut fut).await;
+        assert!(waited.is_err(), "the request is still spooling");
+        assert_eq!(
+            engine.permits.available_permits(),
+            0,
+            "the spool holds the slot"
+        );
+        drop(fut);
+        assert_eq!(engine.permits.available_permits(), 1, "the slot is back");
+        assert_eq!(slot_waits(&engine), 1.0);
+        assert_eq!(requests(&engine, "upload_pack", "cancelled"), 1.0);
+        assert_eq!(requests(&engine, "upload_pack", "failed"), 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_busy_answer_is_counted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), limits(1, 50)).await;
+        let held = engine.slot().await.unwrap();
+        let err = engine
+            .advertise(Service::UploadPack, &repo, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GitError::Busy), "got {err:?}");
+        assert_eq!(slot_waits(&engine), 1.0);
+        assert_eq!(requests(&engine, "advertise", "busy"), 1.0);
+        assert_eq!(requests(&engine, "advertise", "cancelled"), 0.0);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_successful_advertisement_is_counted_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        engine
+            .advertise(Service::UploadPack, &repo, false)
+            .await
+            .unwrap();
+        assert_eq!(slot_waits(&engine), 1.0);
+        assert_eq!(requests(&engine, "advertise", "ok"), 1.0);
+        assert_eq!(requests(&engine, "advertise", "cancelled"), 0.0);
+    }
+
+    #[tokio::test]
+    async fn a_successful_rpc_is_counted_once_by_the_reaper() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, repo) = engine_in(dir.path(), GitLimits::default()).await;
+        seed_commit(&repo, dir.path());
+        let body = Body::from("0014command=ls-refs\n0000");
+        let out = engine
+            .rpc(Service::UploadPack, &repo, true, None, &[], body, None)
+            .await
+            .unwrap();
+        let _ = collect(out).await;
+        engine.tasks.close();
+        tokio::time::timeout(Duration::from_secs(10), engine.tasks.wait())
+            .await
+            .unwrap();
+        assert_eq!(slot_waits(&engine), 1.0);
+        assert_eq!(requests(&engine, "upload_pack", "ok"), 1.0);
+        assert_eq!(requests(&engine, "upload_pack", "cancelled"), 0.0);
     }
 
     #[test]
@@ -2448,6 +2661,51 @@ mod tests {
         }
     }
 
+    /// The lines logged on this thread while `f` runs.
+    fn thread_logs(f: impl FnOnce()) -> String {
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || SharedSink(std::sync::Arc::clone(&sink)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(logs.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn a_missing_pidfd_warns_once_with_its_errno_kind() {
+        let warned = std::sync::Once::new();
+        let first = thread_logs(|| {
+            let fd = pidfd_or_warn(Err(rustix::io::Errno::NOSYS), &warned);
+            assert!(fd.is_none());
+        });
+        assert!(first.contains("WARN"), "{first}");
+        assert!(
+            first.contains("cannot track stray hook processes"),
+            "{first}"
+        );
+        assert!(first.contains("Unsupported"), "no errno kind: {first}");
+        assert!(!first.contains('/'), "a path leaked: {first}");
+
+        let second = thread_logs(|| {
+            assert!(pidfd_or_warn(Err(rustix::io::Errno::PERM), &warned).is_none());
+        });
+        assert!(second.is_empty(), "warned twice: {second}");
+    }
+
+    #[test]
+    fn a_taken_pidfd_passes_through_without_a_warning() {
+        let warned = std::sync::Once::new();
+        // Any open fd stands in for a pidfd, so the test holds on hosts without pidfd_open.
+        let fd = Ok(std::fs::File::open("/dev/null").unwrap().into());
+        let logs = thread_logs(|| {
+            assert!(pidfd_or_warn(fd, &warned).is_some());
+        });
+        assert!(logs.is_empty(), "{logs}");
+        assert!(!warned.is_completed(), "a success spent the one warning");
+    }
+
     /// An engine whose git is the script `body` and whose limits are `limits`; no repository.
     fn recheck_engine(dir: &Path, limits: GitLimits, body: &str) -> GitEngine {
         let git = dir.join("recheck-git");
@@ -2470,6 +2728,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_admin_recheck_waits_for_a_process_slot() {
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), 1).await;
         let ran = dir.path().join("ran.log");
         let body = format!("echo \"$1\" >> '{}'\nexit 128\n", ran.display());
         let engine = Arc::new(recheck_engine(dir.path(), limits(1, 100), &body));
@@ -2481,6 +2740,7 @@ mod tests {
             tokio::spawn(async move {
                 crate::api::pushes::recheck(
                     &engine,
+                    &db,
                     &crate::git::access::PushContext::new(1, "admin"),
                     Some(rules),
                     repo,
@@ -2499,11 +2759,24 @@ mod tests {
         assert!(ran.exists(), "git runs once the slot frees");
     }
 
+    #[test]
+    fn a_git_server_fault_logs_its_cause() {
+        let logs = global_logs();
+        let _ = ApiError::from(GitError::Spawn(std::io::Error::other("spool-cause-5306")));
+        let text = String::from_utf8_lossy(&logs.lock().unwrap()).into_owned();
+        assert!(
+            text.lines()
+                .any(|l| l.contains("git error") && l.contains("spool-cause-5306")),
+            "{text}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_admin_recheck_stops_at_the_run_limit_and_warns() {
         const WORKSPACE: i64 = 919_198;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         let short = limits(1, 100).with_max_runtime(Duration::from_secs(1));
         let engine = recheck_engine(dir.path(), short, "exec sleep 30\n");
         let rules = crate::kinds::by_name("apinata").unwrap();
@@ -2513,6 +2786,7 @@ mod tests {
             Duration::from_secs(20),
             crate::api::pushes::recheck(
                 &engine,
+                &db,
                 &crate::git::access::PushContext::new(WORKSPACE, "admin"),
                 Some(rules),
                 repo,
@@ -2540,6 +2814,7 @@ mod tests {
         const WORKSPACE: i64 = 919_199;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         // A delete needs no git call, so a git that always fails proves none ran.
         let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
         let line = format!("{} {} refs/heads/main", "b".repeat(40), "0".repeat(40));
@@ -2548,7 +2823,8 @@ mod tests {
         let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
             .override_id(Some(5))
             .default_branch("main");
-        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), delete).await;
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), delete)
+            .await;
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         let line = text
             .lines()
@@ -2567,6 +2843,7 @@ mod tests {
         const WORKSPACE: i64 = 919_200;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         // Ref names alone decide, so a git that always fails proves none ran.
         let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
         let line = format!("{} {} refs/notes/x", "0".repeat(40), "b".repeat(40));
@@ -2575,7 +2852,8 @@ mod tests {
         let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
             .override_id(Some(5))
             .default_branch("main");
-        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), create).await;
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), create)
+            .await;
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         let line = text
             .lines()
@@ -2594,6 +2872,7 @@ mod tests {
         const WORKSPACE: i64 = 919_201;
         let logs = global_logs();
         let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
         // Raw values alone decide, so a git that always fails proves none ran.
         let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
         let line = format!("{} {} refs/tags/v1", "a".repeat(40), "b".repeat(40));
@@ -2601,7 +2880,8 @@ mod tests {
         let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
             .override_id(Some(5))
             .default_branch("main");
-        crate::api::pushes::recheck(&engine, &push, None, dir.path().join("repo"), moved).await;
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), moved)
+            .await;
         let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         let line = text
             .lines()
@@ -2612,6 +2892,83 @@ mod tests {
         for needle in ["override_id=5", "bob", "refs/tags/v1", "tag_move"] {
             assert!(line.contains(needle), "{needle} in {line}");
         }
+    }
+
+    /// A migrated database with user `bob`, workspace `workspace` as `core/api`, and override 5
+    /// for bob on it.
+    async fn relaxation_db(dir: &Path, workspace: i64) -> crate::db::Db {
+        let db = crate::db::Db::open(&dir.join("server.db")).unwrap();
+        db.migrate().await.unwrap();
+        db.call(move |c| {
+            c.execute_batch(&format!(
+                "INSERT INTO users (id, username, display_name, created_at) VALUES (1, 'bob', 'Bob', '2026-01-01T00:00:00Z');
+                 INSERT INTO teams (id, slug, name) VALUES (1, 'core', 'Core');
+                 INSERT INTO workspaces (id, team_id, slug, name, kind, default_branch, import_pending, created_at)
+                     VALUES ({workspace}, 1, 'api', 'API', 'apinata', 'main', 0, '2026-01-01T00:00:00Z');
+                 INSERT INTO overrides (id, workspace_id, for_user_id, reason, armed_by, armed_at)
+                     VALUES (5, {workspace}, 1, 'fix', 'system', '2026-01-01T00:00:00Z');"
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        db
+    }
+
+    /// The `push.relaxation` details, oldest first.
+    async fn relaxation_details(db: &crate::db::Db) -> Vec<serde_json::Value> {
+        let filter = crate::db::audit::AuditFilter::new().action("push.relaxation");
+        let mut rows = db.audit(filter).await.unwrap();
+        rows.reverse();
+        rows.iter()
+            .map(|r| serde_json::from_str(r.detail().unwrap()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_override_recheck_records_a_default_branch_delete_naming_the_override() {
+        const WORKSPACE: i64 = 919_202;
+        let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
+        // A delete needs no git call, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let (b, zero) = ("b".repeat(40), "0".repeat(40));
+        let line = format!("{b} {zero} refs/heads/main");
+        let delete =
+            vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob")
+            .override_id(Some(5))
+            .default_branch("main");
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), delete)
+            .await;
+        assert_eq!(
+            relaxation_details(&db).await,
+            [serde_json::json!({
+                "ref": "refs/heads/main", "old": b, "new": zero, "rule": "branch_delete", "override": 5
+            })]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_admin_recheck_records_a_foreign_ref_with_no_override() {
+        const WORKSPACE: i64 = 919_203;
+        let dir = tempfile::tempdir().unwrap();
+        let db = relaxation_db(dir.path(), WORKSPACE).await;
+        // Ref names alone decide, so a git that always fails proves none ran.
+        let engine = recheck_engine(dir.path(), limits(1, 100), "exit 128\n");
+        let (b, zero) = ("b".repeat(40), "0".repeat(40));
+        let line = format!("{zero} {b} refs/notes/x");
+        let create =
+            vec![crate::secret_check::git::RefUpdate::parse_line(line.as_bytes()).unwrap()];
+        let push = crate::git::access::PushContext::new(WORKSPACE, "bob").default_branch("main");
+        crate::api::pushes::recheck(&engine, &db, &push, None, dir.path().join("repo"), create)
+            .await;
+        assert_eq!(
+            relaxation_details(&db).await,
+            [serde_json::json!({
+                "ref": "refs/notes/x", "old": zero, "new": b, "rule": "ref_namespace", "override": null
+            })]
+        );
     }
 
     use crate::metrics::{Metrics, Snapshot, sample};

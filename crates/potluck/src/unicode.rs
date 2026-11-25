@@ -52,6 +52,19 @@ pub(crate) fn is_format(c: char) -> bool {
     )
 }
 
+/// `err` and each of its sources joined by `": "`, the way anyhow's `{:#}` renders a chain,
+/// then made [`inert`]: an error's text may quote git stderr, paths or pushed names.
+pub(crate) fn inert_chain(err: &dyn std::error::Error) -> String {
+    let mut text = err.to_string();
+    let mut source = err.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    inert(&text).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::inert;
@@ -76,6 +89,30 @@ mod tests {
     #[test]
     fn line_and_paragraph_separators_are_escaped() {
         assert_eq!(inert("a\u{2028}b\u{2029}"), r"a\u{2028}b\u{2029}");
+    }
+
+    #[derive(Debug)]
+    struct Outer(std::io::Error);
+
+    impl std::fmt::Display for Outer {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("cannot list refs")
+        }
+    }
+
+    impl std::error::Error for Outer {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_chain_names_each_cause_once_and_escapes_it() {
+        let err = Outer(std::io::Error::other("ref eve\u{202E}gnp"));
+        assert_eq!(
+            super::inert_chain(&err),
+            r"cannot list refs: ref eve\u{202e}gnp"
+        );
     }
 
     #[test]

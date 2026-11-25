@@ -952,7 +952,7 @@ fn kill_group(group: Pid) {
 #[non_exhaustive]
 pub enum GitCmdError {
     /// git could not be started, or its output could not be read.
-    #[error("cannot run git {subcommand}: {source}")]
+    #[error("cannot run git {subcommand}")]
     Spawn {
         /// The subcommand.
         subcommand: &'static str,

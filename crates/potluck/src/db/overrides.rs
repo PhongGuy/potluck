@@ -3,7 +3,7 @@
 
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use super::audit::{self, AuditAction, AuditCtx, Entry, OverrideUsed};
+use super::audit::{self, AuditAction, AuditCtx, Entry, OverrideUsed, PushRelaxed};
 use super::workspaces::team_ws_name;
 use super::{Db, DbError};
 use crate::clock;
@@ -94,6 +94,37 @@ impl Recorded {
     /// Whether the workspace was in import state and is no longer.
     pub fn import_cleared(&self) -> bool {
         self.import_cleared
+    }
+}
+
+/// One safety rule an accepted push relaxed on one ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Relaxation {
+    ref_name: String,
+    old: String,
+    new: String,
+    rule: &'static str,
+}
+
+impl Relaxation {
+    /// `ref_name` moved from `old` to `new` under the relaxed `rule`.
+    pub(crate) fn new(ref_name: &str, old: &str, new: &str, rule: &'static str) -> Self {
+        Self {
+            ref_name: ref_name.to_owned(),
+            old: old.to_owned(),
+            new: new.to_owned(),
+            rule,
+        }
+    }
+
+    /// The ref moved.
+    pub(crate) fn ref_name(&self) -> &str {
+        &self.ref_name
+    }
+
+    /// The relaxed rule.
+    pub(crate) fn rule(&self) -> &'static str {
+        self.rule
     }
 }
 
@@ -261,6 +292,49 @@ impl Db {
         })
         .await
     }
+    /// Writes one `push.relaxation` row per finding in one transaction: actor `pusher`, looked up
+    /// by username, target and workspace the workspace by `{team}/{ws}`, and detail `PushRelaxed`
+    /// naming `override_id`. Returns false, writing nothing, when the workspace is gone; a missing
+    /// pusher is `DbError::Sqlite`. All rows persist or none does.
+    pub(crate) async fn record_relaxations(
+        &self,
+        workspace_id: i64,
+        pusher: &str,
+        override_id: Option<i64>,
+        found: &[Relaxation],
+    ) -> Result<bool, DbError> {
+        let pusher = pusher.to_owned();
+        let found = found.to_vec();
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let Some(workspace) = team_ws_name(&tx, workspace_id)? else {
+                return Ok(false);
+            };
+            let pusher_id: i64 = tx.query_row(
+                "SELECT id FROM users WHERE username = ?1",
+                [&pusher],
+                |row| row.get(0),
+            )?;
+            let ctx = AuditCtx::user(pusher_id, &pusher);
+            for r in &found {
+                let detail = PushRelaxed {
+                    ref_name: &r.ref_name,
+                    old: &r.old,
+                    new: &r.new,
+                    rule: r.rule,
+                    override_id,
+                };
+                let entry = Entry::new(AuditAction::PushRelaxation)
+                    .target("workspace", Some(workspace_id), Some(&workspace))
+                    .workspace(&workspace)
+                    .detail(&detail)?;
+                audit::insert(&tx, &ctx, &entry)?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +442,139 @@ mod tests {
             import_pending(&db).await,
             "the import state did not change either"
         );
+    }
+
+    fn relaxation(ref_name: &str, old: &str, new: &str, rule: &'static str) -> Relaxation {
+        Relaxation::new(ref_name, old, new, rule)
+    }
+
+    async fn relaxation_rows(db: &Db) -> Vec<super::super::audit::AuditRecord> {
+        let filter = super::super::audit::AuditFilter::new().action("push.relaxation");
+        let mut rows = db.audit(filter).await.unwrap();
+        rows.reverse();
+        rows
+    }
+
+    #[tokio::test]
+    async fn each_relaxation_is_one_push_relaxation_row_by_the_pusher() {
+        let (_dir, db, ws, ov) = seeded().await;
+        let b = "b".repeat(40);
+        let found = [
+            relaxation("refs/heads/main", A, &b, "force_push"),
+            relaxation("refs/tags/v1", A, ZERO_SHA, "tag_delete"),
+        ];
+        let written = db
+            .record_relaxations(ws, "bob", Some(ov), &found)
+            .await
+            .unwrap();
+        assert!(written);
+        let rows = relaxation_rows(&db).await;
+        let shape: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.actor_kind().to_owned(),
+                    r.actor_id(),
+                    r.actor_name().map(str::to_owned),
+                    r.target_kind().map(str::to_owned),
+                    r.target_id(),
+                    r.target_name().map(str::to_owned),
+                    r.workspace().map(str::to_owned),
+                    serde_json::from_str::<serde_json::Value>(r.detail().unwrap()).unwrap(),
+                )
+            })
+            .collect();
+        let row = |detail: serde_json::Value| {
+            (
+                "user".to_owned(),
+                Some(1),
+                Some("bob".to_owned()),
+                Some("workspace".to_owned()),
+                Some(ws),
+                Some("core/api".to_owned()),
+                Some("core/api".to_owned()),
+                detail,
+            )
+        };
+        assert_eq!(
+            shape,
+            [
+                row(
+                    serde_json::json!({"ref": "refs/heads/main", "old": A, "new": b, "rule": "force_push", "override": ov})
+                ),
+                row(
+                    serde_json::json!({"ref": "refs/tags/v1", "old": A, "new": ZERO_SHA, "rule": "tag_delete", "override": ov})
+                ),
+            ]
+        );
+        // The rows are change rows: only the change class prunes them.
+        let later = "2999-01-01T00:00:00Z";
+        assert_eq!(
+            db.prune_audit(super::super::audit::AuditClass::SignInFailures, later, 100)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.prune_audit(super::super::audit::AuditClass::Changes, later, 100)
+                .await
+                .unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_override_the_detail_names_none() {
+        let (_dir, db, ws, _) = seeded().await;
+        let found = [relaxation("refs/notes/x", ZERO_SHA, A, "ref_namespace")];
+        assert!(
+            db.record_relaxations(ws, "bob", None, &found)
+                .await
+                .unwrap()
+        );
+        let rows = relaxation_rows(&db).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(rows[0].detail().unwrap()).unwrap(),
+            serde_json::json!({"ref": "refs/notes/x", "old": ZERO_SHA, "new": A, "rule": "ref_namespace", "override": null})
+        );
+    }
+
+    #[tokio::test]
+    async fn one_failed_insert_writes_none_of_the_rows() {
+        let (_dir, db, ws, _) = seeded().await;
+        db.call(|c| {
+            Ok(c.execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON audit WHEN NEW.detail LIKE '%refs/tags/v2%' BEGIN SELECT RAISE(ABORT, 'boom'); END",
+            )?)
+        })
+        .await
+        .unwrap();
+        let found = [
+            relaxation("refs/tags/v1", A, ZERO_SHA, "tag_delete"),
+            relaxation("refs/tags/v2", A, ZERO_SHA, "tag_delete"),
+        ];
+        let err = db
+            .record_relaxations(ws, "bob", None, &found)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, DbError::Sqlite(ref m) if m.contains("boom")),
+            "got {err:?}"
+        );
+        assert!(relaxation_rows(&db).await.is_empty(), "all or none");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_workspace_gets_no_row() {
+        let (_dir, db, _, _) = seeded().await;
+        let found = [relaxation("refs/heads/main", A, ZERO_SHA, "branch_delete")];
+        assert!(
+            !db.record_relaxations(99, "bob", None, &found)
+                .await
+                .unwrap()
+        );
+        assert!(relaxation_rows(&db).await.is_empty());
     }
 
     #[tokio::test]
